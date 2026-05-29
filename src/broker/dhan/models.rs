@@ -42,6 +42,18 @@ pub struct HistoricalRequest<'a> {
     pub to_date: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntradayRequest {
+    pub security_id: String,
+    pub exchange_segment: String,
+    pub instrument: String,
+    pub interval: String,
+    pub oi: bool,
+    pub from_date: String,
+    pub to_date: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct HistoricalResponse {
     pub timestamp: Vec<Option<f64>>,

@@ -15,7 +15,6 @@ use super::{
 };
 
 const DHAN_BASE_URL: &str = "https://api.dhan.co/v2";
-const DHAN_EPOCH_OFFSET_SECONDS: i64 = 315_532_800;
 const INTRADAY_CHUNK_MS: i64 = 89 * 24 * 60 * 60 * 1_000;
 
 #[derive(Debug, Clone)]
@@ -67,14 +66,6 @@ impl DhanClient {
                 .context("Dhan access token contains invalid header characters")?,
         );
 
-        if let Some(client_id) = &self.auth.client_id {
-            headers.insert(
-                "client-id",
-                HeaderValue::from_str(client_id)
-                    .context("Dhan client id contains invalid header characters")?,
-            );
-        }
-
         Ok(headers)
     }
 
@@ -117,7 +108,7 @@ impl DhanClient {
             return None;
         }
 
-        Some(((timestamp as i64) + DHAN_EPOCH_OFFSET_SECONDS) * 1_000)
+        Some((timestamp as i64) * 1_000)
     }
 
     pub fn unix_ms_to_dhan_date(timestamp: i64) -> Result<String> {
@@ -336,12 +327,14 @@ fn finite(value: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
+    use std::{env, fs};
 
     #[test]
-    fn converts_dhan_epoch_to_unix_ms_like_python_helper() {
+    fn converts_dhan_unix_seconds_to_unix_ms() {
         assert_eq!(
-            DhanClient::dhan_timestamp_to_unix_ms(0.0),
-            Some(315_532_800_000)
+            DhanClient::dhan_timestamp_to_unix_ms(1_779_820_200.0),
+            Some(1_779_820_200_000)
         );
     }
 
@@ -398,5 +391,50 @@ mod tests {
         let chunks = DhanClient::chunk_date_range(from, to);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], (from, to));
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live Dhan API and requires DHAN_ACCESS_TOKEN"]
+    async fn live_fetch() {
+        load_dotenv_for_test();
+
+        let client = DhanClient::from_env().expect("Set DHAN_ACCESS_TOKEN in .env or the shell");
+        let symbol =
+            env::var("DHAN_TEST_SYMBOL").unwrap_or_else(|_| "2885|NSE_EQ|EQUITY".to_string());
+        let to = Utc::now().timestamp_millis();
+        let from = (Utc::now() - Duration::days(30)).timestamp_millis();
+
+        let candles = client
+            .get_ohlcv(&symbol, Timeframe::D1, from, to)
+            .await
+            .expect("live Dhan OHLCV fetch failed");
+
+        println!("Fetched {} candles for {}", candles.len(), symbol);
+        if let Some(last) = candles.last() {
+            println!("Last candle: {:?}", last);
+        }
+
+        assert!(!candles.is_empty(), "Dhan returned no candles");
+    }
+
+    fn load_dotenv_for_test() {
+        let Ok(contents) = fs::read_to_string(".env") else {
+            return;
+        };
+
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+
+            if env::var(key.trim()).is_err() {
+                env::set_var(key.trim(), value.trim().trim_matches('"'));
+            }
+        }
     }
 }
