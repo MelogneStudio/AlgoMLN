@@ -1,9 +1,10 @@
-# Dhan Client — Full App Plan
+# AlgoMLN — Full App Plan
 
 ## What It Is
 A desktop trading client built on Dhan API (Upstox later).
 Polished, fast, offline, no bloat.
 Works out of the box for normal traders. Goes deep for algo people.
+Built for algo traders, by algo trader
 
 ---
 

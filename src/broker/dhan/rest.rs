@@ -11,11 +11,12 @@ use crate::{
 
 use super::{
     auth::DhanAuth,
-    models::{DhanQuoteValue, DhanSymbol, HistoricalRequest, HistoricalResponse, IntradayRequest},
+    models::{DhanQuoteValue, DhanSymbol, HistoricalResponse, IntradayRequest},
 };
 
 const DHAN_BASE_URL: &str = "https://api.dhan.co/v2";
 const INTRADAY_CHUNK_MS: i64 = 89 * 24 * 60 * 60 * 1_000;
+const DHAN_HISTORICAL_EPOCH_OFFSET_SECONDS: i64 = 315_532_800;
 
 #[derive(Debug, Clone)]
 pub struct DhanConfig {
@@ -82,6 +83,8 @@ impl DhanClient {
         path: &str,
         body: impl serde::Serialize,
     ) -> Result<T> {
+        let request_body =
+            serde_json::to_string(&body).unwrap_or_else(|_| "<unserializable>".to_string());
         let response = self
             .http
             .post(format!("{}{}", self.config.base_url, path))
@@ -94,7 +97,7 @@ impl DhanClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            bail!("Dhan request {path} failed with {status}: {body}");
+            bail!("Dhan request {path} failed with {status}: {body}; request body: {request_body}");
         }
 
         response
@@ -109,6 +112,14 @@ impl DhanClient {
         }
 
         Some((timestamp as i64) * 1_000)
+    }
+
+    pub fn dhan_historical_timestamp_to_unix_ms(timestamp: f64) -> Option<i64> {
+        if !timestamp.is_finite() {
+            return None;
+        }
+
+        Some(((timestamp as i64) + DHAN_HISTORICAL_EPOCH_OFFSET_SECONDS) * 1_000)
     }
 
     pub fn unix_ms_to_dhan_date(timestamp: i64) -> Result<String> {
@@ -143,6 +154,20 @@ impl DhanClient {
     }
 
     fn candles_from_response(response: HistoricalResponse) -> Vec<Candle> {
+        Self::candles_from_response_with_timestamp(response, Self::dhan_timestamp_to_unix_ms)
+    }
+
+    fn candles_from_historical_response(response: HistoricalResponse) -> Vec<Candle> {
+        Self::candles_from_response_with_timestamp(
+            response,
+            Self::dhan_historical_timestamp_to_unix_ms,
+        )
+    }
+
+    fn candles_from_response_with_timestamp(
+        response: HistoricalResponse,
+        timestamp_to_unix_ms: fn(f64) -> Option<i64>,
+    ) -> Vec<Candle> {
         let mut candles = response
             .timestamp
             .into_iter()
@@ -152,7 +177,7 @@ impl DhanClient {
             .zip(response.close)
             .zip(response.volume)
             .filter_map(|(((((timestamp, open), high), low), close), volume)| {
-                let timestamp = Self::dhan_timestamp_to_unix_ms(timestamp?)?;
+                let timestamp = timestamp_to_unix_ms(timestamp?)?;
                 let open = finite(open?)?;
                 let high = finite(high?)?;
                 let low = finite(low?)?;
@@ -243,19 +268,20 @@ impl BrokerClient for DhanClient {
         }
 
         // daily / weekly — existing path
-        let body = HistoricalRequest {
-            security_id: &symbol.security_id,
-            exchange_segment: &symbol.exchange_segment,
-            instrument: &symbol.instrument,
-            expiry_code: 0,
-            from_date: Self::unix_ms_to_dhan_date(from)?,
-            to_date: Self::unix_ms_to_dhan_date(to)?,
-        };
+        let body = serde_json::json!({
+            "securityId": symbol.security_id,
+            "exchangeSegment": symbol.exchange_segment,
+            "instrument": symbol.instrument,
+            "expiryCode": 0,
+            "oi": "false",
+            "fromDate": Self::unix_ms_to_dhan_date(from)?,
+            "toDate": Self::unix_ms_to_dhan_date(to)?,
+        });
 
         let response = self
             .post::<HistoricalResponse>("/charts/historical", body)
             .await?;
-        Ok(Self::candles_from_response(response))
+        Ok(Self::candles_from_historical_response(response))
     }
 
     async fn get_quote(&self, symbol: &str) -> Result<Quote> {
@@ -335,6 +361,14 @@ mod tests {
         assert_eq!(
             DhanClient::dhan_timestamp_to_unix_ms(1_779_820_200.0),
             Some(1_779_820_200_000)
+        );
+    }
+
+    #[test]
+    fn converts_dhan_historical_seconds_to_unix_ms() {
+        assert_eq!(
+            DhanClient::dhan_historical_timestamp_to_unix_ms(0.0),
+            Some(315_532_800_000)
         );
     }
 

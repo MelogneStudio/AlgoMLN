@@ -52,11 +52,21 @@ export function useCandleData(symbol: string, timeframe: string): CandleDataStat
 }
 
 function getRangeForTimeframe(timeframe: string) {
-  const to = Date.now()
+  const to = timeframe === 'D1' || timeframe === 'W1' ? previousWeekdayNoonUtc() : Date.now()
   const days = timeframe === 'D1' || timeframe === 'W1' ? 365 : 30
 
   return {
     from: to - days * DAY_MS,
     to
   }
+}
+
+function previousWeekdayNoonUtc() {
+  const date = new Date()
+
+  do {
+    date.setDate(date.getDate() - 1)
+  } while (date.getDay() === 0 || date.getDay() === 6)
+
+  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate(), 12)
 }

@@ -33,17 +33,6 @@ impl DhanSymbol {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HistoricalRequest<'a> {
-    pub security_id: &'a str,
-    pub exchange_segment: &'a str,
-    pub instrument: &'a str,
-    pub expiry_code: i32,
-    pub from_date: String,
-    pub to_date: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct IntradayRequest {
     pub security_id: String,
     pub exchange_segment: String,
