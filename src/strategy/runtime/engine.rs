@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +14,7 @@ use crate::strategy::logging::{LogEntry, LogEntryKind, StrategyLogger};
 
 use super::context::EvalContext;
 use super::cross::CrossDetector;
-use super::indicator_provider::{FullRecomputeProvider, IndicatorProvider};
+use super::indicator_provider::{FullRecomputeProvider, IndicatorProvider, IndicatorProviderProfile};
 use super::trigger_state::TriggerStateMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,6 +52,17 @@ pub struct StrategyEngine {
     trigger_state: TriggerStateMap,
     indicator_provider: Box<dyn IndicatorProvider>,
     logger: StrategyLogger,
+    profile: StrategyEngineProfile,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StrategyEngineProfile {
+    pub on_candle_calls: u64,
+    pub on_candle_time: Duration,
+    pub broker_execute_calls: u64,
+    pub broker_execute_time: Duration,
+    pub broker_get_positions_calls: u64,
+    pub broker_get_positions_time: Duration,
 }
 
 impl StrategyEngine {
@@ -62,15 +74,21 @@ impl StrategyEngine {
             trigger_state: TriggerStateMap::new(),
             indicator_provider: Box::new(FullRecomputeProvider::new()),
             logger,
+            profile: StrategyEngineProfile::default(),
         }
     }
 
     pub async fn on_candle(&mut self, candles: &[Candle]) -> Vec<LogEntry> {
+        let started = Instant::now();
+        self.profile.on_candle_calls += 1;
+
         if !matches!(self.instance.status, StrategyStatus::Running) {
+            self.profile.on_candle_time += started.elapsed();
             return Vec::new();
         }
 
         let Some(ctx) = EvalContext::new(candles) else {
+            self.profile.on_candle_time += started.elapsed();
             return Vec::new();
         };
 
@@ -130,7 +148,17 @@ impl StrategyEngine {
         }
 
         self.indicator_provider.advance(ctx.current);
-        self.logger.drain_entries()
+        let entries = self.logger.drain_entries();
+        self.profile.on_candle_time += started.elapsed();
+        entries
+    }
+
+    pub fn profile(&self) -> StrategyEngineProfile {
+        self.profile
+    }
+
+    pub fn indicator_profile(&self) -> IndicatorProviderProfile {
+        self.indicator_provider.profile()
     }
 
     fn evaluate_rule(
@@ -179,7 +207,12 @@ impl StrategyEngine {
             ctx.current.timestamp,
         );
 
-        match self.instance.execution_target.execute(order).await {
+        let started = Instant::now();
+        self.profile.broker_execute_calls += 1;
+        let execution_result = self.instance.execution_target.execute(order).await;
+        self.profile.broker_execute_time += started.elapsed();
+
+        match execution_result {
             Ok(result) => self.logger.log(
                 LogEntryKind::OrderExecuted {
                     rule_id: rule.id.clone(),
@@ -197,8 +230,11 @@ impl StrategyEngine {
         }
     }
 
-    async fn current_paper_position(&self) -> Option<PaperPosition> {
+    async fn current_paper_position(&mut self) -> Option<PaperPosition> {
+        let started = Instant::now();
+        self.profile.broker_get_positions_calls += 1;
         let positions = self.instance.execution_target.get_positions().await.ok()?;
+        self.profile.broker_get_positions_time += started.elapsed();
         positions
             .into_iter()
             .find(|position| position.symbol == self.instance.symbol)

@@ -12,6 +12,16 @@ const INITIAL_CASH: f64 = 10_000_000.0;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    let args = std::env::args().collect::<Vec<_>>();
+    if args.len() >= 2 && args[1] == "profile" {
+        let strategy_name = args.get(2).map(String::as_str).unwrap_or("rsi");
+        let limit = args
+            .get(3)
+            .map(|value| value.parse::<usize>())
+            .transpose()?;
+        return run_profile(strategy_name, limit).await;
+    }
+
     let tiny_strategy = std::fs::read_to_string("sample-data/tiny_strategy.algomln")
         .context("read tiny strategy")?;
     let tiny_candles = load_tiny_candles("sample-data/tiny_candles.csv")?;
@@ -25,54 +35,79 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let nifty = load_nifty_candles("sample-data/nifty_1min.csv")?;
-    println!("loaded_nifty_candles={}", nifty.len());
+    Ok(())
+}
 
-    let rsi_strategy = "WHEN rsi(14) < 30\nBUY 1\n\nWHEN rsi(14) > 70\nSELL ALL";
-    run_named("nifty-rsi-14", rsi_strategy, nifty.clone()).await?;
-
-    let ema_strategy =
-        "WHEN cross_above(ema(20), ema(50))\nBUY 1\n\nWHEN cross_below(ema(20), ema(50))\nSELL ALL";
-    run_named("nifty-ema-cross", ema_strategy, nifty.clone()).await?;
-
-    let mut deterministic = Vec::new();
-    for index in 1..=3 {
-        deterministic.push(run_named(
-            &format!("determinism-ema-cross-{index}"),
-            ema_strategy,
-            nifty.clone(),
-        )
-        .await?);
+async fn run_profile(strategy_name: &str, limit: Option<usize>) -> Result<()> {
+    let load_started = Instant::now();
+    let mut nifty = load_nifty_candles("sample-data/nifty_1min.csv")?;
+    if let Some(limit) = limit {
+        nifty.truncate(limit);
     }
+    println!(
+        "loaded_nifty_candles={} load_ms={}",
+        nifty.len(),
+        load_started.elapsed().as_millis()
+    );
 
-    let first = &deterministic[0];
-    let deterministic_ok = deterministic.iter().all(|result| {
-        result.trade_history.len() == first.trade_history.len()
-            && result.total_realized_pnl == first.total_realized_pnl
-            && result.final_cash == first.final_cash
-    });
-    println!("determinism_ok={deterministic_ok}");
+    let strategy = match strategy_name {
+        "rsi" => "WHEN rsi(14) < 30\nBUY 1\n\nWHEN rsi(14) > 70\nSELL ALL",
+        "ema" => {
+            "WHEN cross_above(ema(20), ema(50))\nBUY 1\n\nWHEN cross_below(ema(20), ema(50))\nSELL ALL"
+        }
+        other => anyhow::bail!("unknown strategy: {other}"),
+    };
 
+    run_named(&format!("nifty-{strategy_name}"), strategy, nifty).await?;
     Ok(())
 }
 
 async fn run_named(name: &str, source: &str, candles: Vec<Candle>) -> Result<BacktestResult> {
+    let parse_started = Instant::now();
     let strategy = parse_strategy(source)?;
+    let parse_time = parse_started.elapsed();
     let started = Instant::now();
     let result = run_backtest_internal(strategy, "NIFTY".to_string(), candles, INITIAL_CASH)
         .await
         .map_err(|error| anyhow::anyhow!("run {name}: {error}"))?;
-    print_summary(name, &result, started.elapsed());
+    print_summary(name, &result, started.elapsed(), parse_time);
     Ok(result)
 }
 
-fn print_summary(name: &str, result: &BacktestResult, runtime: Duration) {
+fn print_summary(name: &str, result: &BacktestResult, runtime: Duration, parse_time: Duration) {
     println!("=== {name} ===");
     println!("candles={}", result.total_candles_processed);
     println!("trades={}", result.trade_history.len());
     println!("final_cash={:.2}", result.final_cash);
     println!("pnl={:.2}", result.total_realized_pnl);
     println!("runtime_ms={}", runtime.as_millis());
+    println!(
+        "candles_per_sec={:.2}",
+        result.total_candles_processed as f64 / runtime.as_secs_f64().max(0.001)
+    );
+    println!("parser_ms={}", parse_time.as_millis());
+    println!("validator_ms={}", result.profile.parser_validator_ms);
+    println!(
+        "engine_on_candle_ms={} calls={}",
+        result.profile.engine.on_candle_time_ms, result.profile.engine.on_candle_calls
+    );
+    println!(
+        "indicator_get_ms={} calls={} hits={} misses={}",
+        result.profile.indicators.get_time_ms,
+        result.profile.indicators.get_calls,
+        result.profile.indicators.cache_hits,
+        result.profile.indicators.cache_misses
+    );
+    println!(
+        "paper_execute_ms={} calls={}",
+        result.profile.engine.broker_execute_time_ms,
+        result.profile.engine.broker_execute_calls
+    );
+    println!(
+        "paper_get_positions_ms={} calls={}",
+        result.profile.engine.broker_get_positions_time_ms,
+        result.profile.engine.broker_get_positions_calls
+    );
     for trade in result.trade_history.iter().take(5) {
         let side = match trade.side {
             OrderSide::Buy => "BUY",
