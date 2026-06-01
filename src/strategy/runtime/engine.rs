@@ -42,6 +42,7 @@ pub enum EvalError {
     },
     NotYetImplemented(&'static str),
     OrderBuildFailed(String),
+    EmptyCandles,
 }
 
 pub struct StrategyEngine {
@@ -251,9 +252,13 @@ fn eval_condition(
             }
             eval_condition(right, ctx, provider, cross_detector, rule_id)
         }
-        ConditionNode::Not(inner) => {
-            Ok(!eval_condition(inner, ctx, provider, cross_detector, rule_id)?)
-        }
+        ConditionNode::Not(inner) => Ok(!eval_condition(
+            inner,
+            ctx,
+            provider,
+            cross_detector,
+            rule_id,
+        )?),
         ConditionNode::InPosition => Err(EvalError::NotYetImplemented("in_position")),
         ConditionNode::TimeWindow { .. } => Err(EvalError::NotYetImplemented("between")),
     }
@@ -273,13 +278,15 @@ fn eval_expr(
             PriceField::Low => ctx.current.low,
             PriceField::Volume => ctx.current.volume,
         }),
-        ExprNode::Indicator(call) => provider.get(&call.kind, call.period, ctx.candles).ok_or(
-            EvalError::InsufficientData {
-                indicator: call.kind.clone(),
-                period: call.period,
-                available: ctx.candles.len(),
-            },
-        ),
+        ExprNode::Indicator(call) => {
+            provider
+                .get(&call.kind, call.period, ctx.candles)
+                .ok_or(EvalError::InsufficientData {
+                    indicator: call.kind.clone(),
+                    period: call.period,
+                    available: ctx.candles.len(),
+                })
+        }
     }
 }
 
@@ -432,5 +439,16 @@ mod tests {
         }
 
         assert_eq!(total_trades, 1);
+    }
+
+    #[tokio::test]
+    async fn engine_skips_evaluation_when_paused() {
+        let mut engine = make_engine("WHEN close > 0\nBUY 1", 100_000.0);
+        engine.instance.status = StrategyStatus::Paused;
+        let candles: Vec<Candle> = (1..=5).map(|close| candle(close as f64)).collect();
+
+        let logs = engine.on_candle(&candles).await;
+
+        assert!(logs.is_empty());
     }
 }

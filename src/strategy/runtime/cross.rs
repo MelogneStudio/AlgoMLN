@@ -1,17 +1,17 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Default)]
 pub struct CrossDetector {
-    prev_values: HashMap<CrossStateKey, f64>,
+    prev_values: BTreeMap<CrossStateKey, f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CrossStateKey {
     pub rule_id: String,
     pub side: CrossSide,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CrossSide {
     Fast,
     Slow,
@@ -20,7 +20,7 @@ pub enum CrossSide {
 impl CrossDetector {
     pub fn new() -> Self {
         Self {
-            prev_values: HashMap::new(),
+            prev_values: BTreeMap::new(),
         }
     }
 

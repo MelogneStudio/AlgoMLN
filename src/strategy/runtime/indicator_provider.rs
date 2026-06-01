@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::indicators::{atr, ema, ma, rsi};
+use crate::indicators::{atr, bbands, ema, ma, rsi, vwap};
 use crate::models::Candle;
 use crate::strategy::dsl::IndicatorKind;
 
@@ -52,11 +52,43 @@ fn latest_indicator_value(kind: &IndicatorKind, period: usize, candles: &[Candle
         IndicatorKind::Ema => ema(candles, period),
         IndicatorKind::Rsi => rsi(candles, period),
         IndicatorKind::Atr => atr(candles, period),
-        IndicatorKind::Vwap
-        | IndicatorKind::BbUpper
-        | IndicatorKind::BbLower
-        | IndicatorKind::BbMid => return None,
+        IndicatorKind::Vwap => {
+            return vwap(candles)
+                .last()
+                .copied()
+                .flatten()
+                .map(|point| point.value)
+                .filter(|value| value.is_finite());
+        }
+        IndicatorKind::BbUpper => {
+            return bbands(candles, period, 2.0)
+                .last()
+                .copied()
+                .flatten()
+                .map(|bands| bands.upper)
+                .filter(|value| value.is_finite());
+        }
+        IndicatorKind::BbLower => {
+            return bbands(candles, period, 2.0)
+                .last()
+                .copied()
+                .flatten()
+                .map(|bands| bands.lower)
+                .filter(|value| value.is_finite());
+        }
+        IndicatorKind::BbMid => {
+            return bbands(candles, period, 2.0)
+                .last()
+                .copied()
+                .flatten()
+                .map(|bands| bands.mid)
+                .filter(|value| value.is_finite());
+        }
     };
 
-    values.last().copied().filter(|value| value.is_finite())
+    values
+        .last()
+        .copied()
+        .flatten()
+        .filter(|value| value.is_finite())
 }

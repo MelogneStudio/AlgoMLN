@@ -1,14 +1,14 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Default)]
 pub struct TriggerStateMap {
-    states: HashMap<String, bool>,
+    states: BTreeMap<String, bool>,
 }
 
 impl TriggerStateMap {
     pub fn new() -> Self {
         Self {
-            states: HashMap::new(),
+            states: BTreeMap::new(),
         }
     }
 

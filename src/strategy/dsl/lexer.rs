@@ -103,11 +103,12 @@ impl Lexer {
                         pos = next_pos;
                     }
                     '0'..='9' => {
-                        let (kind, next_pos) = number_or_time(&chars, pos).map_err(|message| LexError {
-                            message,
-                            line: line_no,
-                            col,
-                        })?;
+                        let (kind, next_pos) =
+                            number_or_time(&chars, pos).map_err(|message| LexError {
+                                message,
+                                line: line_no,
+                                col,
+                            })?;
                         tokens.push(token(kind, line_no, col));
                         pos = next_pos;
                     }
@@ -272,7 +273,9 @@ BUY 10
     #[test]
     fn tokenizes_examples() {
         let tokens = Lexer::tokenize(EXAMPLES).unwrap();
-        assert!(tokens.iter().any(|token| token.kind == TokenKind::CrossAbove));
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::CrossAbove));
         assert_eq!(tokens.last().unwrap().kind, TokenKind::Eof);
     }
 
@@ -342,8 +345,12 @@ BUY 10
     #[test]
     fn distinguishes_integer_and_number() {
         let tokens = Lexer::tokenize("WHEN close > 10.5\nBUY 1").unwrap();
-        assert!(tokens.iter().any(|token| token.kind == TokenKind::Number(10.5)));
-        assert!(tokens.iter().any(|token| token.kind == TokenKind::Integer(1)));
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::Number(10.5)));
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::Integer(1)));
     }
 
     #[test]
@@ -362,6 +369,8 @@ BUY 10
     #[test]
     fn cross_above_tokenizes_correctly() {
         let tokens = Lexer::tokenize("WHEN cross_above(ema(20), ema(50))\nBUY 10").unwrap();
-        assert!(tokens.iter().any(|token| token.kind == TokenKind::CrossAbove));
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::CrossAbove));
     }
 }

@@ -239,7 +239,11 @@ fn broker_state(state: &PaperBrokerInner) -> PaperBrokerState {
         cash: state.cash,
         initial_cash: state.initial_cash,
         positions: state.positions.values().cloned().collect(),
-        total_realized_pnl: state.trade_history.iter().filter_map(|trade| trade.pnl).sum(),
+        total_realized_pnl: state
+            .trade_history
+            .iter()
+            .filter_map(|trade| trade.pnl)
+            .sum(),
         trade_history: state.trade_history.clone(),
     }
 }
@@ -263,7 +267,10 @@ mod tests {
     #[tokio::test]
     async fn buy_deducts_cash() {
         let broker = PaperBroker::new("NIFTY".to_string(), 1_000.0);
-        broker.execute(order(OrderSide::Buy, 2, 100.0)).await.unwrap();
+        broker
+            .execute(order(OrderSide::Buy, 2, 100.0))
+            .await
+            .unwrap();
         assert_eq!(broker.get_state().cash, 800.0);
     }
 
@@ -282,8 +289,14 @@ mod tests {
     #[tokio::test]
     async fn buy_updates_average_entry_price() {
         let broker = PaperBroker::new("NIFTY".to_string(), 10_000.0);
-        broker.execute(order(OrderSide::Buy, 1, 100.0)).await.unwrap();
-        broker.execute(order(OrderSide::Buy, 3, 200.0)).await.unwrap();
+        broker
+            .execute(order(OrderSide::Buy, 1, 100.0))
+            .await
+            .unwrap();
+        broker
+            .execute(order(OrderSide::Buy, 3, 200.0))
+            .await
+            .unwrap();
         let position = broker.get_position("NIFTY").unwrap();
         assert_eq!(position.quantity, 4);
         assert_eq!(position.avg_entry_price, 175.0);
@@ -307,8 +320,14 @@ mod tests {
     #[tokio::test]
     async fn sell_credits_cash_and_records_pnl() {
         let broker = PaperBroker::new("NIFTY".to_string(), 10_000.0);
-        broker.execute(order(OrderSide::Buy, 2, 100.0)).await.unwrap();
-        broker.execute(order(OrderSide::Sell, 1, 125.0)).await.unwrap();
+        broker
+            .execute(order(OrderSide::Buy, 2, 100.0))
+            .await
+            .unwrap();
+        broker
+            .execute(order(OrderSide::Sell, 1, 125.0))
+            .await
+            .unwrap();
         let state = broker.get_state();
         assert_eq!(state.cash, 9_925.0);
         assert_eq!(state.total_realized_pnl, 25.0);
@@ -363,7 +382,10 @@ mod tests {
     #[tokio::test]
     async fn reset_restores_initial_state() {
         let broker = PaperBroker::new("NIFTY".to_string(), 1_000.0);
-        broker.execute(order(OrderSide::Buy, 2, 100.0)).await.unwrap();
+        broker
+            .execute(order(OrderSide::Buy, 2, 100.0))
+            .await
+            .unwrap();
         broker.reset();
         let state = broker.get_state();
         assert_eq!(state.cash, 1_000.0);

@@ -62,8 +62,14 @@ mod tests {
             avg_entry_price: 90.0,
             unrealized_pnl: 0.0,
         };
-        let order =
-            build_order(&ActionNode::SellAll, "NIFTY", 100.0, Some(&position), "rule_0").unwrap();
+        let order = build_order(
+            &ActionNode::SellAll,
+            "NIFTY",
+            100.0,
+            Some(&position),
+            "rule_0",
+        )
+        .unwrap();
         assert_eq!(order.quantity, 7);
         assert_eq!(order.side, OrderSide::Sell);
     }
