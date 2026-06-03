@@ -75,6 +75,42 @@ impl IndicatorProvider for FullRecomputeProvider {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_candle(close: f64) -> Candle {
+        Candle {
+            timestamp: close as i64,
+            open: close,
+            high: close + 1.0,
+            low: close - 1.0,
+            close,
+            volume: 1000.0,
+        }
+    }
+
+    #[test]
+    fn benchmark_1000_candles_with_full_recompute_provider() {
+        let mut provider = FullRecomputeProvider::new();
+        let candles: Vec<Candle> = (0..1000).map(|i| make_candle(i as f64 + 10.0)).collect();
+
+        let start = Instant::now();
+        for i in 1..=candles.len() {
+            provider.clear_cache();
+            provider.get(&IndicatorKind::Ema, 20, &candles[..i]);
+            provider.get(&IndicatorKind::Rsi, 14, &candles[..i]);
+            provider.advance(&candles[i - 1]);
+        }
+        let elapsed = start.elapsed();
+
+        println!(
+            "FullRecomputeProvider: 1000 candles, EMA(20)+RSI(14) = {:?}",
+            elapsed
+        );
+    }
+}
+
 fn latest_indicator_value(kind: &IndicatorKind, period: usize, candles: &[Candle]) -> Option<f64> {
     let values = match kind {
         IndicatorKind::Ma => ma(candles, period),

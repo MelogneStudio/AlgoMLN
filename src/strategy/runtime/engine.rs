@@ -14,7 +14,8 @@ use crate::strategy::logging::{LogEntry, LogEntryKind, StrategyLogger};
 
 use super::context::EvalContext;
 use super::cross::CrossDetector;
-use super::indicator_provider::{FullRecomputeProvider, IndicatorProvider, IndicatorProviderProfile};
+use super::incremental_provider::BoundedWindowProvider;
+use super::indicator_provider::{IndicatorProvider, IndicatorProviderProfile};
 use super::trigger_state::TriggerStateMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,7 +73,7 @@ impl StrategyEngine {
             instance,
             cross_detector: CrossDetector::new(),
             trigger_state: TriggerStateMap::new(),
-            indicator_provider: Box::new(FullRecomputeProvider::new()),
+            indicator_provider: Box::new(BoundedWindowProvider::new()),
             logger,
             profile: StrategyEngineProfile::default(),
         }

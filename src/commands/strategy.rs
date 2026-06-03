@@ -8,8 +8,9 @@ use crate::models::Candle;
 use crate::strategy::dsl::{AstValidator, StrategyNode};
 use crate::strategy::execution::{PaperBroker, PaperBrokerState, PaperTrade};
 use crate::strategy::logging::LogEntry;
-use crate::strategy::runtime::{StrategyEngine, StrategyEngineProfile, StrategyInstance, StrategyStatus};
+use crate::strategy::runtime::engine::StrategyEngineProfile;
 use crate::strategy::runtime::indicator_provider::IndicatorProviderProfile;
+use crate::strategy::runtime::{StrategyEngine, StrategyInstance, StrategyStatus};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BacktestResult {
