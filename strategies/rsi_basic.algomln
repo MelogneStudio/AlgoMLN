@@ -1,0 +1,5 @@
+WHEN rsi(14) < 30
+BUY 5
+
+WHEN rsi(14) > 70
+SELL ALL

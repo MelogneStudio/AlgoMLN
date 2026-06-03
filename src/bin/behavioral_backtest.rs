@@ -1,40 +1,249 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use algomln::commands::strategy::{run_backtest_internal, BacktestResult};
 use algomln::models::{Candle, OrderSide};
-use algomln::strategy::dsl::{Lexer, Parser, StrategyNode};
+use algomln::strategy::dsl::{AstValidator, Lexer, Parser, StrategyNode};
 use anyhow::{Context, Result};
 use chrono::NaiveDateTime;
 
 const INITIAL_CASH: f64 = 10_000_000.0;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+struct RunArgs {
+    script_path: String,
+    data_path: String,
+    candle_limit: Option<usize>,
+    initial_cash: f64,
+    symbol: String,
+}
+
+fn main() {
+    if let Err(error) = real_main() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<(), String> {
     let args = std::env::args().collect::<Vec<_>>();
+    if args.len() >= 2 && matches!(args[1].as_str(), "--help" | "-h") {
+        print_help();
+        return Ok(());
+    }
+
     if args.len() >= 2 && args[1] == "profile" {
         let strategy_name = args.get(2).map(String::as_str).unwrap_or("rsi");
         let limit = args
             .get(3)
-            .map(|value| value.parse::<usize>())
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .map_err(|error| format!("Error: invalid candles value '{value}': {error}"))
+            })
             .transpose()?;
-        return run_profile(strategy_name, limit).await;
+        return block_on(run_profile(strategy_name, limit))
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string());
+    }
+
+    if args.len() >= 2 && args[1] == "run" {
+        return parse_run_args(&args[2..]).and_then(run_script);
     }
 
     let tiny_strategy = std::fs::read_to_string("sample-data/tiny_strategy.algomln")
-        .context("read tiny strategy")?;
-    let tiny_candles = load_tiny_candles("sample-data/tiny_candles.csv")?;
+        .context("read tiny strategy")
+        .map_err(|error| error.to_string())?;
+    let tiny_candles =
+        load_tiny_candles("sample-data/tiny_candles.csv").map_err(|error| error.to_string())?;
 
-    run_named("tiny-close-gt-105", &tiny_strategy, tiny_candles.clone()).await?;
-    run_named("idiot-close-gt-0", "WHEN close > 0\nBUY 1", tiny_candles.clone()).await?;
-    run_named(
+    block_on(run_named(
+        "tiny-close-gt-105",
+        &tiny_strategy,
+        tiny_candles.clone(),
+    ))
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    block_on(run_named(
+        "idiot-close-gt-0",
+        "WHEN close > 0\nBUY 1",
+        tiny_candles.clone(),
+    ))
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    block_on(run_named(
         "reset-close-gt-105",
         "WHEN close > 105\nBUY 1",
-        vec![candle(1, 100.0), candle(2, 106.0), candle(3, 100.0), candle(4, 106.0)],
-    )
-    .await?;
+        vec![
+            candle(1, 100.0),
+            candle(2, 106.0),
+            candle(3, 100.0),
+            candle(4, 106.0),
+        ],
+    ))
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
 
+    Ok(())
+}
+
+fn block_on<F>(future: F) -> Result<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("create tokio runtime")
+        .map(|runtime| runtime.block_on(future))
+}
+
+fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
+    let script_path = args
+        .first()
+        .cloned()
+        .ok_or_else(|| "Error: missing .algomln file for run subcommand".to_string())?;
+    let mut data_path = None;
+    let mut candle_limit = None;
+    let mut initial_cash = 100_000.0;
+    let mut symbol = None;
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--data" => {
+                index += 1;
+                data_path = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| "Error: --data requires a path".to_string())?,
+                );
+            }
+            "--candles" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "Error: --candles requires a value".to_string())?;
+                candle_limit = Some(value.parse::<usize>().map_err(|error| {
+                    format!("Error: invalid --candles value '{value}': {error}")
+                })?);
+            }
+            "--cash" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "Error: --cash requires a value".to_string())?;
+                initial_cash = value
+                    .parse::<f64>()
+                    .map_err(|error| format!("Error: invalid --cash value '{value}': {error}"))?;
+            }
+            "--symbol" => {
+                index += 1;
+                symbol = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| "Error: --symbol requires a value".to_string())?,
+                );
+            }
+            other => return Err(format!("Error: unknown run option: {other}")),
+        }
+        index += 1;
+    }
+
+    let data_path =
+        data_path.ok_or_else(|| "Error: --data is required for run subcommand".to_string())?;
+    let symbol = symbol.unwrap_or_else(|| {
+        Path::new(&data_path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("UNKNOWN")
+            .to_string()
+    });
+
+    Ok(RunArgs {
+        script_path,
+        data_path,
+        candle_limit,
+        initial_cash,
+        symbol,
+    })
+}
+
+fn run_script(args: RunArgs) -> Result<(), String> {
+    let script_path = Path::new(&args.script_path);
+    let extension = script_path
+        .extension()
+        .and_then(|extension| extension.to_str());
+    if extension != Some("algomln") {
+        let got = extension
+            .map(|extension| format!(".{extension}"))
+            .unwrap_or_else(|| "<none>".to_string());
+        return Err(format!("Error: expected .algomln file, got {got}"));
+    }
+
+    let source = std::fs::read_to_string(&args.script_path)
+        .map_err(|_| format!("Error: file not found: {}", args.script_path))?;
+    let strategy_name = script_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("strategy")
+        .to_string();
+    let tokens = Lexer::tokenize(&source).map_err(|error| {
+        format!(
+            "Error: parse failed at line {} col {}: {}",
+            error.line, error.col, error.message
+        )
+    })?;
+    let mut strategy = Parser::new(tokens).parse().map_err(|error| {
+        format!(
+            "Error: parse failed at line {} col {}: {}",
+            error.line, error.col, error.message
+        )
+    })?;
+    strategy.name = strategy_name.clone();
+
+    let validation_errors = AstValidator::validate(&strategy);
+    if !validation_errors.is_empty() {
+        let mut message = String::from("Error: validation failed:");
+        for error in validation_errors {
+            let rule_id = if error.rule_id.is_empty() {
+                "strategy"
+            } else {
+                &error.rule_id
+            };
+            message.push_str(&format!("\n  {rule_id}: {}", error.message));
+        }
+        return Err(message);
+    }
+
+    let mut candles = load_nifty_candles(&args.data_path).map_err(|error| {
+        format!(
+            "Error: failed to load candles from {}: {error}",
+            args.data_path
+        )
+    })?;
+    if let Some(limit) = args.candle_limit {
+        candles.truncate(limit);
+    }
+
+    println!("strategy: {strategy_name}");
+    println!("rules: {}", strategy.rules.len());
+    println!("candles: {}", candles.len());
+    println!("cash: {:.2}", args.initial_cash);
+    println!("symbol: {}", args.symbol);
+
+    let started = Instant::now();
+    let result = block_on(run_backtest_internal(
+        strategy,
+        args.symbol,
+        candles,
+        args.initial_cash,
+    ))
+    .map_err(|error| format!("Error: {error}"))?
+    .map_err(|error| format!("Error: {error}"))?;
+
+    print_run_summary(&strategy_name, &result, started.elapsed());
     Ok(())
 }
 
@@ -100,8 +309,7 @@ fn print_summary(name: &str, result: &BacktestResult, runtime: Duration, parse_t
     );
     println!(
         "paper_execute_ms={} calls={}",
-        result.profile.engine.broker_execute_time_ms,
-        result.profile.engine.broker_execute_calls
+        result.profile.engine.broker_execute_time_ms, result.profile.engine.broker_execute_calls
     );
     println!(
         "paper_get_positions_ms={} calls={}",
@@ -121,6 +329,56 @@ fn print_summary(name: &str, result: &BacktestResult, runtime: Duration, parse_t
     if result.trade_history.len() > 5 {
         println!("... {} more trades", result.trade_history.len() - 5);
     }
+}
+
+fn print_run_summary(name: &str, result: &BacktestResult, runtime: Duration) {
+    println!("=== {name} ===");
+    println!("candles={}", result.total_candles_processed);
+    println!("trades={}", result.trade_history.len());
+    println!("final_cash={:.2}", result.final_cash);
+    println!("pnl={:.2}", result.total_realized_pnl);
+    println!("runtime_ms={}", runtime.as_millis());
+    println!(
+        "candles_per_sec={:.2}",
+        result.total_candles_processed as f64 / runtime.as_secs_f64().max(0.001)
+    );
+
+    for trade in &result.trade_history {
+        let side = match trade.side {
+            OrderSide::Buy => "BUY",
+            OrderSide::Sell => "SELL",
+        };
+        println!(
+            "trade {} {} qty={} price={:.2}",
+            trade.id, side, trade.quantity, trade.price
+        );
+    }
+
+    if result.trade_history.is_empty() {
+        println!("no trades executed");
+    }
+}
+
+fn print_help() {
+    println!(
+        r#"behavioral_backtest - AlgoMLN strategy runner
+
+USAGE:
+  behavioral_backtest                                      run built-in test suite
+  behavioral_backtest profile <name> [candles]            run named profile (rsi, ema)
+  behavioral_backtest run <file.algomln> --data <csv>     run your own strategy
+
+OPTIONS for run:
+  --data <path>      path to OHLCV CSV file (required)
+  --candles <n>      limit to first N candles
+  --cash <amount>    starting cash (default: 100000)
+  --symbol <name>    symbol name for display
+
+EXAMPLES:
+  behavioral_backtest run strategies/ema_cross.algomln --data sample-data/nifty_1min.csv
+  behavioral_backtest run my_strat.algomln --data sample-data/nifty_1min.csv --candles 50000 --cash 500000
+  behavioral_backtest profile rsi 10000"#
+    );
 }
 
 fn parse_strategy(source: &str) -> Result<StrategyNode> {
