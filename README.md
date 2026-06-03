@@ -2,78 +2,133 @@
 
 **A fast, local-first algorithmic trading platform built in Rust.**
 
-AlgoMLN is a desktop trading application focused on reliability, determinism, and extensibility.
-
-Built by an algo trader, for algo traders.
+Built engine-first, not UI-first. Every layer is tested, deterministic, and production-grade before the next layer is added.
 
 ---
 
 ## Philosophy
 
-Most trading platforms are built UI-first.
+Most trading platforms are built UI-first. AlgoMLN is built engine-first.
 
-AlgoMLN is built engine-first.
-
-```text
-Data
-↓
-Indicators
-↓
-Strategy Engine
-↓
-Backtesting
-↓
-Execution
-↓
-UI
+```
+Data → Indicators → Strategy Engine → Backtesting → Execution → UI
 ```
 
-The goal is simple:
-
-* Fast startup
-* No cloud dependency
-* No mandatory account system
-* Paper trading first
-* Deterministic strategy execution
-* Extensible architecture
+- Fast cold start
+- No cloud dependency
+- No mandatory account
+- Paper trading always default
+- Deterministic backtests — same input, same output, every time
+- One execution engine for backtests, paper trading, and live trading
 
 ---
 
-# Current Status
+## Current Status
 
-## Completed
+```
+88 tests passing · 0 failed · 1 ignored
+```
 
-### Phase 1 — Data Layer
+### ✅ Phase 1 — Data Layer
+- Broker abstraction trait (`BrokerClient`)
+- `DhanClient` implementation
+- Data models: `Candle`, `Tick`, `Quote`, `Order`, `Position`
+- WebSocket manager — up to 1,000 symbol subscriptions, auto-reconnect
+- Tick fan-out to internal subscribers
+- Historical OHLCV fetch
+- Tauri IPC commands exposing data to React
 
-* Broker abstraction architecture
-* Historical OHLCV retrieval
-* Market data models
-* Dhan integration
-* Streaming market data support
-* Internal data pipelines
+### ✅ Phase 2 — Indicator Engine
+Pure Rust functions. Stateless. `fn indicator(candles: &[Candle], period: usize) -> Vec<f64>`.
 
-### Phase 2 — Indicator Engine
+| Indicator | Function |
+|---|---|
+| Simple Moving Average | `ma` |
+| Exponential Moving Average | `ema` |
+| Relative Strength Index | `rsi` |
+| Average True Range | `atr` |
+| Volume Weighted Average Price | `vwap` |
+| Bollinger Bands | `bollinger_bands` → upper / mid / lower |
 
-Implemented indicators:
+### ✅ Phase 2.5–2.9 — Strategy Engine
 
-* SMA
-* EMA
-* RSI
-* ATR
-* VWAP
-* Bollinger Bands
+A complete strategy pipeline from source text to trade execution:
 
-Indicators are implemented as pure Rust functions and are fully testable.
+```
+Source (.algomln)
+  → Lexer
+  → Parser
+  → AST
+  → Validator
+  → Runtime Engine
+  → ExecutionTarget (PaperBroker / LiveBroker)
+```
+
+**What's implemented:**
+
+- Custom DSL with full compiler pipeline
+- Trigger state system (fires only on `false → true` transitions)
+- Cross detection (`cross_above`, `cross_below`)
+- Indicator provider with bounded window (O(N) backtest performance)
+- `PaperBroker` — cash, positions, avg entry price, realized PnL
+- `ExecutionTarget` trait — same engine drives paper and live brokers
+- Deterministic candle-by-candle backtest replay
+- `behavioral_backtest` binary — run any `.algomln` file from the CLI
+
+**Backtest performance on 184,863 candles (full NIFTY 1-min history):**
+```
+runtime: 3.5s · 52,000 candles/sec · 9,026 trades
+```
 
 ---
 
-### Phase 2.5 — Strategy Language
+## The Strategy Language
 
-A custom trading DSL was designed and implemented.
+Strategies are written in `.algomln` files. The language is intentionally small — rules only, no variables, no loops.
 
-Example:
+### Grammar
 
-```algo
+```
+strategy       = rule+
+rule           = "WHEN" condition NEWLINE action
+
+condition      = comparison
+               | cross_expr
+               | not_expr
+               | logical_expr
+               | position_expr    (parses, not yet evaluated)
+               | time_window      (parses, not yet evaluated)
+
+comparison     = expr operator expr
+operator       = "<" | ">" | "<=" | ">=" | "==" | "!="
+
+logical_expr   = condition "AND" condition
+               | condition "OR" condition
+
+not_expr       = "NOT" "(" condition ")"
+
+cross_expr     = "cross_above" "(" expr "," expr ")"
+               | "cross_below" "(" expr "," expr ")"
+
+expr           = indicator_call | price_field | number
+
+indicator_call = indicator "(" integer ")"
+indicator      = "ema" | "ma" | "rsi" | "atr" | "vwap"
+               | "bb_upper" | "bb_lower" | "bb_mid"
+
+price_field    = "close" | "open" | "high" | "low" | "volume"
+
+action         = "BUY" integer
+               | "SELL" integer
+               | "SELL" "ALL"
+```
+
+Blank lines and `# comments` are allowed anywhere. Keywords are case-insensitive. Indicator periods and quantities must be positive integers.
+
+### Examples
+
+**RSI oversold/overbought:**
+```algomln
 WHEN rsi(14) < 30
 BUY 1
 
@@ -81,357 +136,180 @@ WHEN rsi(14) > 70
 SELL ALL
 ```
 
-and
-
-```algo
+**EMA crossover:**
+```algomln
 WHEN cross_above(ema(20), ema(50))
-BUY 1
+BUY 10
 
 WHEN cross_below(ema(20), ema(50))
 SELL ALL
 ```
 
----
+**Compound condition:**
+```algomln
+WHEN ema(9) > ema(21) AND rsi(14) < 60
+BUY 5
 
-### Phase 2.6 — Compiler Pipeline
-
-The strategy language is compiled using:
-
-```text
-Source
-↓
-Lexer
-↓
-Parser
-↓
-AST
-↓
-Validator
-↓
-Runtime
+WHEN rsi(14) > 75
+SELL ALL
 ```
 
-Implemented:
-
-* Lexer
-* Parser
-* AST
-* Validation system
-* Error reporting
-
----
-
-### Phase 2.7 — Strategy Runtime
-
-Implemented:
-
-* Rule evaluation engine
-* Trigger state tracking
-* Cross detection system
-* Indicator provider abstraction
-* Strategy execution pipeline
-
----
-
-### Phase 2.8 — Paper Trading Engine
-
-Implemented:
-
-* PaperBroker
-* Position tracking
-* Cash tracking
-* Trade history
-* Realized PnL calculation
-* Execution target abstraction
-
----
-
-### Phase 2.9 — Backtesting
-
-Implemented:
-
-* Historical replay engine
-* Candle-by-candle execution
-* Deterministic execution model
-* Integration testing
-
----
-
-# Testing Status
-
-Current test results:
-
-```text
-88 passed
-0 failed
-1 ignored
-```
-
----
-
-# Architecture
-
-## Broker Abstraction
-
-AlgoMLN separates execution from broker implementations.
-
-```text
-Strategy Engine
-        ↓
-ExecutionTarget
-        ↓
-┌─────────────┬─────────────┬─────────────┐
-│ PaperBroker │ DhanBroker  │ UpstoxBroker│
-└─────────────┴─────────────┴─────────────┘
-```
-
-The strategy engine never knows which broker is executing orders.
-
----
-
-## Strategy Compiler
-
-Strategies are compiled into an Abstract Syntax Tree.
-
-```algo
-WHEN rsi(14) < 30
-BUY 1
-```
-
-becomes:
-
-```text
-Rule
-├── Condition
-│   └── RSI(14) < 30
-└── Action
-    └── BUY 1
-```
-
-The runtime executes the AST rather than interpreting raw text.
-
----
-
-## Trigger State System
-
-One of the biggest problems in trading engines:
-
-```algo
-WHEN close > 0
-BUY 1
-```
-
-Without protection:
-
-```text
-BUY
-BUY
-BUY
-BUY
-BUY
-...
-```
-
-on every candle.
-
-AlgoMLN uses a Trigger State system that only fires on:
-
-```text
-false → true
-```
-
-transitions.
-
-This means:
-
-```algo
-WHEN rsi(14) < 30
-BUY 1
-```
-
-executes once when RSI enters oversold territory, not every candle afterward.
-
----
-
-## Cross Detection
-
-Crossovers are surprisingly tricky.
-
-AlgoMLN stores previous indicator values and detects transitions:
-
-```text
-EMA20 <= EMA50
-        ↓
-EMA20 > EMA50
-```
-
-Only the crossover candle triggers.
-
-Remaining above does not generate additional signals.
-
----
-
-## Deterministic Execution
-
-The same strategy executed on the same candles must always produce the same result.
-
-This is a core design goal.
-
-The engine avoids non-deterministic evaluation paths and is designed so that:
-
-```text
-Strategy
-+
-Market Data
-=
-Identical Results
-```
-
-every run.
-
-This property is critical for reliable backtesting.
-
----
-
-## Engine Architecture
-
-```text
-Candles
-    ↓
-Indicator Provider
-    ↓
-Condition Evaluation
-    ↓
-Trigger State
-    ↓
-Order Builder
-    ↓
-Execution Target
-    ↓
-PaperBroker / Live Broker
-```
-
----
-
-# Why A Custom DSL?
-
-Most retail trading platforms either:
-
-* force visual builders
-* expose raw Python
-* require external tools
-
-AlgoMLN takes a different approach.
-
-Strategies are written in a small domain-specific language:
-
-```algo
-WHEN cross_above(ema(20), ema(50))
+**Bollinger Band breakout:**
+```algomln
+WHEN close < bb_lower(20)
 BUY 10
+
+WHEN close > bb_upper(20)
+SELL ALL
 ```
 
-Simple enough for beginners.
+---
 
-Structured enough for reliable compilation.
+## Running a Strategy
+
+```powershell
+# Run against full NIFTY 1-min history
+cargo run --release --bin behavioral_backtest -- run my_strategy.algomln --data sample-data/nifty_1min.csv --symbol NIFTY
+
+# Limit to first 10,000 candles
+cargo run --release --bin behavioral_backtest -- run my_strategy.algomln --data sample-data/nifty_1min.csv --candles 10000
+
+# Custom starting cash
+cargo run --release --bin behavioral_backtest -- run my_strategy.algomln --data sample-data/nifty_1min.csv --cash 500000
+
+# Run a named built-in profile
+cargo run --release --bin behavioral_backtest -- profile rsi 50000
+cargo run --release --bin behavioral_backtest -- profile ema
+
+# Help
+cargo run --release --bin behavioral_backtest -- --help
+```
 
 ---
 
-# Roadmap
+## Architecture
 
-## Phase 3 — Charts & Core UI
+### Broker Abstraction
 
-Planned:
-
-* Lightweight Charts integration
-* Symbol switching
-* Indicator overlays
-* Timeframe selection
-* Support/Resistance overlays
-
----
-
-## Phase 4 — Trading Tools
-
-Planned:
-
-* Option Chain
-* Open Interest analysis
-* Payoff diagrams
-* Screeners
-
----
-
-## Phase 5 — Visual Strategy Builder
-
-Planned:
-
-```text
-Drag & Drop Blocks
-        ↓
-Generated DSL
-        ↓
-AST
-        ↓
+```
 Strategy Engine
+      ↓
+ExecutionTarget trait
+      ↓
+┌─────────────┬─────────────┬──────────────┐
+│ PaperBroker │  DhanBroker │ UpstoxBroker │
+└─────────────┴─────────────┴──────────────┘
 ```
 
-The visual builder and text strategies will share the exact same runtime.
+The engine never knows which broker is executing. `DhanClient` is implemented now. `UpstoxClient` slots in without touching anything else.
+
+### Trigger State System
+
+Without protection, `WHEN close > 0 / BUY 1` fires on every single candle. AlgoMLN uses a trigger state map that fires only on `false → true` transitions:
+
+| Previous | Current | Fires? |
+|---|---|---|
+| false | true | ✅ yes |
+| true | true | ❌ no |
+| true | false | ❌ no |
+| false | false | ❌ no |
+
+### Deterministic Execution
+
+Same strategy + same candles = identical results every run. No randomness, no non-deterministic data structures in evaluation paths. `BTreeMap` over `HashMap` wherever iteration order could affect output. This property is verified by a dedicated determinism test in the test suite.
+
+### Cross Detection
+
+Crossovers require tracking previous candle values per rule. `CrossDetector` stores `(fast_prev, slow_prev)` and fires only on the exact transition candle. The update pass runs after all rules are evaluated — not inside the rule loop — so all rules see consistent previous-candle state within a single cycle.
 
 ---
 
-## Phase 6 — Advanced Strategy Authoring
+## Module Structure
 
-Planned:
-
-* More indicators
-* Position sizing
-* Risk controls
-* Stop losses
-* Take profits
-* Multi-condition strategies
-
----
-
-## Phase 7 — Live Trading
-
-Planned:
-
-* Live broker execution
-* Risk validation
-* Confirmation workflows
-* Immutable trade logs
-* User-defined safety limits
-
----
-
-# Long-Term Vision
-
-AlgoMLN aims to become a complete algorithmic trading platform where:
-
-```text
-Research
-↓
-Strategy Design
-↓
-Backtest
-↓
-Paper Trade
-↓
-Live Trade
+```
+src-tauri/src/
+  broker/
+    mod.rs              BrokerClient trait
+    dhan/               DhanClient implementation
+  models/               Candle, Tick, Quote, Order, Position
+  indicators/           Pure indicator functions
+  strategy/
+    dsl/
+      lexer.rs          Lexer + Token types
+      parser.rs         Recursive descent parser
+      ast.rs            All AST node types (serializable)
+      validator.rs      AstValidator — collects all errors
+    runtime/
+      engine.rs         StrategyEngine — main evaluation loop
+      context.rs        EvalContext — per-candle borrowed view
+      cross.rs          CrossDetector
+      trigger_state.rs  TriggerStateMap
+      indicator_provider.rs  IndicatorProvider trait + BoundedWindowProvider
+    execution/
+      target.rs         ExecutionTarget trait
+      paper.rs          PaperBroker
+      order_builder.rs  Builds Order from ActionNode
+    logging/
+      log.rs            StrategyLog, LogEntry, LogEntryKind
+    mod.rs              StrategyRegistry
+  commands/
+    strategy.rs         Tauri IPC commands
+  bin/
+    behavioral_backtest.rs  CLI backtest runner
 ```
 
-all happen inside one application using the same execution engine.
+---
 
-No hidden execution paths.
+## Roadmap
 
-No separate runtimes.
+### Phase 3 — Charts & Core UI
+- Lightweight Charts (TradingView) integration
+- Candle data piped Rust → React via Tauri IPC
+- Indicator overlays with toggle panel
+- Support/Resistance overlay
+- Timeframe selector
+- Symbol search and switcher
 
-No discrepancies between backtesting and live execution.
+### Phase 4 — Trading Tools
+- Option chain viewer
+- Open Interest analysis
+- Payoff diagrams
+- Screener
+
+### Phase 5 — Visual Strategy Builder
+```
+Drag-and-drop blocks → Generated DSL → AST → Strategy Engine
+```
+Same runtime as text strategies. No separate execution path.
+
+### Phase 6 — Advanced Strategy Features
+- Position sizing rules
+- Stop loss / take profit
+- Risk controls
+- Multi-symbol strategies
+
+### Phase 7 — Live Trading
+- Live broker execution via `ExecutionTarget`
+- Two hard confirmation steps required
+- User-defined risk limits (max loss, max orders)
+- Immutable trade log
+- Risk acknowledgment on first live trade
 
 ---
 
-# Current Milestone
+## Tech Stack
 
-The strategy engine, paper broker, DSL, compiler pipeline, and backtesting infrastructure are operational and passing test coverage.
+```
+Tauri (Rust + React)
+  Rust backend   — all logic, data, indicators, strategy engine
+  Tauri commands — direct IPC, no localhost server
+  React frontend — charts and UI via webview
+```
 
-The next major milestone is the first charting and visualization layer.
+---
+
+## Long-Term Vision
+
+Research → Strategy Design → Backtest → Paper Trade → Live Trade
+
+All inside one application. One execution engine. No hidden paths. No discrepancies between backtest and live results.
