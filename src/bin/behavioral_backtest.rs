@@ -3,13 +3,19 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use algomln::broker::dhan::{DhanAuth, DhanClient};
+use algomln::broker::{BrokerClient, Timeframe};
 use algomln::commands::strategy::{run_backtest_internal, BacktestResult};
 use algomln::models::{Candle, OrderSide};
 use algomln::strategy::dsl::{AstValidator, Lexer, Parser, StrategyNode};
+use algomln::strategy::logging::LogEntryKind;
 use anyhow::{Context, Result};
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime, Utc};
 
 const INITIAL_CASH: f64 = 10_000_000.0;
+const DEFAULT_EXCHANGE_SEGMENT: &str = "NSE_EQ";
+const DEFAULT_INSTRUMENT: &str = "EQUITY";
+const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 
 struct RunArgs {
     script_path: String,
@@ -17,6 +23,17 @@ struct RunArgs {
     candle_limit: Option<usize>,
     initial_cash: f64,
     symbol: String,
+}
+
+struct BacktestArgs {
+    script_path: String,
+    security_id: String,
+    exchange_segment: String,
+    instrument: String,
+    timeframe: Timeframe,
+    from: i64,
+    to: i64,
+    initial_cash: f64,
 }
 
 fn main() {
@@ -50,6 +67,11 @@ fn real_main() -> Result<(), String> {
 
     if args.len() >= 2 && args[1] == "run" {
         return parse_run_args(&args[2..]).and_then(run_script);
+    }
+
+    if args.len() >= 2 && args[1] == "backtest" {
+        let args = parse_backtest_args(&args[2..])?;
+        return block_on(run_backtest_from_dhan(args)).map_err(|error| error.to_string())?;
     }
 
     let tiny_strategy = std::fs::read_to_string("sample-data/tiny_strategy.algomln")
@@ -170,8 +192,166 @@ fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
     })
 }
 
-fn run_script(args: RunArgs) -> Result<(), String> {
-    let script_path = Path::new(&args.script_path);
+fn parse_backtest_args(args: &[String]) -> Result<BacktestArgs, String> {
+    let script_path = args
+        .first()
+        .cloned()
+        .ok_or_else(|| "Error: missing .algomln file for backtest subcommand".to_string())?;
+    let mut security_id = None;
+    let mut symbol = None;
+    let mut exchange_segment = DEFAULT_EXCHANGE_SEGMENT.to_string();
+    let mut instrument = DEFAULT_INSTRUMENT.to_string();
+    let mut timeframe = Timeframe::M1;
+    let now = Utc::now().timestamp_millis();
+    let mut from = now - 365 * DAY_MS;
+    let mut to = now;
+    let mut initial_cash = INITIAL_CASH;
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--security" => {
+                index += 1;
+                security_id = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| "Error: --security requires a value".to_string())?,
+                );
+            }
+            "--symbol" => {
+                index += 1;
+                symbol = Some(
+                    args.get(index)
+                        .cloned()
+                        .ok_or_else(|| "Error: --symbol requires a value".to_string())?,
+                );
+            }
+            "--exchange" => {
+                index += 1;
+                exchange_segment = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| "Error: --exchange requires a value".to_string())?;
+            }
+            "--instrument" => {
+                index += 1;
+                instrument = args
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| "Error: --instrument requires a value".to_string())?;
+            }
+            "--timeframe" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "Error: --timeframe requires a value".to_string())?;
+                timeframe = parse_backtest_timeframe(value)?;
+            }
+            "--from" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "Error: --from requires a value".to_string())?;
+                from = parse_yyyy_mm_dd(value)?;
+            }
+            "--to" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "Error: --to requires a value".to_string())?;
+                to = parse_yyyy_mm_dd(value)?;
+            }
+            "--cash" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "Error: --cash requires a value".to_string())?;
+                initial_cash = value
+                    .parse::<f64>()
+                    .map_err(|error| format!("Error: invalid --cash value '{value}': {error}"))?;
+            }
+            other => return Err(format!("Error: unknown argument for backtest: {other}")),
+        }
+        index += 1;
+    }
+
+    if symbol.is_some() && security_id.is_some() {
+        return Err("Error: --symbol and --security are mutually exclusive".to_string());
+    }
+
+    if let Some(symbol) = symbol {
+        let parts = symbol
+            .split(['|', ':'])
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        security_id = Some(parts.first().copied().unwrap_or("").to_string());
+        if let Some(value) = parts.get(1) {
+            exchange_segment = (*value).to_string();
+        }
+        if let Some(value) = parts.get(2) {
+            instrument = (*value).to_string();
+        }
+    }
+
+    let security_id = security_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Error: --security <id> is required for backtest subcommand".to_string())?;
+
+    Ok(BacktestArgs {
+        script_path,
+        security_id,
+        exchange_segment,
+        instrument,
+        timeframe,
+        from,
+        to,
+        initial_cash,
+    })
+}
+
+fn parse_backtest_timeframe(value: &str) -> Result<Timeframe, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1m" => Ok(Timeframe::M1),
+        "5m" => Ok(Timeframe::M5),
+        "15m" => Ok(Timeframe::M15),
+        "30m" => Ok(Timeframe::M30),
+        "1h" => Ok(Timeframe::H1),
+        "1d" => Ok(Timeframe::D1),
+        _ => Err(format!(
+            "Error: unknown timeframe '{value}' — expected 1m 5m 15m 30m 1h 1d"
+        )),
+    }
+}
+
+fn parse_yyyy_mm_dd(value: &str) -> Result<i64, String> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| format!("Error: invalid date '{value}' — expected YYYY-MM-DD"))?
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| format!("Error: invalid date '{value}' — expected YYYY-MM-DD"))
+        .map(|date_time| date_time.and_utc().timestamp_millis())
+}
+
+fn timeframe_label(timeframe: Timeframe) -> &'static str {
+    match timeframe {
+        Timeframe::M1 => "1m",
+        Timeframe::M5 => "5m",
+        Timeframe::M15 => "15m",
+        Timeframe::M30 => "30m",
+        Timeframe::H1 | Timeframe::M60 => "1h",
+        Timeframe::D1 => "1d",
+        _ => "unknown",
+    }
+}
+
+fn date_label(timestamp_ms: i64) -> String {
+    chrono::DateTime::<Utc>::from_timestamp_millis(timestamp_ms)
+        .map(|date_time| date_time.date_naive().format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| timestamp_ms.to_string())
+}
+
+fn load_strategy_file(script_path: &str) -> Result<(StrategyNode, String), String> {
+    let script_path = Path::new(script_path);
     let extension = script_path
         .extension()
         .and_then(|extension| extension.to_str());
@@ -182,8 +362,8 @@ fn run_script(args: RunArgs) -> Result<(), String> {
         return Err(format!("Error: expected .algomln file, got {got}"));
     }
 
-    let source = std::fs::read_to_string(&args.script_path)
-        .map_err(|_| format!("Error: file not found: {}", args.script_path))?;
+    let source =
+        std::fs::read_to_string(script_path).map_err(|_| format!("Error: file not found: {}", script_path.display()))?;
     let strategy_name = script_path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -217,6 +397,11 @@ fn run_script(args: RunArgs) -> Result<(), String> {
         return Err(message);
     }
 
+    Ok((strategy, strategy_name))
+}
+
+fn run_script(args: RunArgs) -> Result<(), String> {
+    let (strategy, strategy_name) = load_strategy_file(&args.script_path)?;
     let mut candles = load_nifty_candles(&args.data_path).map_err(|error| {
         format!(
             "Error: failed to load candles from {}: {error}",
@@ -242,6 +427,51 @@ fn run_script(args: RunArgs) -> Result<(), String> {
     ))
     .map_err(|error| format!("Error: {error}"))?
     .map_err(|error| format!("Error: {error}"))?;
+
+    print_run_summary(&strategy_name, &result, started.elapsed());
+    Ok(())
+}
+
+async fn run_backtest_from_dhan(args: BacktestArgs) -> Result<(), String> {
+    let (strategy, strategy_name) = load_strategy_file(&args.script_path)?;
+    let access_token = std::env::var("DHAN_ACCESS_TOKEN")
+        .map_err(|_| "Error: DHAN_ACCESS_TOKEN environment variable not set".to_string())?;
+    let dhan_client =
+        DhanClient::new(DhanAuth::new(access_token).map_err(|error| format!("Error: {error}"))?);
+    let symbol = format!(
+        "{}|{}|{}",
+        args.security_id, args.exchange_segment, args.instrument
+    );
+
+    println!(
+        "fetching: {}  {}  {} → {}",
+        symbol,
+        timeframe_label(args.timeframe),
+        date_label(args.from),
+        date_label(args.to)
+    );
+    let fetch_started = Instant::now();
+    let candles = dhan_client
+        .get_ohlcv(&symbol, args.timeframe, args.from, args.to)
+        .await
+        .map_err(|error| format!("Error: Dhan fetch failed: {error}"))?;
+    let fetch_ms = fetch_started.elapsed().as_millis();
+    println!("fetched: {} candles  (fetch_ms={}ms)", candles.len(), fetch_ms);
+
+    if candles.is_empty() {
+        return Err("Error: no candles returned — check security ID and date range".to_string());
+    }
+
+    println!("strategy: {strategy_name}");
+    println!("rules: {}", strategy.rules.len());
+    println!("candles: {}", candles.len());
+    println!("cash: {:.2}", args.initial_cash);
+    println!("symbol: {symbol}");
+
+    let started = Instant::now();
+    let result = run_backtest_internal(strategy, symbol, candles, args.initial_cash)
+        .await
+        .map_err(|error| format!("Error: {error}"))?;
 
     print_run_summary(&strategy_name, &result, started.elapsed());
     Ok(())
@@ -354,6 +584,15 @@ fn print_run_summary(name: &str, result: &BacktestResult, runtime: Duration) {
         );
     }
 
+    for entry in &result.logs {
+        if let LogEntryKind::OrderFailed { rule_id, error } = &entry.kind {
+            println!(
+                "order_failed {} timestamp={} error={}",
+                rule_id, entry.candle_timestamp, error
+            );
+        }
+    }
+
     if result.trade_history.is_empty() {
         println!("no trades executed");
     }
@@ -367,6 +606,7 @@ USAGE:
   behavioral_backtest                                      run built-in test suite
   behavioral_backtest profile <name> [candles]            run named profile (rsi, ema)
   behavioral_backtest run <file.algomln> --data <csv>     run your own strategy
+  behavioral_backtest backtest <file.algomln> --security <id>   fetch from Dhan and backtest
 
 OPTIONS for run:
   --data <path>      path to OHLCV CSV file (required)
@@ -374,9 +614,20 @@ OPTIONS for run:
   --cash <amount>    starting cash (default: 100000)
   --symbol <name>    symbol name for display
 
+OPTIONS for backtest:
+  --security <id>       Dhan security ID (required, unless --symbol is used)
+  --symbol <id|ex|ins>  compact form: security_id|exchange|instrument
+  --exchange <seg>      exchange segment (default: NSE_EQ)
+  --instrument <type>   instrument type (default: EQUITY)
+  --timeframe <tf>      candle timeframe: 1m 5m 15m 30m 1h 1d (default: 1m)
+  --from <YYYY-MM-DD>   start date (default: 365 days ago)
+  --to <YYYY-MM-DD>     end date (default: today)
+  --cash <amount>       starting cash (default: 10000000)
+
 EXAMPLES:
   behavioral_backtest run strategies/ema_cross.algomln --data sample-data/nifty_1min.csv
   behavioral_backtest run my_strat.algomln --data sample-data/nifty_1min.csv --candles 50000 --cash 500000
+  behavioral_backtest backtest strategies/rsi_basic.algomln --security 1333 --from 2024-01-01 --to 2024-06-30
   behavioral_backtest profile rsi 10000"#
     );
 }
