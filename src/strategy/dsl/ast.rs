@@ -52,11 +52,15 @@ pub struct IndicatorCall {
     pub period: usize,
 }
 
+/// Indicator functions available in DSL expressions:
+/// ema(N), ma(N), rsi(N), rel_vol(N), atr(N), vwap(N), bb_upper(N),
+/// bb_lower(N), bb_mid(N).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IndicatorKind {
     Ema,
     Ma,
     Rsi,
+    RelVol,
     Atr,
     Vwap,
     BbUpper,
@@ -64,6 +68,8 @@ pub enum IndicatorKind {
     BbMid,
 }
 
+/// Candle price fields available in DSL expressions:
+/// close, open, high, low, volume, prev_close.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PriceField {
     Close,
@@ -71,6 +77,7 @@ pub enum PriceField {
     High,
     Low,
     Volume,
+    PrevClose,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -37,6 +37,7 @@ struct BacktestArgs {
 }
 
 fn main() {
+    dotenvy::dotenv().ok();
     if let Err(error) = real_main() {
         eprintln!("{error}");
         std::process::exit(1);

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::indicators::{atr, bbands, ema, ma, rsi, vwap};
+use crate::indicators::{atr, bbands, ema, ma, rel_vol, rsi, vwap};
 use crate::models::Candle;
 use crate::strategy::dsl::IndicatorKind;
 
@@ -116,6 +116,12 @@ fn latest_indicator_value(kind: &IndicatorKind, period: usize, candles: &[Candle
         IndicatorKind::Ma => ma(candles, period),
         IndicatorKind::Ema => ema(candles, period),
         IndicatorKind::Rsi => rsi(candles, period),
+        IndicatorKind::RelVol => {
+            return rel_vol(candles, period)
+                .last()
+                .copied()
+                .filter(|value| value.is_finite());
+        }
         IndicatorKind::Atr => atr(candles, period),
         IndicatorKind::Vwap => {
             return vwap(candles)

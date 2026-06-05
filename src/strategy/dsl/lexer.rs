@@ -14,6 +14,7 @@ pub enum TokenKind {
     Ema,
     Ma,
     Rsi,
+    RelVol,
     Atr,
     Vwap,
     BbUpper,
@@ -24,6 +25,7 @@ pub enum TokenKind {
     High,
     Low,
     Volume,
+    PrevClose,
     CrossAbove,
     CrossBelow,
     Lt,
@@ -223,6 +225,7 @@ fn keyword(ident: &str) -> Option<TokenKind> {
         "ema" => Some(TokenKind::Ema),
         "ma" => Some(TokenKind::Ma),
         "rsi" => Some(TokenKind::Rsi),
+        "rel_vol" => Some(TokenKind::RelVol),
         "atr" => Some(TokenKind::Atr),
         "vwap" => Some(TokenKind::Vwap),
         "bb_upper" => Some(TokenKind::BbUpper),
@@ -233,6 +236,7 @@ fn keyword(ident: &str) -> Option<TokenKind> {
         "high" => Some(TokenKind::High),
         "low" => Some(TokenKind::Low),
         "volume" => Some(TokenKind::Volume),
+        "prev_close" => Some(TokenKind::PrevClose),
         "cross_above" => Some(TokenKind::CrossAbove),
         "cross_below" => Some(TokenKind::CrossBelow),
         _ => None,
@@ -308,6 +312,20 @@ BUY 10
         let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
         assert!(kinds.contains(&TokenKind::Sell));
         assert!(kinds.contains(&TokenKind::All));
+    }
+
+    #[test]
+    fn tokenizes_rel_vol() {
+        let tokens = Lexer::tokenize("WHEN rel_vol(20) > 2.0\nBUY 5").unwrap();
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::RelVol));
+    }
+
+    #[test]
+    fn tokenizes_prev_close() {
+        let tokens = Lexer::tokenize("WHEN prev_close < 100\nBUY 1").unwrap();
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::PrevClose));
     }
 
     #[test]

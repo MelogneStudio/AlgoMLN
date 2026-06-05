@@ -42,6 +42,10 @@ pub enum EvalError {
         period: usize,
         available: usize,
     },
+    InsufficientHistory {
+        required: usize,
+        available: usize,
+    },
     NotYetImplemented(&'static str),
     OrderBuildFailed(String),
     EmptyCandles,
@@ -314,6 +318,15 @@ fn eval_expr(
             PriceField::High => ctx.current.high,
             PriceField::Low => ctx.current.low,
             PriceField::Volume => ctx.current.volume,
+            PriceField::PrevClose => {
+                if ctx.candles.len() < 2 {
+                    return Err(EvalError::InsufficientHistory {
+                        required: 2,
+                        available: ctx.candles.len(),
+                    });
+                }
+                ctx.candles[ctx.candles.len() - 2].close
+            }
         }),
         ExprNode::Indicator(call) => {
             provider
@@ -487,5 +500,23 @@ mod tests {
         let logs = engine.on_candle(&candles).await;
 
         assert!(logs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prev_close_requires_previous_candle() {
+        let mut engine = make_engine("WHEN close > prev_close\nBUY 1", 100_000.0);
+        let candles = vec![candle(100.0)];
+
+        let logs = engine.on_candle(&candles).await;
+
+        assert!(logs.iter().any(|entry| {
+            matches!(
+                &entry.kind,
+                LogEntryKind::EvalError {
+                    error,
+                    ..
+                } if error.contains("InsufficientHistory")
+            )
+        }));
     }
 }

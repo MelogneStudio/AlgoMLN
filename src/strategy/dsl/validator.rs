@@ -135,6 +135,7 @@ fn indicator_name(kind: &IndicatorKind) -> &'static str {
         IndicatorKind::Ema => "ema",
         IndicatorKind::Ma => "ma",
         IndicatorKind::Rsi => "rsi",
+        IndicatorKind::RelVol => "rel_vol",
         IndicatorKind::Atr => "atr",
         IndicatorKind::Vwap => "vwap",
         IndicatorKind::BbUpper => "bb_upper",
@@ -201,6 +202,25 @@ mod tests {
     #[test]
     fn rejects_zero_period() {
         let errors = AstValidator::validate(&strategy(vec![make_rsi_rule(0, 5)]));
+        assert!(errors
+            .iter()
+            .any(|err| matches!(err.kind, ValidationErrorKind::InvalidPeriod { .. })));
+    }
+
+    #[test]
+    fn rejects_rel_vol_with_zero_period() {
+        let errors = AstValidator::validate(&strategy(vec![rule(
+            "rule_0",
+            ConditionNode::Comparison {
+                left: ExprNode::Indicator(IndicatorCall {
+                    kind: IndicatorKind::RelVol,
+                    period: 0,
+                }),
+                op: CompareOp::Gt,
+                right: ExprNode::Literal(1.5),
+            },
+            ActionNode::Buy { quantity: 1 },
+        )]));
         assert!(errors
             .iter()
             .any(|err| matches!(err.kind, ValidationErrorKind::InvalidPeriod { .. })));

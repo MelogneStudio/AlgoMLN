@@ -162,9 +162,14 @@ impl Parser {
                 self.advance();
                 Ok(ExprNode::PriceField(PriceField::Volume))
             }
+            TokenKind::PrevClose => {
+                self.advance();
+                Ok(ExprNode::PriceField(PriceField::PrevClose))
+            }
             TokenKind::Ema => self.parse_indicator(IndicatorKind::Ema),
             TokenKind::Ma => self.parse_indicator(IndicatorKind::Ma),
             TokenKind::Rsi => self.parse_indicator(IndicatorKind::Rsi),
+            TokenKind::RelVol => self.parse_indicator(IndicatorKind::RelVol),
             TokenKind::Atr => self.parse_indicator(IndicatorKind::Atr),
             TokenKind::Vwap => self.parse_indicator(IndicatorKind::Vwap),
             TokenKind::BbUpper => self.parse_indicator(IndicatorKind::BbUpper),
@@ -450,6 +455,38 @@ BUY 10
             strategy.rules[0].condition,
             ConditionNode::CrossAbove { .. }
         ));
+    }
+
+    #[test]
+    fn parses_rel_vol_indicator() {
+        let node = parse("WHEN rel_vol(20) > 2.0\nBUY 5");
+        assert_eq!(node.rules.len(), 1);
+        match &node.rules[0].condition {
+            ConditionNode::Comparison { left, .. } => {
+                assert!(matches!(
+                    left,
+                    ExprNode::Indicator(IndicatorCall {
+                        kind: IndicatorKind::RelVol,
+                        period: 20
+                    })
+                ));
+            }
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn parses_prev_close() {
+        let node = parse("WHEN prev_close < 100\nBUY 1");
+        match &node.rules[0].condition {
+            ConditionNode::Comparison { left, .. } => {
+                assert!(matches!(
+                    left,
+                    ExprNode::PriceField(PriceField::PrevClose)
+                ));
+            }
+            _ => panic!("expected comparison"),
+        }
     }
 
     #[test]
