@@ -1,3 +1,3 @@
 pub mod log;
 
-pub use log::{IndicatorSnapshot, LogEntry, LogEntryKind, StrategyLogger};
+pub use log::{IndicatorSnapshot, LogEntry, LogEntryKind, RuleSkipReason, StrategyLogger};

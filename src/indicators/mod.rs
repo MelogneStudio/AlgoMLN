@@ -97,9 +97,7 @@ pub(crate) mod tests {
 
     #[test]
     fn rel_vol_equal_volume_returns_one() {
-        let candles = (0..10)
-            .map(|_| candle_with_vol(500.0))
-            .collect::<Vec<_>>();
+        let candles = (0..10).map(|_| candle_with_vol(500.0)).collect::<Vec<_>>();
         let result = super::rel_vol(&candles, 3);
         for &value in &result[3..] {
             assert!((value - 1.0).abs() < 0.001);
@@ -108,9 +106,7 @@ pub(crate) mod tests {
 
     #[test]
     fn rel_vol_zero_average_returns_zero_not_nan() {
-        let candles = (0..5)
-            .map(|_| candle_with_vol(0.0))
-            .collect::<Vec<_>>();
+        let candles = (0..5).map(|_| candle_with_vol(0.0)).collect::<Vec<_>>();
         let result = super::rel_vol(&candles, 3);
         assert!(result.iter().all(|value| value.is_finite()));
     }

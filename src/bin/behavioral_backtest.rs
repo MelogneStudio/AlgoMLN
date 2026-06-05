@@ -363,8 +363,8 @@ fn load_strategy_file(script_path: &str) -> Result<(StrategyNode, String), Strin
         return Err(format!("Error: expected .algomln file, got {got}"));
     }
 
-    let source =
-        std::fs::read_to_string(script_path).map_err(|_| format!("Error: file not found: {}", script_path.display()))?;
+    let source = std::fs::read_to_string(script_path)
+        .map_err(|_| format!("Error: file not found: {}", script_path.display()))?;
     let strategy_name = script_path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -420,16 +420,17 @@ fn run_script(args: RunArgs) -> Result<(), String> {
     println!("symbol: {}", args.symbol);
 
     let started = Instant::now();
+    let symbol = args.symbol.clone();
     let result = block_on(run_backtest_internal(
         strategy,
-        args.symbol,
+        symbol.clone(),
         candles,
         args.initial_cash,
     ))
     .map_err(|error| format!("Error: {error}"))?
     .map_err(|error| format!("Error: {error}"))?;
 
-    print_run_summary(&strategy_name, &result, started.elapsed());
+    print_run_summary(&strategy_name, &symbol, &result, started.elapsed());
     Ok(())
 }
 
@@ -457,7 +458,11 @@ async fn run_backtest_from_dhan(args: BacktestArgs) -> Result<(), String> {
         .await
         .map_err(|error| format!("Error: Dhan fetch failed: {error}"))?;
     let fetch_ms = fetch_started.elapsed().as_millis();
-    println!("fetched: {} candles  (fetch_ms={}ms)", candles.len(), fetch_ms);
+    println!(
+        "fetched: {} candles  (fetch_ms={}ms)",
+        candles.len(),
+        fetch_ms
+    );
 
     if candles.is_empty() {
         return Err("Error: no candles returned — check security ID and date range".to_string());
@@ -470,11 +475,11 @@ async fn run_backtest_from_dhan(args: BacktestArgs) -> Result<(), String> {
     println!("symbol: {symbol}");
 
     let started = Instant::now();
-    let result = run_backtest_internal(strategy, symbol, candles, args.initial_cash)
+    let result = run_backtest_internal(strategy, symbol.clone(), candles, args.initial_cash)
         .await
         .map_err(|error| format!("Error: {error}"))?;
 
-    print_run_summary(&strategy_name, &result, started.elapsed());
+    print_run_summary(&strategy_name, &symbol, &result, started.elapsed());
     Ok(())
 }
 
@@ -562,28 +567,70 @@ fn print_summary(name: &str, result: &BacktestResult, runtime: Duration, parse_t
     }
 }
 
-fn print_run_summary(name: &str, result: &BacktestResult, runtime: Duration) {
-    println!("=== {name} ===");
-    println!("candles={}", result.total_candles_processed);
-    println!("trades={}", result.trade_history.len());
-    println!("final_cash={:.2}", result.final_cash);
-    println!("pnl={:.2}", result.total_realized_pnl);
-    println!("runtime_ms={}", runtime.as_millis());
+fn print_run_summary(name: &str, symbol: &str, result: &BacktestResult, _runtime: Duration) {
+    let summary = &result.summary;
+    let border = "\u{2550}".repeat(48);
+
+    println!("{border}");
+    println!(" BACKTEST - {name}");
     println!(
-        "candles_per_sec={:.2}",
-        result.total_candles_processed as f64 / runtime.as_secs_f64().max(0.001)
+        " Symbol: {}   Candles: {}",
+        symbol, summary.total_candles_processed
+    );
+    println!("{border}");
+    println!();
+
+    println!(" CAPITAL");
+    println!("   Initial       ₹ {:>15.2}", summary.initial_cash);
+    println!("   Final         ₹ {:>15.2}", summary.final_cash);
+    println!("   Return          {:>+14.2}%", summary.total_return_pct);
+    println!();
+
+    println!(" TRADES");
+    println!(
+        "   Total         {:>16}   ({} buys, {} sells)",
+        summary.total_trades, summary.buy_count, summary.sell_count
+    );
+    println!("   Closed        {:>16}", summary.closed_trades);
+    println!(
+        "   Win rate      {:>15.2}%   ({}W / {}L / {}B)",
+        summary.win_rate_pct,
+        summary.winning_trades,
+        summary.losing_trades,
+        summary.breakeven_trades
     );
 
-    for trade in &result.trade_history {
-        let side = match trade.side {
-            OrderSide::Buy => "BUY",
-            OrderSide::Sell => "SELL",
-        };
+    if summary.closed_trades == 0 {
+        println!(" ⚠  No closed trades - strategy never completed a buy->sell cycle.");
+    } else {
+        println!();
+        println!(" PnL");
+        println!("   Realized      ₹ {:>+14.2}", summary.total_realized_pnl);
+        println!("   Gross profit  ₹ {:>15.2}", summary.gross_profit);
+        println!("   Gross loss    ₹ {:>15.2}", summary.gross_loss);
+        println!("   Profit factor   {:>14.2}", summary.profit_factor);
+        println!("   Avg win       ₹ {:>+14.2}", summary.avg_win);
+        println!("   Avg loss      ₹ {:>+14.2}", summary.avg_loss);
+        println!("   Largest win   ₹ {:>+14.2}", summary.largest_win);
+        println!("   Largest loss  ₹ {:>+14.2}", summary.largest_loss);
+        println!("   Expectancy    ₹ {:>+14.2}", summary.expectancy);
+        println!();
+
+        println!(" RISK");
         println!(
-            "trade {} {} qty={} price={:.2}",
-            trade.id, side, trade.quantity, trade.price
+            "   Max drawdown  ₹ {:>14.2}  ({:.3}%)",
+            summary.max_drawdown, summary.max_drawdown_pct
         );
+        println!("   Max consec W    {:>14}", summary.max_consecutive_wins);
+        println!("   Max consec L    {:>14}", summary.max_consecutive_losses);
     }
+
+    println!();
+    println!(" THROUGHPUT");
+    println!("   Candles/trade   {:>14.1}", summary.candles_per_trade);
+    println!("   Skipped (no pos){:>13}", summary.skipped_no_position);
+    println!();
+    println!("{border}");
 
     for entry in &result.logs {
         if let LogEntryKind::OrderFailed { rule_id, error } = &entry.kind {

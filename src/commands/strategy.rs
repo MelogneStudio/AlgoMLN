@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::broker::Timeframe;
 use crate::models::Candle;
+use crate::strategy::analytics::{BacktestAnalyser, BacktestSummary};
 use crate::strategy::dsl::{AstValidator, StrategyNode};
 use crate::strategy::execution::{PaperBroker, PaperBrokerState, PaperTrade};
 use crate::strategy::logging::LogEntry;
@@ -16,10 +17,12 @@ use crate::strategy::runtime::{StrategyEngine, StrategyInstance, StrategyStatus}
 pub struct BacktestResult {
     pub total_candles_processed: usize,
     pub final_cash: f64,
+    pub initial_cash: f64,
     pub total_realized_pnl: f64,
     pub trade_history: Vec<PaperTrade>,
     pub broker_state: PaperBrokerState,
     pub logs: Vec<LogEntry>,
+    pub summary: BacktestSummary,
     pub profile: BacktestProfile,
 }
 
@@ -91,13 +94,22 @@ pub async fn run_backtest_internal(
     let engine_profile = engine.profile();
     let indicator_profile = engine.indicator_profile();
     let broker_state = broker.get_state();
+    let summary = BacktestAnalyser::analyse(
+        &broker_state.trade_history,
+        initial_cash,
+        broker_state.cash,
+        candles.len(),
+        &logs,
+    );
     Ok(BacktestResult {
         total_candles_processed: candles.len(),
         final_cash: broker_state.cash,
+        initial_cash,
         total_realized_pnl: broker_state.total_realized_pnl,
         trade_history: broker_state.trade_history.clone(),
         broker_state,
         logs,
+        summary,
         profile: BacktestProfile {
             total_runtime_ms: total_started.elapsed().as_millis(),
             parser_validator_ms: parser_validator_time.as_millis(),

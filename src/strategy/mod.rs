@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod dsl;
 pub mod execution;
 pub mod logging;

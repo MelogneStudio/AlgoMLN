@@ -9,8 +9,8 @@ use crate::strategy::dsl::{
     ActionNode, CompareOp, ConditionNode, ExprNode, IndicatorKind, PriceField, RuleNode,
     StrategyNode,
 };
-use crate::strategy::execution::{build_order, ExecutionTarget, PaperPosition};
-use crate::strategy::logging::{LogEntry, LogEntryKind, StrategyLogger};
+use crate::strategy::execution::{build_order, ExecutionTarget, OrderBuildError, PaperPosition};
+use crate::strategy::logging::{LogEntry, LogEntryKind, RuleSkipReason, StrategyLogger};
 
 use super::context::EvalContext;
 use super::cross::CrossDetector;
@@ -193,13 +193,29 @@ impl StrategyEngine {
         ) {
             Ok(order) => order,
             Err(error) => {
-                self.logger.log(
-                    LogEntryKind::OrderFailed {
-                        rule_id: rule.id.clone(),
-                        error: format!("{error:?}"),
-                    },
-                    ctx.current.timestamp,
-                );
+                match error {
+                    OrderBuildError::NoPosition => self.logger.log(
+                        LogEntryKind::RuleSkipped {
+                            rule_id: rule.id.clone(),
+                            reason: RuleSkipReason::NoPosition,
+                        },
+                        ctx.current.timestamp,
+                    ),
+                    OrderBuildError::ZeroQuantity => self.logger.log(
+                        LogEntryKind::OrderFailed {
+                            rule_id: rule.id.clone(),
+                            error: "zero quantity - validator missed this".to_string(),
+                        },
+                        ctx.current.timestamp,
+                    ),
+                    OrderBuildError::QuantityTooLarge => self.logger.log(
+                        LogEntryKind::OrderFailed {
+                            rule_id: rule.id.clone(),
+                            error: "quantity too large".to_string(),
+                        },
+                        ctx.current.timestamp,
+                    ),
+                }
                 return;
             }
         };

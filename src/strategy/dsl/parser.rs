@@ -480,10 +480,7 @@ BUY 10
         let node = parse("WHEN prev_close < 100\nBUY 1");
         match &node.rules[0].condition {
             ConditionNode::Comparison { left, .. } => {
-                assert!(matches!(
-                    left,
-                    ExprNode::PriceField(PriceField::PrevClose)
-                ));
+                assert!(matches!(left, ExprNode::PriceField(PriceField::PrevClose)));
             }
             _ => panic!("expected comparison"),
         }

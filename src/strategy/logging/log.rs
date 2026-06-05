@@ -34,6 +34,10 @@ pub enum LogEntryKind {
         rule_id: String,
         result: OrderResult,
     },
+    RuleSkipped {
+        rule_id: String,
+        reason: RuleSkipReason,
+    },
     OrderFailed {
         rule_id: String,
         error: String,
@@ -46,6 +50,11 @@ pub enum LogEntryKind {
         from: StrategyStatus,
         to: StrategyStatus,
     },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub enum RuleSkipReason {
+    NoPosition,
 }
 
 #[derive(Debug, Clone, Serialize)]
