@@ -343,6 +343,33 @@ fn eval_expr(
                 }
                 ctx.candles[ctx.candles.len() - 2].close
             }
+            PriceField::PrevOpen => {
+                if ctx.candles.len() < 2 {
+                    return Err(EvalError::InsufficientHistory {
+                        required: 2,
+                        available: ctx.candles.len(),
+                    });
+                }
+                ctx.candles[ctx.candles.len() - 2].open
+            }
+            PriceField::PrevHigh => {
+                if ctx.candles.len() < 2 {
+                    return Err(EvalError::InsufficientHistory {
+                        required: 2,
+                        available: ctx.candles.len(),
+                    });
+                }
+                ctx.candles[ctx.candles.len() - 2].high
+            }
+            PriceField::PrevLow => {
+                if ctx.candles.len() < 2 {
+                    return Err(EvalError::InsufficientHistory {
+                        required: 2,
+                        available: ctx.candles.len(),
+                    });
+                }
+                ctx.candles[ctx.candles.len() - 2].low
+            }
         }),
         ExprNode::Indicator(call) => {
             provider

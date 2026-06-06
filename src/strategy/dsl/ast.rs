@@ -78,6 +78,9 @@ pub enum PriceField {
     Low,
     Volume,
     PrevClose,
+    PrevOpen,
+    PrevHigh,
+    PrevLow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

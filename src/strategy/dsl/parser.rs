@@ -166,6 +166,18 @@ impl Parser {
                 self.advance();
                 Ok(ExprNode::PriceField(PriceField::PrevClose))
             }
+            TokenKind::PrevOpen => {
+                self.advance();
+                Ok(ExprNode::PriceField(PriceField::PrevOpen))
+            }
+            TokenKind::PrevHigh => {
+                self.advance();
+                Ok(ExprNode::PriceField(PriceField::PrevHigh))
+            }
+            TokenKind::PrevLow => {
+                self.advance();
+                Ok(ExprNode::PriceField(PriceField::PrevLow))
+            }
             TokenKind::Ema => self.parse_indicator(IndicatorKind::Ema),
             TokenKind::Ma => self.parse_indicator(IndicatorKind::Ma),
             TokenKind::Rsi => self.parse_indicator(IndicatorKind::Rsi),
@@ -481,6 +493,38 @@ BUY 10
         match &node.rules[0].condition {
             ConditionNode::Comparison { left, .. } => {
                 assert!(matches!(left, ExprNode::PriceField(PriceField::PrevClose)));
+            }
+            _ => panic!("expected comparison"),
+        }
+    }
+    #[test]
+    fn parses_prev_open() {
+        let node = parse("WHEN prev_open < 100\nBUY 1");
+        match &node.rules[0].condition {
+            ConditionNode::Comparison { left, .. } => {
+                assert!(matches!(left, ExprNode::PriceField(PriceField::PrevOpen)));
+            }
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn parses_prev_high() {
+        let node = parse("WHEN close > prev_high\nBUY 1");
+        match &node.rules[0].condition {
+            ConditionNode::Comparison { right, .. } => {
+                assert!(matches!(right, ExprNode::PriceField(PriceField::PrevHigh)));
+            }
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn parses_prev_low() {
+        let node = parse("WHEN close < prev_low\nSELL ALL");
+        match &node.rules[0].condition {
+            ConditionNode::Comparison { right, .. } => {
+                assert!(matches!(right, ExprNode::PriceField(PriceField::PrevLow)));
             }
             _ => panic!("expected comparison"),
         }
