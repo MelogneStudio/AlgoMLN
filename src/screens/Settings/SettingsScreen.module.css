@@ -1,0 +1,159 @@
+.shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 16px 30px 30px 158px;
+  overflow-y: auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 18px;
+  flex-shrink: 0;
+}
+
+.title {
+  font-family: var(--font-sora);
+  font-weight: 600;
+  font-size: 36px;
+  color: var(--text-primary);
+  margin: 0;
+  padding: 6px 22px;
+  background: var(--mainframe-outframe);
+  border-radius: var(--radius-pill);
+  display: inline-block;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 20px;
+  max-width: 1100px;
+}
+
+.card {
+  background: var(--mainframe-outframe);
+  border-radius: var(--radius-card);
+  padding: 22px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cardLabel {
+  font-family: var(--font-sansation);
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.cardValue {
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.cardSubtext {
+  font-family: var(--font-sansation);
+  font-size: 16px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.capitalRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rupee {
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--text-muted);
+}
+
+.capitalInput {
+  width: 220px;
+  height: 44px;
+  background: var(--option-bg);
+  border: 2px solid var(--border-option);
+  border-radius: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 22px;
+  padding: 0 12px;
+  outline: none;
+}
+
+.capitalInput:focus {
+  border-color: var(--border-sidebar-selected);
+}
+
+.scaleRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 4px;
+}
+
+.scaleValue {
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--text-muted);
+  min-width: 70px;
+}
+
+.scaleMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--font-sansation);
+  font-size: 14px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
+.aboutCard .cardLabel {
+  font-family: var(--font-sora);
+  font-weight: 600;
+  font-size: 32px;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.aboutCard {
+  /* keep as a normal card */
+}
+
+.aboutTitle {
+  font-family: var(--font-sora);
+  font-weight: 600;
+  font-size: 32px;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.version {
+  font-family: var(--font-cascadia);
+  font-size: 18px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.tagline {
+  font-family: var(--font-sansation);
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--text-muted);
+  margin: 0;
+}

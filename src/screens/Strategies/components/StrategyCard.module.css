@@ -1,0 +1,127 @@
+.card {
+  width: 100%;
+  max-width: 1294px;
+  background: var(--strategy-card-bg);
+  border-radius: var(--radius-card);
+  padding: 20px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+  min-height: 160px;
+}
+
+.topRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.titleGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.name {
+  font-family: var(--font-phudu);
+  font-weight: 400;
+  font-size: 26px;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.editBtn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+}
+
+.editBtn:hover {
+  color: var(--text-primary);
+}
+
+.description {
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 18px;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 0;
+  flex: 1;
+  text-align: center;
+}
+
+.badges {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.badge {
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--badge-paper);
+  padding: 3px 16px;
+  border-radius: var(--radius-badge);
+  text-transform: capitalize;
+}
+
+.badge[data-mode='live'] {
+  background: #c47a4a;
+}
+
+.middleRow {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+}
+
+.metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 20px;
+  color: var(--text-muted);
+}
+
+.positive {
+  color: var(--text-green);
+}
+
+.negative {
+  color: #e05252;
+}
+
+.yellow {
+  color: var(--text-yellow);
+}
+
+.bottomRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.error {
+  background: rgba(224, 82, 82, 0.1);
+  border: 1px solid rgba(224, 82, 82, 0.4);
+  border-radius: 8px;
+  padding: 6px 12px;
+  color: #e05252;
+  font-family: var(--font-sansation);
+  font-size: 13px;
+}

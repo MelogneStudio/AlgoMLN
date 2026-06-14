@@ -1,0 +1,104 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0 4px 16px;
+}
+
+.overview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 32px;
+  background: var(--mainframe-outframe);
+  border-radius: var(--radius-card);
+  padding: 22px 28px;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.label {
+  font-family: var(--font-sansation);
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--text-primary);
+}
+
+.value {
+  font-family: var(--font-sansation);
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--text-dim);
+}
+
+.positive {
+  color: var(--text-green);
+}
+
+.negative {
+  color: #e05252;
+}
+
+.results {
+  background: var(--mainframe-outframe);
+  border-radius: var(--radius-card);
+  padding: 18px;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty {
+  font-family: var(--font-sansation);
+  font-weight: 700;
+  font-size: 24px;
+  color: var(--text-dim);
+  text-align: center;
+  padding: 60px 20px;
+}
+
+.tableWrap {
+  width: 100%;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-cascadia);
+  font-size: 16px;
+  color: var(--text-muted);
+}
+
+.table th {
+  text-align: left;
+  font-weight: 700;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-rule);
+  color: var(--text-primary);
+  position: sticky;
+  top: 0;
+  background: rgba(34, 34, 34, 0.95);
+  backdrop-filter: blur(8px);
+}
+
+.table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.buy {
+  color: var(--text-green);
+  font-weight: 700;
+}
+
+.sell {
+  color: #e05252;
+  font-weight: 700;
+}

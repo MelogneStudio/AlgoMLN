@@ -1,0 +1,70 @@
+:root {
+  /* Backgrounds */
+  --app-window-bg: rgba(34, 34, 34, 0.6);
+  --mainframe-outframe: rgba(34, 34, 34, 0.4);
+  --entry-bg: rgba(8, 255, 0, 0.05);
+  --exit-bg: rgba(255, 0, 0, 0.07);
+  --rule-inner-bg: rgba(17, 17, 17, 0.4);
+  --option-bg: rgba(51, 51, 51, 0.6);
+  --highlight: #555555;
+  --sidebar-bg: rgba(0, 0, 0, 0.3);
+  --titlebar-controls-bg: rgba(34, 34, 34, 0.7);
+  --code-editor-bg: rgba(17, 17, 17, 0.8);
+  --modal-overlay-bg: rgba(0, 0, 0, 0.3);
+  --upload-drop-bg: rgba(102, 102, 102, 0.5);
+  --strategy-card-bg: rgba(34, 34, 34, 0.4);
+
+  /* Accent gradients */
+  --accent-gradient: linear-gradient(90deg, rgba(145, 133, 67, 0.2) 0%, rgba(145, 133, 67, 0.2) 100%),
+                     linear-gradient(90deg, rgba(67, 145, 84, 0.3) 0%, rgba(67, 145, 84, 0.3) 100%);
+  --accent-gradient-hover: linear-gradient(90deg, rgba(255, 239, 148, 0.2) 0%, rgba(255, 239, 148, 0.2) 100%),
+                           linear-gradient(90deg, rgba(163, 226, 177, 0.3) 0%, rgba(163, 226, 177, 0.3) 100%);
+  --entry-gradient: linear-gradient(90deg, rgba(8, 255, 0, 0.05) 0%, rgba(8, 255, 0, 0.05) 100%),
+                    linear-gradient(90deg, rgba(34, 34, 34, 0.4) 0%, rgba(34, 34, 34, 0.4) 100%);
+  --exit-gradient: linear-gradient(90deg, rgba(255, 0, 0, 0.07) 0%, rgba(255, 0, 0, 0.07) 100%),
+                   linear-gradient(90deg, rgba(34, 34, 34, 0.4) 0%, rgba(34, 34, 34, 0.4) 100%);
+
+  /* Text */
+  --text-primary: #ffffff;
+  --text-muted: rgba(255, 255, 255, 0.7);
+  --text-dim: #777777;
+  --text-green: #5ea94d;
+  --text-yellow: #98a94d;
+
+  /* Borders */
+  --border-option: #444444;
+  --border-rule: rgba(119, 119, 119, 0.5);
+  --border-modal: rgba(127, 127, 127, 0.6);
+  --border-sidebar-selected: #d6d6d6;
+  --border-upload: rgba(119, 119, 119, 0.4);
+
+  /* Shadows */
+  --shadow-sidebar: 0px 4px 15px 5px rgba(255, 255, 255, 0.25);
+  --shadow-sidebar-selected: 0px 0px 5px 4px rgba(255, 255, 255, 0.2);
+  --shadow-logo: 0px 0px 15px 0px white;
+  --shadow-rule-inner: 0px 0px 15px 10px rgba(255, 255, 255, 0.05);
+  --shadow-modal: 0px 0px 15px 10px rgba(255, 255, 255, 0.2);
+  --shadow-app-window: blur(40px);
+
+  /* Status badge colors */
+  --badge-paper: #649f79;
+  --badge-live: #649f79;
+
+  /* Radii */
+  --radius-app: 20px;
+  --radius-sidebar: 40px;
+  --radius-sidebar-expanded: 60px;
+  --radius-card: 40px;
+  --radius-rule: 40px;
+  --radius-option: 20px;
+  --radius-option-inner: 16px;
+  --radius-pill: 999px;
+  --radius-badge: 999px;
+
+  /* Dimensions */
+  --app-width: 1550px;
+  --app-height: 757px;
+  --sidebar-collapsed-width: 84px;
+  --sidebar-expanded-width: 280px;
+  --titlebar-height: 50px;
+}

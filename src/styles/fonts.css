@@ -1,0 +1,12 @@
+/* Google Fonts loaded by main.tsx via index.html <link> tags. */
+/* This file just declares font-family aliases for CSS modules. */
+
+:root {
+  --font-sora: 'Sora', system-ui, -apple-system, sans-serif;
+  --font-sansation: 'Sansation', system-ui, -apple-system, sans-serif;
+  --font-cascadia: 'Cascadia Code', 'Cascadia Mono', 'Fira Code', 'Consolas', monospace;
+  --font-rajdhani: 'Rajdhani', system-ui, -apple-system, sans-serif;
+  --font-geist-mono: 'Geist Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --font-phudu: 'Phudu', system-ui, -apple-system, sans-serif;
+  --font-inter: 'Inter', system-ui, -apple-system, sans-serif;
+}

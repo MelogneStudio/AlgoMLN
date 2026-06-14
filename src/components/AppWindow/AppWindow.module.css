@@ -1,0 +1,14 @@
+.window {
+  position: relative;
+  width: var(--app-width);
+  height: var(--app-height);
+  transform-origin: top left;
+  transform: scale(var(--ui-scale, 1));
+  background: var(--app-window-bg);
+  border-radius: var(--radius-app);
+  overflow: clip;
+  box-shadow: 0px 30px 60px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  isolation: isolate;
+}

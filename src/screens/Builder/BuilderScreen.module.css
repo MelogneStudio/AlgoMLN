@@ -1,0 +1,139 @@
+.shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 16px 30px 0 158px;
+  overflow-y: auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+.title {
+  font-family: var(--font-sora);
+  font-weight: 600;
+  font-size: 36px;
+  color: var(--text-primary);
+  margin: 0;
+  padding: 6px 22px;
+  background: var(--mainframe-outframe);
+  border-radius: var(--radius-pill);
+  display: inline-block;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.advancedNotice {
+  background: rgba(255, 200, 0, 0.1);
+  border: 1px solid rgba(255, 200, 0, 0.3);
+  border-radius: var(--radius-option);
+  padding: 10px 18px;
+  margin-bottom: 14px;
+  font-family: var(--font-sansation);
+  font-size: 16px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.advancedLink {
+  background: none;
+  border: none;
+  color: var(--text-yellow);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+}
+
+.rulesArea {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  flex-shrink: 0;
+  padding: 6px 0 8px;
+}
+
+.rulesRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.actionsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 6px 12px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.runConfig {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.configField {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-family: var(--font-sansation);
+  font-size: 16px;
+}
+
+.configInput {
+  width: 140px;
+  height: 40px;
+  background: var(--option-bg);
+  border: 2px solid var(--border-option);
+  border-radius: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 18px;
+  padding: 0 12px;
+  outline: none;
+}
+
+.configInput:focus {
+  border-color: var(--border-sidebar-selected);
+}
+
+.runActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.error {
+  background: rgba(224, 82, 82, 0.1);
+  border: 1px solid rgba(224, 82, 82, 0.4);
+  border-radius: var(--radius-option);
+  padding: 10px 16px;
+  color: #e05252;
+  font-family: var(--font-sansation);
+  font-size: 16px;
+  flex-shrink: 0;
+}

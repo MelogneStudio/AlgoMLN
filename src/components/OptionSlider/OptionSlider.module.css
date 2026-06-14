@@ -1,0 +1,45 @@
+.shell {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: var(--radius-option);
+  border: 2px solid var(--border-option);
+  background: var(--option-bg);
+  overflow: clip;
+}
+
+.pill {
+  position: absolute;
+  top: 3px;
+  border-radius: var(--radius-option-inner);
+  background: var(--highlight);
+  transition: left 150ms ease;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.option {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 24px;
+  color: var(--text-dim);
+  transition: color 150ms ease;
+  white-space: nowrap;
+  padding: 0 6px;
+}
+
+.option:hover {
+  color: var(--text-muted);
+}
+
+.option.active {
+  color: var(--text-muted);
+}

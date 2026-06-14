@@ -1,0 +1,101 @@
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--modal-overlay-bg);
+  backdrop-filter: blur(15px);
+  -webkit-backdrop-filter: blur(15px);
+  border: 4px solid var(--border-modal);
+  border-radius: var(--radius-app);
+  z-index: 50;
+  overflow: hidden;
+}
+
+.card {
+  width: min(812px, 92%);
+  background: rgba(34, 34, 34, 0.7);
+  border-radius: 80px;
+  box-shadow: var(--shadow-modal);
+  padding: 36px 48px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-height: 92%;
+  align-items: stretch;
+}
+
+.title {
+  font-family: var(--font-sora);
+  font-weight: 600;
+  font-size: 36px;
+  color: var(--text-primary);
+  margin: 0 0 6px;
+  text-align: center;
+}
+
+.dropzone {
+  background: var(--upload-drop-bg);
+  border: 3px solid var(--border-upload);
+  border-radius: 40px;
+  padding: 36px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+  outline: none;
+}
+
+.dropzoneActive,
+.dropzone:focus-visible {
+  background: rgba(150, 150, 150, 0.5);
+  border-color: var(--border-sidebar-selected);
+}
+
+.dropIcon {
+  color: var(--text-muted);
+}
+
+.dropText {
+  font-family: var(--font-sansation);
+  font-weight: 700;
+  font-size: 22px;
+  color: var(--text-primary);
+  text-align: center;
+}
+
+.dropText code {
+  font-family: var(--font-cascadia);
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.dropHint {
+  font-family: var(--font-sansation);
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.error {
+  background: rgba(224, 82, 82, 0.1);
+  border: 1px solid rgba(224, 82, 82, 0.4);
+  border-radius: var(--radius-option);
+  padding: 8px 14px;
+  color: #e05252;
+  font-family: var(--font-sansation);
+  font-size: 14px;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-family: var(--font-sansation);
+  font-size: 15px;
+  color: var(--text-muted);
+}
