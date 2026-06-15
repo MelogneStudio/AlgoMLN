@@ -7,6 +7,7 @@ import styles from './StrategiesScreen.module.css';
 interface StrategiesScreenProps {
   refreshKey: number;
   onViewCode: (dsl: string, name: string) => void;
+  onChanged: () => void;
 }
 
 const DEMO_STRATEGIES: DeployedStrategy[] = [
@@ -44,7 +45,11 @@ SELL ALL`,
   },
 ];
 
-export function StrategiesScreen({ refreshKey, onViewCode }: StrategiesScreenProps) {
+export function StrategiesScreen({
+  refreshKey,
+  onViewCode,
+  onChanged,
+}: StrategiesScreenProps) {
   const [strategies, setStrategies] = useState<DeployedStrategy[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -108,7 +113,7 @@ export function StrategiesScreen({ refreshKey, onViewCode }: StrategiesScreenPro
               key={s.id}
               strategy={s}
               onViewCode={onViewCode}
-              onChanged={() => void load()}
+              onChanged={onChanged}
             />
           ))
         )}

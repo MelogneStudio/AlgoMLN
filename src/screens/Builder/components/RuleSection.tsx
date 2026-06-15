@@ -1,5 +1,5 @@
-import type { BuilderRule } from '../../../../types/strategy';
-import { RuleRow } from '../../../../components/RuleRow/RuleRow';
+import type { BuilderRule } from '../../../types/strategy';
+import { RuleRow } from '../../../components/RuleRow/RuleRow';
 import styles from './RuleSection.module.css';
 
 interface RuleSectionProps {

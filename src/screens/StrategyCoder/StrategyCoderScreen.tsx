@@ -9,6 +9,7 @@ interface StrategyCoderScreenProps {
   onClose: () => void;
   onSave: (source: string) => void;
   readOnly?: boolean;
+  error?: string | null;
 }
 
 export function StrategyCoderScreen({
@@ -17,17 +18,18 @@ export function StrategyCoderScreen({
   onClose,
   onSave,
   readOnly = false,
+  error: externalError = null,
 }: StrategyCoderScreenProps) {
   const [source, setSource] = useState(initialSource);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(externalError);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     if (open) {
       setSource(initialSource);
-      setError(null);
+      setError(externalError);
     }
-  }, [open, initialSource]);
+  }, [open, initialSource, externalError]);
 
   if (!open) return null;
 

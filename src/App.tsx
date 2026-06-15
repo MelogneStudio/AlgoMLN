@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AppWindow } from './components/AppWindow/AppWindow';
 import { TitleBar } from './components/TitleBar/TitleBar';
 import { Sidebar } from './components/Sidebar/Sidebar';
@@ -9,7 +9,7 @@ import { StrategiesScreen } from './screens/Strategies/StrategiesScreen';
 import { SettingsScreen } from './screens/Settings/SettingsScreen';
 import { useStrategyBuilder } from './hooks/useStrategyBuilder';
 import { useBacktest } from './hooks/useBacktest';
-import { strategyToDsl, useDslSync, validateDsl } from './hooks/useDslSync';
+import { strategyToDsl, useDslSync } from './hooks/useDslSync';
 import {
   applyScale,
   clampScale,
@@ -21,7 +21,7 @@ import {
   saveScale,
   SIDEBAR_FORCE_COLLAPSE_THRESHOLD,
 } from './lib/scaling';
-import { isTauri } from './types/tauri';
+import { isTauri, validateDsl } from './types/tauri';
 import type { BuilderRule } from './types/strategy';
 import styles from './App.module.css';
 
@@ -114,49 +114,52 @@ export function App() {
   // ----- Coder state (the editor's current source text) -----
   const [coderSource, setCoderSource] = useState<string>('');
   const [coderReadOnly, setCoderReadOnly] = useState(false);
+  const [coderError, setCoderError] = useState<string | null>(null);
 
   // ----- Strategies refresh tick -----
   const [strategiesRefreshKey, setStrategiesRefreshKey] = useState(0);
+  const bumpStrategies = useCallback(() => {
+    setStrategiesRefreshKey((k) => k + 1);
+  }, []);
 
   // ----- Coder open behaviour -----
   const openCoderFromBuilder = useCallback(() => {
     setCoderSource(strategyToDsl(strategy));
     setCoderReadOnly(false);
+    setCoderError(null);
     setModal('coder');
   }, [strategy]);
 
   const openCoderReadOnly = useCallback((source: string) => {
     setCoderSource(source);
     setCoderReadOnly(true);
+    setCoderError(null);
     setModal('coder');
   }, []);
 
   // ----- Done handler for coder -----
-  const lastLoadResult = useRef<boolean>(true);
   const handleCoderDone = useCallback(
     async (source: string) => {
-      // Validate before applying
       if (isTauri()) {
         try {
           const errs = await validateDsl(source);
           if (errs.length > 0) {
-            // Don't close; surface error inline
-            lastLoadResult.current = false;
-            // Bubble error via backtest error slot? Simpler: skip and trust
-            // the validateDsl call; the user can read the backend message in
-            // dev tools. The UI spec says "shows inline error" — we set
-            // validationErrors from the debounced effect so it surfaces in
-            // the advanced notice above the rules.
+            setCoderError(errs.join('; '));
             return;
           }
         } catch (err) {
-          console.warn('validateDsl failed:', err);
+          setCoderError(err instanceof Error ? err.message : String(err));
+          return;
         }
       }
       const ok = loadFromDsl(source);
-      lastLoadResult.current = ok;
       if (ok) {
+        setCoderError(null);
         setModal('none');
+      } else {
+        setCoderError(
+          'Strategy uses features the visual builder cannot represent. Edit in the coder.'
+        );
       }
     },
     [loadFromDsl]
@@ -173,19 +176,18 @@ export function App() {
 
   const onCloseModal = useCallback(() => {
     setModal('none');
+    setCoderError(null);
   }, []);
 
-  const onLoadFromUploader = useCallback(
-    (source: string) => {
-      setCoderSource(source);
-      setCoderReadOnly(false);
-      setModal('coder');
-    },
-    []
-  );
+  const onLoadFromUploader = useCallback((source: string) => {
+    setCoderSource(source);
+    setCoderReadOnly(false);
+    setCoderError(null);
+    setModal('coder');
+  }, []);
 
   const onViewCodeFromStrategyCard = useCallback(
-    (source: string) => {
+    (source: string, _name: string) => {
       openCoderReadOnly(source);
     },
     [openCoderReadOnly]
@@ -236,6 +238,7 @@ export function App() {
             <StrategiesScreen
               refreshKey={strategiesRefreshKey}
               onViewCode={onViewCodeFromStrategyCard}
+              onChanged={bumpStrategies}
             />
           )}
           {screen === 'settings' && (
@@ -254,6 +257,7 @@ export function App() {
         onClose={onCloseModal}
         onSave={handleCoderDone}
         readOnly={coderReadOnly}
+        error={coderError}
       />
 
       <StrategyUploaderScreen
@@ -262,6 +266,7 @@ export function App() {
         onOpenEditor={() => {
           setCoderSource(strategyToDsl(strategy));
           setCoderReadOnly(false);
+          setCoderError(null);
         }}
         onLoadSource={onLoadFromUploader}
       />
@@ -276,4 +281,3 @@ export function App() {
   );
 }
 
-export type { Screen, Modal };
