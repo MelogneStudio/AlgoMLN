@@ -4,7 +4,7 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  padding: 16px 30px 0 158px;
+  padding: 16px 30px 0 30px;
   overflow-y: auto;
 }
 

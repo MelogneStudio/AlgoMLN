@@ -13,10 +13,14 @@
     "windows": [
       {
         "title": "AlgoMLN",
-        "width": 1280,
-        "height": 800,
+        "width": 1550,
+        "height": 757,
         "minWidth": 960,
-        "minHeight": 640
+        "minHeight": 640,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "resizable": false
       }
     ],
     "security": {

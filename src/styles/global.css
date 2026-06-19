@@ -20,13 +20,16 @@ body {
   overflow: hidden;
 }
 
+/* OS window is transparent + borderless. The .window in AppWindow.module.css
+   is the only opaque element, so the user's wallpaper shows around its
+   rounded corners. Make sure #root doesn't add a solid background. */
 #root {
   width: 100%;
   height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   background: transparent;
+  /* When the OS window is sized to the scaled design canvas (applyScale),
+     #root should not center it inside a larger viewport — it should fill it. */
+  display: block;
 }
 
 button {

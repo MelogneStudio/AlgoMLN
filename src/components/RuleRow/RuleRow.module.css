@@ -10,8 +10,12 @@
 .actionLine {
   display: flex;
   align-items: center;
-  gap: 16px;
-  flex-wrap: nowrap;
+  gap: 12px;
+  /* Allow children to shrink below their content size when the content area
+     narrows (e.g. expanded sidebar at low scale). Wrap rather than overflow. */
+  flex-wrap: wrap;
+  row-gap: 10px;
+  min-width: 0;
 }
 
 .actionLine {
@@ -39,7 +43,10 @@
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 .ltpBadge {
@@ -55,6 +62,7 @@
   font-weight: 700;
   font-size: 24px;
   color: var(--text-dim);
+  flex-shrink: 0;
 }
 
 .hint {

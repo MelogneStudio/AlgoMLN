@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppWindow } from './components/AppWindow/AppWindow';
 import { TitleBar } from './components/TitleBar/TitleBar';
 import { Sidebar } from './components/Sidebar/Sidebar';
@@ -53,34 +53,20 @@ export function App() {
     void applyScale(fit);
   }, []);
 
-  // Apply scale on mount (and on initial fit if no user override)
+  // Apply scale on mount exactly once. The polling interval that previously
+  // ran every 2s was removed: it caused feedback loops with Tauri's setSize,
+  // where the OS window size changes and Tauri's screen.width/height
+  // reporting shifts in response, triggering another re-fit on the next tick.
+  // Scale only changes when the user moves the slider in Settings.
+  const appliedOnMount = useRef(false);
   useEffect(() => {
+    if (appliedOnMount.current) return;
+    appliedOnMount.current = true;
     const saved = loadSavedScale();
-    if (saved === null) {
-      const { w, h } = getScreenSize();
-      const fit = computeFitScale(w, h);
-      if (fit !== initialScale) setScaleState(fit);
-      void applyScale(fit);
-    } else {
-      void applyScale(saved);
-    }
+    const target = saved ?? initialScale;
+    void applyScale(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Auto-rescale on monitor change when no user override is set
-  useEffect(() => {
-    if (loadSavedScale() !== null) return;
-    const handle = setInterval(() => {
-      if (loadSavedScale() !== null) return;
-      const { w, h } = getScreenSize();
-      const fit = computeFitScale(w, h);
-      if (Math.abs(fit - scale) > 0.01) {
-        setScaleState(fit);
-        void applyScale(fit);
-      }
-    }, 2000);
-    return () => clearInterval(handle);
-  }, [scale]);
 
   // ----- Sidebar collapse lock from scale -----
   const [sidebarUserCollapsed, setSidebarUserCollapsed] = useState(false);

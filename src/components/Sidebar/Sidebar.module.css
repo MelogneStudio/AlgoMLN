@@ -1,7 +1,9 @@
 .sidebar {
-  position: absolute;
-  left: 31px;
-  top: 54px;
+  /* Flex column item so content reflows when sidebar width changes.
+     margin-top/left match the spec's original absolute offset (left: 31px, top: 54px). */
+  flex: 0 0 auto;
+  width: var(--sidebar-collapsed-width);
+  margin: 54px 0 0 31px;
   height: 650px;
   border-radius: var(--radius-sidebar);
   background: var(--sidebar-bg);
