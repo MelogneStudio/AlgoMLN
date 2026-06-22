@@ -41,6 +41,22 @@ fn main() {
 
     tauri::Builder::default()
         .manage(AppState { data })
+        .setup(|app| {
+            #[cfg(target_os = "windows")]
+            {
+                use tauri::Manager;
+                use window_vibrancy::apply_acrylic;
+
+                let win = app
+                    .get_webview_window("main")
+                    .expect("main window not found");
+
+                win.set_decorations(false)?;
+                apply_acrylic(&win, Some((34, 34, 34, 153)))
+                    .expect("Acrylic requires Windows 10 1803+");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_ohlcv,
             get_quote,

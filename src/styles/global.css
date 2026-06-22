@@ -20,15 +20,15 @@ body {
   overflow: hidden;
 }
 
-/* OS window is transparent + borderless. The .window in AppWindow.module.css
-   is the only opaque element, so the user's wallpaper shows around its
-   rounded corners. Make sure #root doesn't add a solid background. */
+/* OS provides the window frame (title bar + min/max/close). The WebView is
+   opaque, so we don't need to layer rounded corners or drop shadows — the
+   .window in AppWindow.module.css is the content canvas that fills the
+   inner area. Keep #root transparent so it never paints a solid color over
+   any future overlays. */
 #root {
   width: 100%;
   height: 100vh;
   background: transparent;
-  /* When the OS window is sized to the scaled design canvas (applyScale),
-     #root should not center it inside a larger viewport — it should fill it. */
   display: block;
 }
 

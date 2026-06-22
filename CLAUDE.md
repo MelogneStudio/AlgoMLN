@@ -81,12 +81,93 @@ src/
   bin/behavioral_backtest.rs   CLI backtest runner (uses commands::strategy::run_backtest_internal)
 src-tauri/
   src/main.rs        Tauri app entrypoint — registers commands, loads .env, sets up DataState
-src/                 React frontend (TypeScript, Vite, React 19, lightweight-charts)
-  components/        UI primitives: Button, Sidebar, TitleBar, RuleRow, IndicatorPicker, etc.
-  screens/           Top-level screens: Builder, Strategies, StrategyCoder, StrategyUploader, Settings
-  hooks/             useBacktest, useDslSync, useStrategyBuilder — bridge Tauri IPC + UI state
-  types/             Shared TypeScript types matching Rust models
 ```
+
+## Frontend Architecture (React + Tauri)
+
+Stack: **Vite + React 19 + TypeScript**, run inside a Tauri v2 webview. The Rust crate is the source of truth — the React layer is a thin client that issues IPC calls and renders results. There is no separate "live code path" in the UI either; paper and live deploys share the same screens and hooks.
+
+### Layout
+
+```
+src/                       React frontend root (TypeScript, Vite, React 19)
+  main.tsx                 Mounts <App /> into #root, loads global CSS tokens/fonts
+  App.tsx                  Top-level orchestrator — owns scale, screen/modal state, builder state,
+                           and wires BuilderScreen / StrategiesScreen / SettingsScreen /
+                           StrategyCoderScreen / StrategyUploaderScreen together
+  App.module.css           Layout for App shell
+  components/
+    AppWindow/             Root shell; injects --ui-scale CSS variable
+    TitleBar/              Custom title bar with minimize/close + tauri-drag-region
+    Sidebar/               Hard-locked nav (Builder / Strategies / Settings);
+                           forced-collapsed at scale < 0.75
+    Button/                Single Button primitive with variants: primary | ghost | code
+    RuleRow/               One row of the strategy builder (indicator + period + op + rhs + action)
+    IndicatorPicker/       Dropdown for IndicatorKind
+    NumberInput/           Numeric input control
+    OptionSlider/          Reusable slider
+    ScaleSlider/           Used in Settings for --ui-scale
+  screens/
+    Builder/               Main visual strategy builder. Hosts RuleSection (entry/exit) +
+                           BacktestPanel. Subcomponents live in components/.
+    Builder/components/    BacktestPanel (summary + trade table), RuleSection (entry/exit wrapper)
+    Strategies/            List of deployed strategies (Tauri IPC: list_strategies). Shows
+                           DEMO_STRATEGIES constant when running outside Tauri (npm run dev).
+    Strategies/components/ StrategyCard
+    StrategyCoder/         Modal textarea editor for raw .algomln source. Handles Tab→2-space,
+                           Esc→close. Read-only mode for viewing deployed strategies.
+    StrategyUploader/      Modal for uploading/loading .algomln files from disk
+    Settings/              Interface scale slider, default backtest capital, about card
+  hooks/
+    useStrategyBuilder     Builder state (entry rule, exit rule, advanced mode).
+                           loadFromDsl() round-trips a `.algomln` string back into the builder
+                           shape; if the DSL has features the builder can't represent (multiple
+                           rules, AND/OR, cross_*), it returns false and toggles advanced mode
+                           so the user falls back to the coder.
+    useDslSync             Derives a live DSL string from builder state via strategyToDsl(),
+                           then debounces validateDsl() IPC calls by 500ms. In the browser
+                           fallback it always reports valid (the builder only emits grammars
+                           we can construct locally).
+    useBacktest            Calls runBacktest IPC; synthesizes a benign empty BacktestResult
+                           when isTauri() is false so the UI is still demoable.
+  lib/
+    scaling.ts             DESIGN_WIDTH/HEIGHT (1550x757), computeFitScale(), applyScale()
+                           (calls Tauri win.setSize on LogicalSize), localStorage persistence
+                           keys algomln_ui_scale and algomln_default_capital
+  types/
+    tauri.ts               Thin IPC wrappers + isTauri() detection (checks
+                           '__TAURI_INTERNALS__' in window). Functions: runBacktest,
+                           deployStrategy, setStrategyStatus, listStrategies, validateDsl.
+    strategy.ts            BuilderRule, BuilderStrategy, DeployedStrategy, IndicatorKind,
+                           INDICATOR_DISPLAY map, INDICATOR_ORDER
+    backtest.ts            BacktestResult, BacktestSummary, PaperTrade
+```
+
+### Frontend ↔ Rust Contract
+
+- Rust models serialize to camelCase JSON. TypeScript mirrors live in `src/types/` (e.g. `types/strategy.ts`, `types/backtest.ts`, `types/tauri.ts`).
+- IPC calls go through `@tauri-apps/api` `invoke()` — the canonical wrappers are in `src/types/tauri.ts`. See `src/hooks/useBacktest.ts` for the canonical pattern (call → set loading → try/catch → set result or error → finally clear loading).
+- All Tauri-only flows (real backtests, live strategy list) MUST guard with `isTauri()` and provide a browser fallback so `npm run dev` (frontend only) is still demoable. Examples: `useBacktest` synthesizes an empty result, `StrategiesScreen` shows `DEMO_STRATEGIES`, `useDslSync` skips validation.
+- Charts use `lightweight-charts` (TradingView). Candle data is piped Rust → React via Tauri IPC commands.
+- Title bar uses `data-tauri-drag-region` to enable native drag on the Tauri webview; the right-side control buttons opt out (`data-tauri-drag-region={false}`).
+
+### Builder ↔ Coder Round-trip
+
+- `useStrategyBuilder` owns `BuilderStrategy` (a constrained shape: one entry rule + one exit rule, each with a single indicator comparison).
+- `useDslSync` derives a `.algomln` string from that state with `strategyToDsl()` and validates it via IPC.
+- `useStrategyBuilder.loadFromDsl(dsl)` parses DSL back via `parseDslToStrategy()`. If the DSL contains features the visual builder can't represent (multiple rules, AND/OR, cross_above/cross_below), parsing returns `null`, the hook flips `isAdvancedMode=true`, and the user stays in the Strategy Coder for editing.
+- When the user clicks "Open Strategy Coder" from the builder, the live DSL is preloaded into the editor. When they click "Done", the new source goes back through `loadFromDsl`.
+
+### Scaling
+
+The UI is designed at a fixed 1550×757 logical canvas. `AppWindow` injects `--ui-scale` as a CSS variable; the entire shell scales by that factor. `applyScale()` resizes the OS window to match via `Tauri Window.setSize(LogicalSize)`. Below scale 0.75, the sidebar is **force-collapsed** (toggle button hidden) — see `SIDEBAR_FORCE_COLLAPSE_THRESHOLD` in `src/lib/scaling.ts`. Scale only changes via the Settings slider; the app does NOT auto-rescale on window resize (a prior 2-second poll caused feedback loops with Tauri's setSize and was removed — see the comment in `src/App.tsx`).
+
+### Where to Add What (UI)
+
+- **New screen?** Add `src/screens/<Name>/<Name>Screen.tsx`, register it in `src/App.tsx` next to the existing `screen === 'builder'` branches. If it needs nav, add a `NavItem` entry in `src/components/Sidebar/Sidebar.tsx`.
+- **New IPC command?** Add the wrapper in `src/types/tauri.ts` using `invoke<T>(name, args)`, then call it from a hook. Register the Rust side in `src-tauri/src/main.rs` with `#[tauri::command]` and the implementation in `src/commands/`.
+- **New rule field?** Update `BuilderRule` in `src/types/strategy.ts`, `strategyToDsl` / `parseDslToStrategy` in `src/hooks/useDslSync.ts`, and the visual controls in `src/components/RuleRow/`.
+- **New button style?** Add a variant to `ButtonVariant` in `src/components/Button/Button.tsx` and a CSS class in `Button.module.css`.
 
 ## Critical Architecture Invariants
 
@@ -128,12 +209,6 @@ Blank lines and `# comments` allowed anywhere. Examples are in the `strategies/`
 `src-tauri/src/main.rs` is a thin shell. The actual command implementations live in `src/commands/`. Each is a free function taking `&DataState` (or similar) — the Tauri wrapper just unwraps `State<'_, AppState>` and forwards. The CLI binary `behavioral_backtest` calls `run_backtest_internal` directly to avoid spawning a Tauri runtime.
 
 **Env requirement:** Tauri app requires `DHAN_ACCESS_TOKEN` in `.env` (see `.env.example`). The CLI also loads `.env` via `dotenvy::dotenv()`.
-
-## Frontend ↔ Rust Contract
-
-- Rust models serialize to camelCase JSON. TypeScript mirrors in `src/types/` (e.g. `types/strategy.ts`, `types/backtest.ts`, `types/tauri.ts`).
-- IPC calls go through `@tauri-apps/api` `invoke()` — see `src/hooks/useBacktest.ts` for the pattern.
-- Charts use `lightweight-charts` (TradingView). Candle data is piped Rust → React via Tauri IPC commands.
 
 ## Where to Add What
 

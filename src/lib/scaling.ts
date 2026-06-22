@@ -38,18 +38,43 @@ export function getScreenSize(): { w: number; h: number } {
 /**
  * Apply the CSS scale transform by resizing the OS window to match the
  * scaled canvas. No-op when not running in Tauri (e.g. `npm run dev`).
+ *
+ * With native decorations enabled, the OS adds a title bar + borders around
+ * the WebView. `setSize` targets the *outer* window, so on the first call we
+ * measure `outerSize - innerSize` and cache the chrome overhead. Subsequent
+ * calls add that overhead back so the inner content area lands exactly on
+ * `DESIGN_WIDTH * scale` x `DESIGN_HEIGHT * scale`.
  */
+let chromeW = 0;
+let chromeH = 0;
+
 export async function applyScale(scale: number): Promise<void> {
   if (typeof window === 'undefined') return;
   if (!('__TAURI_INTERNALS__' in window)) return;
   try {
     const win = getCurrentWindow();
+    const targetInnerW = Math.round(DESIGN_WIDTH * scale);
+    const targetInnerH = Math.round(DESIGN_HEIGHT * scale);
     await win.setSize(
       new LogicalSize(
-        Math.round(DESIGN_WIDTH * scale),
-        Math.round(DESIGN_HEIGHT * scale)
+        targetInnerW + chromeW,
+        targetInnerH + chromeH
       )
     );
+    // First call: measure the chrome overhead now that the window has its
+    // native frame. If our first guess was off, re-snap with the real numbers.
+    if (chromeW === 0 && chromeH === 0) {
+      const [outer, inner] = await Promise.all([win.outerSize(), win.innerSize()]);
+      const w = outer.width - inner.width;
+      const h = outer.height - inner.height;
+      if (w > 0 || h > 0) {
+        chromeW = w;
+        chromeH = h;
+        if (w !== 0 || h !== 0) {
+          await win.setSize(new LogicalSize(targetInnerW + chromeW, targetInnerH + chromeH));
+        }
+      }
+    }
   } catch (err) {
     // Silently ignore — setting size on certain Linux backends can fail.
     console.warn('applyScale failed:', err);
