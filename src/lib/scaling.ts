@@ -3,17 +3,16 @@ import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 export const DESIGN_WIDTH = 1550;
 export const DESIGN_HEIGHT = 757;
 export const SCREEN_PADDING = 40;
-export const MIN_SCALE = 0.6;
-export const MAX_SCALE = 1.4;
-export const SCALE_STEP = 0.05;
 export const SIDEBAR_FORCE_COLLAPSE_THRESHOLD = 0.75;
-export const SCALE_STORAGE_KEY = 'algomln_ui_scale';
 export const CAPITAL_STORAGE_KEY = 'algomln_default_capital';
 
 /**
  * Maximum uniform scale that fits the design canvas inside `screenW x screenH`
  * with `SCREEN_PADDING` breathing room on each side. Capped at 1.0 — we never
- * upscale the design on first launch; the user can do that in Settings.
+ * upscale the design canvas.
+ *
+ * This is the *only* source of scale. It is computed once per launch from the
+ * current screen and never changes afterwards (no user override).
  */
 export function computeFitScale(screenW: number, screenH: number): number {
   const maxW = Math.max(0, screenW - SCREEN_PADDING * 2);
@@ -36,76 +35,27 @@ export function getScreenSize(): { w: number; h: number } {
 }
 
 /**
- * Apply the CSS scale transform by resizing the OS window to match the
- * scaled canvas. No-op when not running in Tauri (e.g. `npm run dev`).
+ * Size the OS window to the scaled canvas and center it on the desktop.
+ * No-op when not running in Tauri (e.g. `npm run dev`).
  *
- * With native decorations enabled, the OS adds a title bar + borders around
- * the WebView. `setSize` targets the *outer* window, so on the first call we
- * measure `outerSize - innerSize` and cache the chrome overhead. Subsequent
- * calls add that overhead back so the inner content area lands exactly on
- * `DESIGN_WIDTH * scale` x `DESIGN_HEIGHT * scale`.
+ * The window is created with native decorations off (see tauri.conf.json), so
+ * outer size == inner size and there is no chrome overhead to compensate for.
+ * The CSS transform shrinks the canvas to `DESIGN * scale`; this makes the OS
+ * window hug exactly that, so there is no leftover transparent area around it.
  */
-let chromeW = 0;
-let chromeH = 0;
-
 export async function applyScale(scale: number): Promise<void> {
   if (typeof window === 'undefined') return;
   if (!('__TAURI_INTERNALS__' in window)) return;
   try {
     const win = getCurrentWindow();
-    const targetInnerW = Math.round(DESIGN_WIDTH * scale);
-    const targetInnerH = Math.round(DESIGN_HEIGHT * scale);
-    await win.setSize(
-      new LogicalSize(
-        targetInnerW + chromeW,
-        targetInnerH + chromeH
-      )
-    );
-    // First call: measure the chrome overhead now that the window has its
-    // native frame. If our first guess was off, re-snap with the real numbers.
-    if (chromeW === 0 && chromeH === 0) {
-      const [outer, inner] = await Promise.all([win.outerSize(), win.innerSize()]);
-      const w = outer.width - inner.width;
-      const h = outer.height - inner.height;
-      if (w > 0 || h > 0) {
-        chromeW = w;
-        chromeH = h;
-        if (w !== 0 || h !== 0) {
-          await win.setSize(new LogicalSize(targetInnerW + chromeW, targetInnerH + chromeH));
-        }
-      }
-    }
+    const targetW = Math.round(DESIGN_WIDTH * scale);
+    const targetH = Math.round(DESIGN_HEIGHT * scale);
+    await win.setSize(new LogicalSize(targetW, targetH));
+    await win.center();
   } catch (err) {
-    // Silently ignore — setting size on certain Linux backends can fail.
+    // Silently ignore — setting size on certain backends can fail.
     console.warn('applyScale failed:', err);
   }
-}
-
-export function clampScale(scale: number): number {
-  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
-}
-
-export function roundToStep(scale: number): number {
-  return Math.round(scale / SCALE_STEP) * SCALE_STEP;
-}
-
-export function loadSavedScale(): number | null {
-  if (typeof window === 'undefined') return null;
-  const raw = window.localStorage.getItem(SCALE_STORAGE_KEY);
-  if (!raw) return null;
-  const parsed = parseFloat(raw);
-  if (!Number.isFinite(parsed)) return null;
-  return clampScale(parsed);
-}
-
-export function saveScale(scale: number): void {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(SCALE_STORAGE_KEY, String(clampScale(scale)));
-}
-
-export function clearSavedScale(): void {
-  if (typeof window === 'undefined') return;
-  window.localStorage.removeItem(SCALE_STORAGE_KEY);
 }
 
 export function loadSavedCapital(fallback = 100_000): number {

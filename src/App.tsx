@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AppWindow } from './components/AppWindow/AppWindow';
 import { TitleBar } from './components/TitleBar/TitleBar';
 import { Sidebar } from './components/Sidebar/Sidebar';
@@ -12,13 +12,9 @@ import { useBacktest } from './hooks/useBacktest';
 import { strategyToDsl, useDslSync } from './hooks/useDslSync';
 import {
   applyScale,
-  clampScale,
-  clearSavedScale,
   computeFitScale,
   getScreenSize,
   loadSavedCapital,
-  loadSavedScale,
-  saveScale,
   SIDEBAR_FORCE_COLLAPSE_THRESHOLD,
 } from './lib/scaling';
 import { isTauri, validateDsl } from './types/tauri';
@@ -30,41 +26,16 @@ export type Modal = 'none' | 'uploader' | 'coder';
 
 export function App() {
   // ----- Scale (lives in App because multiple components read it) -----
-  const initialScale = useMemo(() => {
-    const saved = loadSavedScale();
-    if (saved !== null) return saved;
+  // Computed once from the screen on launch and never changed. There is no
+  // user-facing scale control: the app fits itself to the screen and stays.
+  const scale = useMemo(() => {
     const { w, h } = getScreenSize();
     return computeFitScale(w, h);
   }, []);
-  const [scale, setScaleState] = useState<number>(initialScale);
 
-  const setScale = useCallback((next: number) => {
-    const clamped = clampScale(next);
-    setScaleState(clamped);
-    saveScale(clamped);
-    void applyScale(clamped);
-  }, []);
-
-  const resetAutoScale = useCallback(() => {
-    clearSavedScale();
-    const { w, h } = getScreenSize();
-    const fit = computeFitScale(w, h);
-    setScaleState(fit);
-    void applyScale(fit);
-  }, []);
-
-  // Apply scale on mount exactly once. The polling interval that previously
-  // ran every 2s was removed: it caused feedback loops with Tauri's setSize,
-  // where the OS window size changes and Tauri's screen.width/height
-  // reporting shifts in response, triggering another re-fit on the next tick.
-  // Scale only changes when the user moves the slider in Settings.
-  const appliedOnMount = useRef(false);
+  // Size + center the OS window to the scaled canvas, once on mount.
   useEffect(() => {
-    if (appliedOnMount.current) return;
-    appliedOnMount.current = true;
-    const saved = loadSavedScale();
-    const target = saved ?? initialScale;
-    void applyScale(target);
+    void applyScale(scale);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -227,13 +198,7 @@ export function App() {
               onChanged={bumpStrategies}
             />
           )}
-          {screen === 'settings' && (
-            <SettingsScreen
-              scale={scale}
-              onScaleChange={setScale}
-              onResetAutoScale={resetAutoScale}
-            />
-          )}
+          {screen === 'settings' && <SettingsScreen />}
         </div>
       </div>
 
