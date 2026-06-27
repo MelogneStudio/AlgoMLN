@@ -14,3 +14,4 @@ tauri = { version = "2", features = [] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 window-vibrancy = "0.5"
+webview2-com = "0.38"

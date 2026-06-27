@@ -52,6 +52,25 @@ fn main() {
                     .expect("main window not found");
 
                 win.set_decorations(false)?;
+
+                // WebView2 paints an opaque white background by default, which
+                // sits *on top* of the acrylic and makes the glass look like a
+                // flat muddy gray. Force the controller's default background to
+                // fully transparent (A: 0) so the acrylic shows through.
+                win.with_webview(|webview| {
+                    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_COLOR;
+                    unsafe {
+                        let _ = webview
+                            .controller()
+                            .SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                                A: 0,
+                                R: 0,
+                                G: 0,
+                                B: 0,
+                            });
+                    }
+                })?;
+
                 apply_acrylic(&win, Some((34, 34, 34, 153)))
                     .expect("Acrylic requires Windows 10 1803+");
             }

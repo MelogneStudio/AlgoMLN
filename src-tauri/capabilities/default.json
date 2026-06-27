@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Default permissions for AlgoMLN",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-size",
+    "core:window:allow-inner-size",
+    "core:window:allow-outer-size",
+    "core:window:allow-center"
+  ]
 }

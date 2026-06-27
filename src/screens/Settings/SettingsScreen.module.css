@@ -97,32 +97,6 @@
   border-color: var(--border-sidebar-selected);
 }
 
-.scaleRow {
-  display: inline-flex;
-  align-items: center;
-  gap: 16px;
-  margin-top: 4px;
-}
-
-.scaleValue {
-  font-family: var(--font-cascadia);
-  font-weight: 700;
-  font-size: 22px;
-  color: var(--text-muted);
-  min-width: 70px;
-}
-
-.scaleMeta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-family: var(--font-sansation);
-  font-size: 14px;
-  color: var(--text-dim);
-  flex-wrap: wrap;
-}
-
 .aboutCard .cardLabel {
   font-family: var(--font-sora);
   font-weight: 600;
