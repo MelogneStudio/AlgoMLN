@@ -60,14 +60,20 @@ fn main() {
                 win.with_webview(|webview| {
                     use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_COLOR;
                     unsafe {
-                        let _ = webview
+                        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller2;
+                        use windows_core::Interface;
+
+                        let controller2 = webview
                             .controller()
-                            .SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                            .cast::<ICoreWebView2Controller2>()
+                            .expect("failed to get ICoreWebView2Controller2");
+
+                        let _ = controller2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
                                 A: 0,
                                 R: 0,
                                 G: 0,
                                 B: 0,
-                            });
+                        });
                     }
                 })?;
 

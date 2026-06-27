@@ -40,7 +40,9 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "webview2-com",
  "window-vibrancy 0.5.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
