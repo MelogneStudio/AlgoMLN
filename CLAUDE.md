@@ -67,3 +67,8 @@ Don't break these — they are non-obvious properties the codebase is built arou
 ## Env Requirement
 
 Tauri app requires `DHAN_ACCESS_TOKEN` in `.env` (see `.env.example`). The CLI loads `.env` via `dotenvy::dotenv()`. When the token is missing or Dhan returns no candles, `run_backtest_dsl` falls back to the bundled sample CSV and emits an `eprintln!` warning.
+
+## Instructions for editing code
+
+1. On any edit made, at the end of the message, along with telling the user all the changes, also update all the md files (`ARCHITECTURE.md`, `BACKEND.md`, `FRONTEND.md`, `CLAUDE.md` and if it is a big change, `README.md`. Only update with data in your context unless specified to fully check and update readme or if you only have to read a few files.
+2. Prefer storing changes in your mind and grouping write / edit commands
