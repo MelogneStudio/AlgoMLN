@@ -65,19 +65,22 @@ The Rust crate is at `src/` (not `src-tauri/src/` — that path is a Tauri shim 
 
 ```
 src/
-  broker/            BrokerClient trait + DhanClient implementation (auth, rest, websocket, models)
+  broker/            BrokerClient trait + DhanClient implementation
+    dhan/            auth.rs / rest.rs / websocket.rs / models.rs
   models/            Candle, Tick, Quote, Order, Position — all serde-serializable
-  indicators/        Pure stateless functions: ma, ema, rsi, atr, vwap, bollinger_bands
+  indicators/        Pure stateless functions: ema, ma, rsi, atr, vwap, bb (bollinger), rel_vol
   feed/              WebSocket manager — up to 1,000 symbol subscriptions, auto-reconnect, tick fan-out
   strategy/
     dsl/             Compiler pipeline: lexer → parser → ast → validator
     runtime/         StrategyEngine — candle-by-candle evaluation loop
-                     EvalContext, CrossDetector, TriggerStateMap, IndicatorProvider, BoundedWindowProvider
+                     EvalContext, CrossDetector, TriggerStateMap,
+                     IndicatorProvider, BoundedWindowProvider, IncrementalIndicatorProvider
     execution/       ExecutionTarget trait; PaperBroker, DhanBroker; order_builder
     logging/         StrategyLogger, LogEntry, LogEntryKind
     analytics.rs     Backtest result metrics
-    tests/           Integration tests
-  commands/          Tauri IPC commands (data.rs, strategy.rs) — bridge Rust → React
+    tests/           Integration tests (backtest_integration.rs, etc.)
+  commands/          Tauri IPC commands — data.rs (broker/data), strategy.rs (backtests/deploy),
+                     mod.rs; the bridge Rust → React
   bin/behavioral_backtest.rs   CLI backtest runner (uses commands::strategy::run_backtest_internal)
 src-tauri/
   src/main.rs        Tauri app entrypoint — registers commands, loads .env, sets up DataState
@@ -197,8 +200,10 @@ logical_expr   = condition "AND" condition | condition "OR" condition
 not_expr       = "NOT" "(" condition ")"
 cross_expr     = cross_above(expr, expr) | cross_below(expr, expr)
 expr           = indicator_call | price_field | number
-indicator      = ema | ma | rsi | atr | vwap | bb_upper | bb_lower | bb_mid
+indicator      = ema | ma | rsi | rel_vol | atr | vwap
+               | bb_upper | bb_lower | bb_mid
 price_field    = close | open | high | low | volume
+               | prev_close | prev_open | prev_high | prev_low
 action         = BUY <int> | SELL <int> | SELL ALL
 ```
 

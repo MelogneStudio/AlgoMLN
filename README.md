@@ -26,8 +26,12 @@ Data → Indicators → Strategy Engine → Backtesting → Execution → UI
 ## Current Status
 
 ```
-88 tests passing · 0 failed · 1 ignored
+Phase 1 (Data) · Phase 2 (Indicators) · Phase 2.5–2.9 (Strategy Engine) ✅
+Phase 3–5 UI (Builder / Strategies / Coder / Uploader / Settings) ✅
+Phase 7 (Live Trading) — pending
 ```
+
+Run `cargo test --workspace` for the current test count.
 
 ### ✅ Phase 1 — Data Layer
 - Broker abstraction trait (`BrokerClient`)
@@ -48,6 +52,7 @@ Pure Rust functions. Stateless. `fn indicator(candles: &[Candle], period: usize)
 | Relative Strength Index | `rsi` |
 | Average True Range | `atr` |
 | Volume Weighted Average Price | `vwap` |
+| Relative Volume | `rel_vol` |
 | Bollinger Bands | `bollinger_bands` → upper / mid / lower |
 
 ### ✅ Phase 2.5–2.9 — Strategy Engine
@@ -113,10 +118,11 @@ cross_expr     = "cross_above" "(" expr "," expr ")"
 expr           = indicator_call | price_field | number
 
 indicator_call = indicator "(" integer ")"
-indicator      = "ema" | "ma" | "rsi" | "atr" | "vwap"
+indicator      = "ema" | "ma" | "rsi" | "rel_vol" | "atr" | "vwap"
                | "bb_upper" | "bb_lower" | "bb_mid"
 
 price_field    = "close" | "open" | "high" | "low" | "volume"
+               | "prev_close" | "prev_open" | "prev_high" | "prev_low"
 
 action         = "BUY" integer
                | "SELL" integer
@@ -185,6 +191,24 @@ cargo run --release --bin behavioral_backtest -- profile ema
 cargo run --release --bin behavioral_backtest -- --help
 ```
 
+## Running the Desktop App
+
+```powershell
+# Install JS deps (first time only)
+npm install
+
+# Run Vite + Tauri together (hot-reload)
+npm run tauri dev
+
+# Frontend-only dev server (Rust not required; browser fallback for backtests/strategies)
+npm run dev
+
+# Type-check + production frontend build
+npm run build
+```
+
+The Tauri app requires `DHAN_ACCESS_TOKEN` in `.env` (see `.env.example`) for live data; the CLI loads `.env` automatically via `dotenvy`.
+
 ---
 
 ## Architecture
@@ -226,69 +250,112 @@ Crossovers require tracking previous candle values per rule. `CrossDetector` sto
 
 ## Module Structure
 
+The Rust crate lives at `src/` (not `src-tauri/src/` — that path is a Tauri shim that re-exports the lib).
+
 ```
-src-tauri/src/
+src/
   broker/
-    mod.rs              BrokerClient trait
-    dhan/               DhanClient implementation
-  models/               Candle, Tick, Quote, Order, Position
-  indicators/           Pure indicator functions
+    mod.rs            BrokerClient trait
+    dhan/
+      mod.rs          DhanClient — broker wiring
+      auth.rs         DHAN auth/token handling
+      rest.rs         REST client (historical OHLCV, etc.)
+      websocket.rs    Live tick websocket
+      models.rs       Dhan-specific request/response shapes
+  models/             Candle, Tick, Quote, Order, Position
+  indicators/         Pure indicator functions (one fn per file: ma, ema, rsi, atr, vwap, bb, rel_vol)
+  feed/               WebSocket manager — up to 1,000 symbol subscriptions, auto-reconnect, tick fan-out
   strategy/
     dsl/
-      lexer.rs          Lexer + Token types
-      parser.rs         Recursive descent parser
-      ast.rs            All AST node types (serializable)
-      validator.rs      AstValidator — collects all errors
+      lexer.rs        Lexer + Token types
+      parser.rs       Recursive descent parser
+      ast.rs          All AST node types (serializable)
+      validator.rs    AstValidator — collects all errors
     runtime/
-      engine.rs         StrategyEngine — main evaluation loop
-      context.rs        EvalContext — per-candle borrowed view
-      cross.rs          CrossDetector
-      trigger_state.rs  TriggerStateMap
-      indicator_provider.rs  IndicatorProvider trait + BoundedWindowProvider
+      engine.rs                StrategyEngine — main evaluation loop
+      context.rs               EvalContext — per-candle borrowed view
+      cross.rs                 CrossDetector
+      trigger_state.rs         TriggerStateMap
+      indicator_provider.rs    IndicatorProvider trait + BoundedWindowProvider
+      incremental_provider.rs  IncrementalIndicatorProvider — streaming variant
     execution/
-      target.rs         ExecutionTarget trait
-      paper.rs          PaperBroker
-      order_builder.rs  Builds Order from ActionNode
+      target.rs        ExecutionTarget trait
+      paper.rs         PaperBroker
+      order_builder.rs Builds Order from ActionNode
     logging/
-      log.rs            StrategyLog, LogEntry, LogEntryKind
-    mod.rs              StrategyRegistry
+      log.rs           StrategyLog, LogEntry, LogEntryKind
+    analytics.rs      Backtest result metrics
+    tests/            Integration tests (backtest_integration.rs)
   commands/
-    strategy.rs         Tauri IPC commands
+    mod.rs            Re-exports
+    data.rs           Tauri IPC commands — data / broker
+    strategy.rs       Tauri IPC commands — backtest, deploy, list, validate
   bin/
-    behavioral_backtest.rs  CLI backtest runner
+    behavioral_backtest.rs  CLI backtest runner (calls commands::strategy::run_backtest_internal)
+src-tauri/
+  src/main.rs         Tauri app entrypoint — registers commands, loads .env, sets up DataState
+```
+
+### Frontend Layout
+
+The React app lives at `src/` (the project root's `src/` — separate from the Rust `src/`). It's a thin client over Tauri IPC; there is no separate "live code path."
+
+```
+src/                       React frontend root (TypeScript, Vite, React 19)
+  App.tsx                  Top-level orchestrator — screen/modal state, builder state, scale
+  main.tsx                 Mounts <App /> into #root, loads global CSS tokens/fonts
+  components/
+    AppWindow/             Root shell; injects --ui-scale CSS variable
+    TitleBar/              Custom title bar (data-tauri-drag-region)
+    Sidebar/               Builder / Strategies / Settings nav; force-collapsed below scale 0.75
+    Button/                Button primitive (primary | ghost | code variants)
+    RuleRow/               One row of the visual strategy builder
+    IndicatorPicker/       IndicatorKind dropdown
+    NumberInput/           Numeric input control
+    OptionSlider/          Reusable slider
+    ScaleSlider/           Settings slider for --ui-scale
+  screens/
+    Builder/               Main visual strategy builder + BacktestPanel
+    Strategies/            List of deployed strategies (Tauri IPC: list_strategies)
+    StrategyCoder/         Modal .algomln source editor
+    StrategyUploader/      Modal .algomln file loader
+    Settings/              UI scale, default capital, about
+  hooks/
+    useStrategyBuilder     Builder state + loadFromDsl() round-trip
+    useDslSync             Derives live DSL from builder state, debounced validate
+    useBacktest            Runs runBacktest IPC; browser fallback synthesizes empty result
+  lib/scaling.ts           DESIGN_WIDTH/HEIGHT (1550x757), computeFitScale(), applyScale()
+  types/                   tauri.ts (IPC wrappers + isTauri()), strategy.ts, backtest.ts
 ```
 
 ---
 
 ## Roadmap
 
-### Phase 3 — Charts & Core UI
-- Lightweight Charts (TradingView) integration
-- Candle data piped Rust → React via Tauri IPC
-- Indicator overlays with toggle panel
-- Support/Resistance overlay
-- Timeframe selector
-- Symbol search and switcher
+### Phase 3 — Charts & Core UI ✅ (basic shell)
+- Visual strategy builder, strategies list, settings, coder modal, uploader modal
+- Scaling shell (1550×757 logical canvas, --ui-scale CSS variable)
+- Browser-only fallback (`npm run dev`) so the UI is demoable without Tauri
 
-### Phase 4 — Trading Tools
+### Phase 4 — Trading Tools (pending)
 - Option chain viewer
 - Open Interest analysis
 - Payoff diagrams
 - Screener
 
-### Phase 5 — Visual Strategy Builder
+### Phase 5 — Visual Strategy Builder ✅
 ```
 Drag-and-drop blocks → Generated DSL → AST → Strategy Engine
 ```
 Same runtime as text strategies. No separate execution path.
 
-### Phase 6 — Advanced Strategy Features
+### Phase 6 — Advanced Strategy Features (pending)
 - Position sizing rules
 - Stop loss / take profit
 - Risk controls
 - Multi-symbol strategies
 
-### Phase 7 — Live Trading
+### Phase 7 — Live Trading (pending)
 - Live broker execution via `ExecutionTarget`
 - Two hard confirmation steps required
 - User-defined risk limits (max loss, max orders)
