@@ -31,7 +31,8 @@ Phase 3–5 UI (Builder / Strategies / Coder / Uploader / Settings) ✅
 Phase 7 (Live Trading) — pending
 ```
 
-Run `cargo test --workspace` for the current test count.
+Run `cargo test --workspace` for the current test count
+Current count: `118 passing | 1 ignored | 0 failed`.
 
 ### ✅ Phase 1 — Data Layer
 - Broker abstraction trait (`BrokerClient`)
@@ -84,7 +85,7 @@ Source (.algomln)
 ```
 runtime: 3.5s · 52,000 candles/sec · 9,026 trades
 ```
-
+> NOTE: This was tested not on my main setup but instead on an old i5 8th gen for normal person performance test. My main PC gets way more candles/sec.
 ---
 
 ## The Strategy Language
@@ -192,6 +193,8 @@ cargo run --release --bin behavioral_backtest -- --help
 ```
 
 ## Running the Desktop App
+
+> 🚨 **DO NOT RUN THE APP AS OF NOW**. The app has no commands connected to the UI, no live trading, and will not do anything. Use CLI right now.
 
 ```powershell
 # Install JS deps (first time only)
