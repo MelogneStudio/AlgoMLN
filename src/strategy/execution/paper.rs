@@ -32,6 +32,7 @@ pub struct PaperPosition {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PaperTrade {
     pub id: String,
     pub timestamp: i64,
@@ -44,6 +45,7 @@ pub struct PaperTrade {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PaperBrokerState {
     pub cash: f64,
     pub initial_cash: f64,

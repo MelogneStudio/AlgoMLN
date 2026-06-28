@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 use algomln::broker::dhan::{DhanAuth, DhanClient};
 use algomln::broker::{BrokerClient, Timeframe};
 use algomln::commands::strategy::{run_backtest_internal, BacktestResult};
+use algomln::data::load_nifty_candles;
 use algomln::models::{Candle, OrderSide};
 use algomln::strategy::dsl::{AstValidator, Lexer, Parser, StrategyNode};
 use algomln::strategy::logging::LogEntryKind;
 use anyhow::{Context, Result};
-use chrono::{NaiveDate, NaiveDateTime, Utc};
+use chrono::{NaiveDate, Utc};
 
 const INITIAL_CASH: f64 = 10_000_000.0;
 const DEFAULT_EXCHANGE_SEGMENT: &str = "NSE_EQ";
@@ -403,7 +404,7 @@ fn load_strategy_file(script_path: &str) -> Result<(StrategyNode, String), Strin
 
 fn run_script(args: RunArgs) -> Result<(), String> {
     let (strategy, strategy_name) = load_strategy_file(&args.script_path)?;
-    let mut candles = load_nifty_candles(&args.data_path).map_err(|error| {
+    let mut candles = load_nifty_candles(Path::new(&args.data_path)).map_err(|error| {
         format!(
             "Error: failed to load candles from {}: {error}",
             args.data_path
@@ -485,7 +486,8 @@ async fn run_backtest_from_dhan(args: BacktestArgs) -> Result<(), String> {
 
 async fn run_profile(strategy_name: &str, limit: Option<usize>) -> Result<()> {
     let load_started = Instant::now();
-    let mut nifty = load_nifty_candles("sample-data/nifty_1min.csv")?;
+    let mut nifty = load_nifty_candles(Path::new("sample-data/nifty_1min.csv"))
+        .map_err(|e| anyhow::anyhow!("load nifty candles: {e}"))?;
     if let Some(limit) = limit {
         nifty.truncate(limit);
     }
@@ -707,56 +709,6 @@ fn load_tiny_candles(path: &str) -> Result<Vec<Candle>> {
         });
     }
     Ok(candles)
-}
-
-fn load_nifty_candles(path: &str) -> Result<Vec<Candle>> {
-    let file = File::open(path).with_context(|| format!("open {path}"))?;
-    let mut candles = Vec::new();
-    for (index, line) in BufReader::new(file).lines().enumerate() {
-        let line = line?;
-        if index == 0 || line.trim().is_empty() {
-            continue;
-        }
-        let fields = parse_market_row(&line)
-            .with_context(|| format!("bad NIFTY candle row {}", index + 1))?;
-        let timestamp = NaiveDateTime::parse_from_str(fields[0], "%Y-%m-%d %H:%M:%S")?
-            .and_utc()
-            .timestamp_millis();
-        candles.push(Candle {
-            timestamp,
-            open: fields[1].parse::<f64>()?,
-            high: fields[2].parse::<f64>()?,
-            low: fields[3].parse::<f64>()?,
-            close: fields[4].parse::<f64>()?,
-            volume: 1_000.0,
-        });
-    }
-    Ok(candles)
-}
-
-fn parse_market_row(line: &str) -> Result<Vec<&str>> {
-    let tab_fields = line.split('\t').collect::<Vec<_>>();
-    if tab_fields.len() == 5 {
-        return Ok(tab_fields);
-    }
-
-    let comma_fields = line.split(',').collect::<Vec<_>>();
-    if comma_fields.len() == 5 {
-        return Ok(comma_fields);
-    }
-
-    let whitespace_fields = line.split_whitespace().collect::<Vec<_>>();
-    if whitespace_fields.len() == 6 {
-        return Ok(vec![
-            line.get(0..19).context("missing datetime")?,
-            whitespace_fields[2],
-            whitespace_fields[3],
-            whitespace_fields[4],
-            whitespace_fields[5],
-        ]);
-    }
-
-    anyhow::bail!("expected 5 market columns")
 }
 
 fn candle(timestamp: i64, close: f64) -> Candle {

@@ -5,6 +5,7 @@ use crate::strategy::execution::PaperTrade;
 use crate::strategy::logging::{LogEntry, LogEntryKind, RuleSkipReason};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BacktestSummary {
     pub initial_cash: f64,
     pub final_cash: f64,

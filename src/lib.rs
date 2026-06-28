@@ -1,5 +1,6 @@
 pub mod broker;
 pub mod commands;
+pub mod data;
 pub mod feed;
 pub mod indicators;
 pub mod models;
