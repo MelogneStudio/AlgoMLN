@@ -30,6 +30,24 @@ AlgoMLN/
 │   │   ├── logging/            StrategyLogger, LogEntry, LogEntryKind
 │   │   ├── analytics.rs        BacktestAnalyser → BacktestSummary
 │   │   └── tests/              Integration tests
+│   ├── plugin/                 Plugin host + capability-gated APIs
+│   │   ├── api/                Trait definitions + per-capability implementations
+│   │   │   ├── mod.rs          MarketData/Storage/Indicator/Analytics/Ui/Scheduler/Log traits
+│   │   │   ├── market_data.rs  BrokerMarketDataApi — wraps BrokerClient
+│   │   │   ├── storage.rs      PluginKvStore — per-plugin sandboxed file KV
+│   │   │   ├── indicator_registry.rs  SharedIndicatorRegistry (plugin-id dedup)
+│   │   │   ├── analytics.rs    SharedAnalyticsRegistry (plugin-id dedup)
+│   │   │   ├── events.rs       EventBus + EventKind + EventFilter (pub/sub)
+│   │   │   ├── scheduler.rs    CronScheduler — cron + CancellationToken per task
+│   │   │   ├── log.rs          NamespacedLog — eprintln! gated by plugin_id
+│   │   │   └── ui.rs           TauriUiApi — broadcast channel for UI panels
+│   │   ├── host.rs             PluginHost (capability-gated accessors) + Builder
+│   │   ├── manifest.rs         PluginPermissions
+│   │   ├── runtime/            Plugin language runtimes
+│   │   │   ├── rhai_runtime.rs RhaiPlugin — Rhai script compilation + host fns
+│   │   │   └── wasm_runtime.rs WASM runtime (reserved, Phase 6)
+│   │   ├── types.rs            PluginId, PluginMeta, Capability, PluginError, handles
+│   │   └── mod.rs              Plugin trait, plugin module root
 │   ├── commands/               Tauri IPC command implementations
 │   │   ├── data.rs             broker + feed wrappers
 │   │   ├── strategy.rs         DSL helpers, backtest orchestrator, wire types
@@ -99,6 +117,19 @@ AlgoMLN/
 | Bollinger bands | `src/indicators/bb.rs` |
 | Relative volume | `src/indicators/mod.rs::rel_vol` |
 | Indicator dispatch (latest value) | `src/strategy/runtime/incremental_provider.rs::latest_indicator_value` |
+
+### Plugin host
+
+| Concern | File |
+|---|---|
+| Capability traits (MarketData/Storage/Indicator/Analytics/Ui/Scheduler/Log) | `src/plugin/api/mod.rs` |
+| Per-capability implementations | `src/plugin/api/{market_data,storage,indicator_registry,analytics,events,scheduler,log,ui}.rs` |
+| Capability gating + `*_guarded` accessors | `src/plugin/host.rs` (`PluginHost`, `PluginHostBuilder`) |
+| Plugin identity, errors, handles | `src/plugin/types.rs` |
+| Plugin lifecycle trait | `src/plugin/mod.rs` (`Plugin`) |
+| Plugin manifest + permissions | `src/plugin/manifest.rs` |
+| Rhai script runtime (engine budgets, host fns, lifecycle) | `src/plugin/runtime/rhai_runtime.rs` (`RhaiPlugin`) |
+| WASM plugin runtime (reserved) | `src/plugin/runtime/wasm_runtime.rs` |
 
 ### Execution / Brokers
 

@@ -184,3 +184,46 @@ The bundled `sample-data/nifty_1min.csv` is the offline fallback when Dhan is un
 `src/strategy/logging/log.rs` defines `LogEntry { id, timestamp, strategy_id, candle_timestamp, kind }` and a `LogEntryKind` enum covering: condition evaluated (with prev state and indicator snapshots), rule fired, order submitted, order executed, rule skipped (with `RuleSkipReason`), order failed, eval error, status changed.
 
 `StrategyLogger` is per-engine (one per `StrategyInstance.id`). `on_candle` calls `drain_entries()` at the end of the cycle and the engine returns the drained vector; the backtest orchestrator appends it to `BacktestResult.logs`. There is no async log shipper — entries are in-memory until the orchestrator decides what to do with them.
+
+---
+
+## Plugin host
+
+`src/plugin/` is a capability-gated extension point. A plugin loads via `Plugin::on_load` and receives a `PluginHost` — the host exposes one trait object per capability (MarketData, Execution, Storage, Indicators, Analytics, DSL extension, UI panels, Scheduler) plus an always-available `LogApi`. Each accessor has a `*_guarded` variant: plugins must declare the corresponding `Capability` in their manifest or the host returns `PluginError::PermissionDenied`.
+
+Per-capability implementations live in `src/plugin/api/`:
+
+- `market_data.rs` — `BrokerMarketDataApi` wraps `Arc<dyn BrokerClient>`. Subscriptions are tracked by `SubscriptionHandle` and backed by tokio `AbortHandle`s; `unsubscribe` calls `abort_handle.abort()` and returns `PluginError::NotFound` if the handle is missing.
+- `storage.rs` — `PluginKvStore` is a per-plugin file-backed KV under `base_dir`. Keys are sanitized (`/`, `\`, `..`, `:` → `_`, truncated to 200 chars, empty → `_empty_`). Writes go through a `.tmp` file and `rename` for atomicity. All IO maps to `PluginError::ApiError`.
+- `indicator_registry.rs` / `analytics.rs` — shared registries behind `parking_lot::RwLock`. Registrations carry a `PluginId`; a different plugin re-registering the same name gets `ApiError`, the same plugin gets a silent overwrite. `unregister_all_for` cleans up on plugin unload.
+- `events.rs` — `EventBus` is a broadcast pub/sub: `subscribe(filter, callback)` pushes `(handle, filter, Arc<dyn Fn(EventKind) + Send + Sync>)` under an RW lock; `publish` collects matching callbacks under the read lock, drops the lock, then spawns a tokio task per callback to invoke it.
+- `scheduler.rs` — `CronScheduler` parses cron expressions via the `cron` crate, sleeps to the next firing time with `tokio::time::sleep_until`, and uses `tokio_util::sync::CancellationToken` so `cancel` can interrupt the sleep without polling. Per-plugin tracking lives outside the scheduler in `PluginRegistry`.
+- `log.rs` — `NamespacedLog` formats `[plugin:{id}] [{LEVEL}] {msg}` to stderr; logging is intentionally unguarded.
+- `ui.rs` — `TauriUiApi` keeps a `tokio::sync::broadcast::Sender<UiMessage>` (capacity 256). The Tauri layer holds the receiver and renders `PanelRegistered` / `Notification` / `PanelData` events.
+
+The plugin layer is wired into `PluginHostBuilder`. The loader and registry modules are still TODO; the `runtime/` module is live and ships a Rhai script runtime.
+
+### Rhai plugin runtime (`src/plugin/runtime/rhai_runtime.rs`)
+
+`RhaiPlugin` is a `Plugin` implementation that compiles a user-supplied `.rhai` source file with a heavily restricted `rhai::Engine` and invokes the script's `on_load` / `on_enable` / `on_disable` / `on_unload` functions at the corresponding lifecycle events.
+
+**Engine hardening** — applied in `RhaiPlugin::new` before any plugin code runs:
+
+- `set_max_operations(200_000)` — total op budget per script execution.
+- `set_max_call_levels(32)` — recursion depth cap.
+- `set_max_string_size(65_536)` / `set_max_array_size(10_000)` / `set_max_map_size(1_000)` — collection size caps.
+- `on_print(|_| {})` — `print(...)` calls are silently swallowed.
+- Module loading is intentionally NOT installed (no `set_module_resolver`), so plugins can only see what the host explicitly registers.
+
+The `Candle` type is registered as a Rhai custom type `Candle` with getters for `open`, `high`, `low`, `close`, `volume`, `timestamp`.
+
+**Host functions** — registered onto the engine inside `on_load` (so the engine `Arc` has a single strong count and we can use `Arc::get_mut` for `&mut Engine` access):
+
+- `log_info` / `log_warn` / `log_error` — ungated `NamespacedLog` calls; every plugin can always log.
+- `storage_get(key)` / `storage_set(key, val)` — `Storage` capability; calls the underlying synchronous `StorageApi::read` / `write` and decodes `Vec<u8>` as UTF-8.
+- `notify_info` / `notify_warning` / `notify_error` — `UiPanels` capability; emits a `Notification` over the UI broadcast channel.
+- `register_indicator(name, fn_ptr)` — `Indicators` capability; the closure captures `Arc<Engine>` + `Arc<AST>` + a clone of the `FnPtr` and, on evaluation, dispatches the user's Rhai function with a `rhai::Array` of candle maps + the period. The trait-level `IndicatorRegistryApi` exposes a factory-based `register` that loses plugin-id information, so the runtime downcasts via `as_any()` back to the concrete `SharedIndicatorRegistry` and uses `register_fn` (which carries the `PluginId` for dedup). On any error or non-numeric return, the indicator pipeline receives a `Vec<f64>` of `NaN` of the same length as the input.
+
+**Lifecycle wiring** — `RhaiPlugin::on_load` compiles `self.source_path` with `engine.compile_file`, registers all host functions, then `call_fn`s `on_load` (if defined). `EvalAltResult::ErrorFunctionNotFound` is swallowed; any other error maps to `PluginError::LoadFailed`. `on_enable` / `on_disable` follow the same pattern mapping to `PluginError::ApiError`. `on_unload` invokes the script's `on_unload` (errors ignored) and drops `self.host` and `self.ast`.
+
+The engine and AST are stored in `Arc` so the `register_indicator` closure can hold long-lived references to them — Rhai's `Engine` is not `Clone`, so wrapping it in `Arc` is the only way to share it between the plugin struct and the registered host functions.

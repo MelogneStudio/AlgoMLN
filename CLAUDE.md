@@ -57,6 +57,8 @@ Don't break these — they are non-obvious properties the codebase is built arou
 
 **6. Wire-format boundary.** Rust types crossing the IPC boundary serialize to camelCase JSON (`#[serde(rename_all = "camelCase")]`). Internal `BacktestResult` / `PaperTrade` keep snake_case Rust field names; the conversion happens in `commands::strategy::BacktestResultWire` and `PaperTradeWire`. If you add a field the UI consumes, add it to the wire struct AND mirror it on the TS side — don't put extra UI-relevant fields directly on `BacktestResult` and rely on Rust serde to rename.
 
+**7. Plugin capability gating.** Plugins reach the engine only through `PluginHost`'s `*_guarded` accessors (`src/plugin/host.rs`). The accessor checks the plugin's declared `Capability` list and returns `PluginError::PermissionDenied` if the capability is missing. `LogApi` is intentionally unguarded. The plugin layer ships capability implementations for market data (broker-backed), per-plugin file KV storage, indicator/analytics registries with plugin-id dedup, a broadcast event bus, cron scheduling, and a Tauri-broadcast UI API — see `src/plugin/api/`. The Rhai script runtime is live in `src/plugin/runtime/rhai_runtime.rs` (hardened engine, capability-gated host fns, lifecycle dispatch). The loader and registry modules are still TODOs.
+
 ## Test Layout
 
 - Per-module unit tests live alongside source as `#[cfg(test)] mod tests` blocks.
