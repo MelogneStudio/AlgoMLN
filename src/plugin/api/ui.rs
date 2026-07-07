@@ -62,6 +62,10 @@ impl UiApi for TauriUiApi {
         });
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl TauriUiApi {

@@ -42,10 +42,12 @@ AlgoMLN/
 │   │   │   ├── log.rs          NamespacedLog — eprintln! gated by plugin_id
 │   │   │   └── ui.rs           TauriUiApi — broadcast channel for UI panels
 │   │   ├── host.rs             PluginHost (capability-gated accessors) + Builder
-│   │   ├── manifest.rs         PluginPermissions
+│   │   ├── loader.rs           PluginLoader — manifest → boxed Plugin (rhai/wasm)
+│   │   ├── manifest.rs         PluginManifest + PluginPermissions
+│   │   ├── registry.rs         PluginRegistry — in-memory map + lifecycle + host factory
 │   │   ├── runtime/            Plugin language runtimes
 │   │   │   ├── rhai_runtime.rs RhaiPlugin — Rhai script compilation + host fns
-│   │   │   └── wasm_runtime.rs WASM runtime (reserved, Phase 6)
+│   │   │   └── wasm_runtime.rs WasmPlugin — wasmtime module + `algomln::*` host fns
 │   │   ├── types.rs            PluginId, PluginMeta, Capability, PluginError, handles
 │   │   └── mod.rs              Plugin trait, plugin module root
 │   ├── commands/               Tauri IPC command implementations
@@ -127,9 +129,12 @@ AlgoMLN/
 | Capability gating + `*_guarded` accessors | `src/plugin/host.rs` (`PluginHost`, `PluginHostBuilder`) |
 | Plugin identity, errors, handles | `src/plugin/types.rs` |
 | Plugin lifecycle trait | `src/plugin/mod.rs` (`Plugin`) |
-| Plugin manifest + permissions | `src/plugin/manifest.rs` |
+| Plugin manifest + permissions | `src/plugin/manifest.rs` (`PluginManifest`, `PluginPermissions`) |
+| Plugin loader (manifest → boxed Plugin) | `src/plugin/loader.rs` (`PluginLoader::load_from_dir`) |
+| Plugin registry (in-memory map, lifecycle, host factory) | `src/plugin/registry.rs` (`PluginRegistry`) |
 | Rhai script runtime (engine budgets, host fns, lifecycle) | `src/plugin/runtime/rhai_runtime.rs` (`RhaiPlugin`) |
-| WASM plugin runtime (reserved) | `src/plugin/runtime/wasm_runtime.rs` |
+| WASM plugin runtime (wasmtime, capability-gated host fns) | `src/plugin/runtime/wasm_runtime.rs` |
+| Event bus used by `StrategyEngine` to publish `RuleFired` / `TradeExecuted` / `CandleProcessed` | `src/plugin/api/events.rs` (`EventBus`, `EventKind`) |
 
 ### Execution / Brokers
 

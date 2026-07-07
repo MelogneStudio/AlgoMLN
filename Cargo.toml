@@ -25,3 +25,5 @@ cron = "0.12"
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 rhai = { version = "1", features = ["sync", "no_closure"] }
+wasmtime = "23"
+wasmtime-wasi = "23"

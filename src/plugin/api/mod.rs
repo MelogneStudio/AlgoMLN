@@ -131,6 +131,10 @@ pub enum DslResult {
 pub trait UiApi: Send + Sync {
     fn register_panel(&self, panel: UiPanel) -> PluginResult<()>;
     fn notify(&self, kind: NotificationKind, message: &str) -> PluginResult<()>;
+    /// Downcast hook so plugin runtimes (e.g. WASM) can recover the
+    /// concrete `TauriUiApi` type to call `emit_panel_data`, which
+    /// lives outside the trait surface.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[derive(Debug, Clone)]

@@ -5,11 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::broker::Timeframe;
 use crate::models::{Candle, Position};
+use crate::plugin::api::events::EventKind;
 use crate::strategy::dsl::{
     ActionNode, CompareOp, ConditionNode, ExprNode, IndicatorKind, PriceField, RuleNode,
     StrategyNode,
 };
-use crate::strategy::execution::{build_order, ExecutionTarget, OrderBuildError, PaperPosition};
+use crate::strategy::execution::{
+    build_order, ExecutionTarget, OrderBuildError, PaperPosition, PaperTrade,
+};
 use crate::strategy::logging::{LogEntry, LogEntryKind, RuleSkipReason, StrategyLogger};
 
 use super::context::EvalContext;
@@ -58,6 +61,7 @@ pub struct StrategyEngine {
     indicator_provider: Box<dyn IndicatorProvider>,
     logger: StrategyLogger,
     profile: StrategyEngineProfile,
+    pub event_bus: Option<Arc<crate::plugin::api::events::EventBus>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -80,6 +84,7 @@ impl StrategyEngine {
             indicator_provider: Box::new(BoundedWindowProvider::new()),
             logger,
             profile: StrategyEngineProfile::default(),
+            event_bus: None,
         }
     }
 
@@ -121,6 +126,12 @@ impl StrategyEngine {
                         },
                         ctx.current.timestamp,
                     );
+                    if let Some(bus) = &self.event_bus {
+                        bus.publish(EventKind::RuleFired {
+                            rule_id: rule.id.clone(),
+                            strategy_id: self.instance.id.clone(),
+                        });
+                    }
                     self.submit_action(rule, action, &ctx).await;
                 }
                 Ok(None) => {
@@ -153,6 +164,9 @@ impl StrategyEngine {
         }
 
         self.indicator_provider.advance(ctx.current);
+        if let (Some(bus), Some(last)) = (&self.event_bus, candles.last()) {
+            bus.publish(EventKind::CandleProcessed(last.clone()));
+        }
         let entries = self.logger.drain_entries();
         self.profile.on_candle_time += started.elapsed();
         entries
@@ -230,17 +244,33 @@ impl StrategyEngine {
 
         let started = Instant::now();
         self.profile.broker_execute_calls += 1;
+        let order_for_trade = order.clone();
         let execution_result = self.instance.execution_target.execute(order).await;
         self.profile.broker_execute_time += started.elapsed();
 
         match execution_result {
-            Ok(result) => self.logger.log(
-                LogEntryKind::OrderExecuted {
-                    rule_id: rule.id.clone(),
-                    result,
-                },
-                ctx.current.timestamp,
-            ),
+            Ok(result) => {
+                self.logger.log(
+                    LogEntryKind::OrderExecuted {
+                        rule_id: rule.id.clone(),
+                        result: result.clone(),
+                    },
+                    ctx.current.timestamp,
+                );
+                if let Some(bus) = &self.event_bus {
+                    let trade = PaperTrade {
+                        id: result.order_id.clone(),
+                        timestamp: result.timestamp,
+                        symbol: order_for_trade.symbol.clone(),
+                        side: order_for_trade.side,
+                        quantity: order_for_trade.quantity as usize,
+                        price: order_for_trade.price.unwrap_or(ctx.current.close),
+                        rule_id: rule.id.clone(),
+                        pnl: None,
+                    };
+                    bus.publish(EventKind::TradeExecuted(trade));
+                }
+            }
             Err(error) => self.logger.log(
                 LogEntryKind::OrderFailed {
                     rule_id: rule.id.clone(),

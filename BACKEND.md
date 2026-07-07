@@ -67,10 +67,11 @@ The structure of `on_candle` is the single most important thing to understand in
 2. **First pass — evaluate every rule.** For each rule:
    - `eval_condition` returns `Result<bool, EvalError>`.
    - `TriggerStateMap::should_fire(rule_id, condition_result)` returns true only on a `false → true` transition. Bare `WHEN x > y` would otherwise fire every candle.
-   - If fired, the engine logs the condition evaluation, the rule fire, the order submission, the execution result (or skip/failure).
+   - If fired, the engine logs the condition evaluation, the rule fire, the order submission, the execution result (or skip/failure). If the engine has an `event_bus` wired in, it also publishes `EventKind::RuleFired { rule_id, strategy_id }`; after a successful `ExecutionTarget::execute` it publishes `EventKind::TradeExecuted(...)` carrying a `PaperTrade` reconstructed from the order + `OrderResult`.
 3. **Second pass — update crossover state.** After *all* rules are evaluated for this cycle, walk the rules again and call `CrossDetector::update(rule_id, fast, slow)`. Doing this *after* the rule loop guarantees that within a single cycle, every rule sees the same `prev` state — there is no ordering hazard where the first rule's cross-detector update affects the second rule's evaluation. This is invariant #2 in `CLAUDE.md`.
 4. **Advance the indicator window.** `BoundedWindowProvider::advance` pushes the current candle into the rolling 500-candle window and drops the oldest if the cap is hit.
-5. **Drain the logger** and return the entries to the caller. The CLI and Tauri both append these to the final `BacktestResult.logs`.
+5. **Publish the candle event.** If `self.event_bus` is `Some`, the engine publishes `EventKind::CandleProcessed(last.clone())` so subscribed plugins (UI dashboards, log forwarders, custom analytics) see the cycle end.
+6. **Drain the logger** and return the entries to the caller. The CLI and Tauri both append these to the final `BacktestResult.logs`.
 
 The engine is profiled (`StrategyEngineProfile`): it counts `on_candle` calls, broker `execute` calls, and broker `get_positions` calls, and accumulates elapsed time. The backtest orchestrator packages these into `EngineProfileReport` and `IndicatorProfileReport` and ships them to the UI for the "Throughput" panel in the CLI summary.
 
@@ -201,7 +202,7 @@ Per-capability implementations live in `src/plugin/api/`:
 - `log.rs` — `NamespacedLog` formats `[plugin:{id}] [{LEVEL}] {msg}` to stderr; logging is intentionally unguarded.
 - `ui.rs` — `TauriUiApi` keeps a `tokio::sync::broadcast::Sender<UiMessage>` (capacity 256). The Tauri layer holds the receiver and renders `PanelRegistered` / `Notification` / `PanelData` events.
 
-The plugin layer is wired into `PluginHostBuilder`. The loader and registry modules are still TODO; the `runtime/` module is live and ships a Rhai script runtime.
+The plugin layer is wired into `PluginHostBuilder`. `PluginLoader::load_from_dir(dir)` (in `src/plugin/loader.rs`) reads `dir/plugin.toml`, derives `PluginMeta` and `Vec<Capability>` from it, and dispatches on the entry file's extension to either `RhaiPlugin::new` or `WasmPlugin::new` (passing the manifest's `permissions.max_memory_mb` to the WASM runtime). Unknown extensions yield `PluginError::LoadFailed`. `PluginRegistry` (in `src/plugin/registry.rs`) holds an `Arc<RwLock<HashMap<PluginId, PluginEntry>>>`; entries carry the boxed `Plugin`, the original `PluginManifest`, the current `PluginStatus`, and any `ScheduleHandle`s the plugin has armed. The registry is constructed with a `plugins_dir: PathBuf` and a `host_factory: Arc<dyn Fn(PluginId, Vec<Capability>, PluginPermissions) -> Arc<PluginHost> + Send + Sync>` so the host's wiring (broker handles, storage roots, UI broadcast sender, etc.) lives in the application, not in the plugin layer. `PluginRegistry::scan_and_load` walks the plugins directory, loads each subdirectory via the loader, builds a host via the factory, calls `plugin.on_load(host)`, and records `Loaded` (success) or `Failed(err)` (load error). `enable` / `disable` / `unload` are the lifecycle entrypoints; `unload` removes the entry from the map and calls `on_unload` on the way out. `list` returns sorted `PluginListEntry` snapshots for the UI.
 
 ### Rhai plugin runtime (`src/plugin/runtime/rhai_runtime.rs`)
 
@@ -227,3 +228,28 @@ The `Candle` type is registered as a Rhai custom type `Candle` with getters for 
 **Lifecycle wiring** — `RhaiPlugin::on_load` compiles `self.source_path` with `engine.compile_file`, registers all host functions, then `call_fn`s `on_load` (if defined). `EvalAltResult::ErrorFunctionNotFound` is swallowed; any other error maps to `PluginError::LoadFailed`. `on_enable` / `on_disable` follow the same pattern mapping to `PluginError::ApiError`. `on_unload` invokes the script's `on_unload` (errors ignored) and drops `self.host` and `self.ast`.
 
 The engine and AST are stored in `Arc` so the `register_indicator` closure can hold long-lived references to them — Rhai's `Engine` is not `Clone`, so wrapping it in `Arc` is the only way to share it between the plugin struct and the registered host functions.
+
+### WASM plugin runtime (`src/plugin/runtime/wasm_runtime.rs`)
+
+`WasmPlugin` is a `Plugin` implementation that loads a `.wasm` artifact, links a small set of capability-gated host functions into the `algomln` module namespace, and invokes the exported `_algomln_on_load` / `_algomln_on_enable` / `_algomln_on_disable` / `_algomln_on_unload` functions at the corresponding lifecycle events.
+
+**Engine configuration** — built eagerly in `WasmPlugin::new` from a `wasmtime::Config`:
+
+- `async_support(false)` — synchronous execution, matches the rest of the engine.
+- `epoch_interruption(true)` — the store's epoch deadline is armed to `1` on load, so a host-side watchdog can drive the engine's epoch counter and trap runaway plugins.
+- `cranelift_opt_level(Speed)` — release-style codegen.
+- Memory limit is computed from `memory_limit_mb * 1024 * 1024` and enforced by a `ResourceLimiter` (`MemoryLimitState`) that is stored inline in `WasmState` and handed to `store.limiter(|s: &mut WasmState| &mut s.memory_limiter)`. `memory_growing` returns `false` for any growth past the cap; `table_growing` caps tables at 10,000 entries.
+
+**WASI is intentionally not linked.** `WasiCtx` in wasmtime 23 holds trait objects (`RngCore`, `HostWallClock`, `HostMonotonicClock`) that are `Send` but not `Sync`. Carrying a `WasiCtx` in `WasmState` would prevent `Store<WasmState>` from satisfying the `Sync` bound the `Plugin` trait requires, and therefore would prevent `WasmPlugin` from being `Sync` — which the rest of the host assumes. Plugins interact with the platform exclusively through the `algomln::*` host functions.
+
+**Host functions** — bound in `build_linker`. All string/binary data crosses the WASM boundary through `(ptr, len)` pairs; helpers `read_string_from_memory` and `write_bytes_to_memory` decode/encode against the instance's `memory` export:
+
+- `log_info(ptr, len)` / `log_warn(ptr, len)` / `log_error(ptr, len)` — ungated; route through the plugin's `LogApi` with the host's `PluginId` attached.
+- `storage_get(key_ptr, key_len, out_ptr, out_len_ptr) -> i32` — `Storage` capability; returns `0` (write value at `out_ptr`, length at `out_len_ptr`), `1` (key not present, `out_len_ptr` set to 0), or `-1` (permission denied / IO error).
+- `storage_set(key_ptr, key_len, val_ptr, val_len) -> i32` — `Storage` capability; returns `0` on success, `-1` on permission denied / IO error.
+- `notify(msg_ptr, msg_len, kind)` — `UiPanels` capability; `kind` is `0` = Info, `1` = Warning, `2` = Error. Permission errors are logged but do not trap the instance.
+- `emit_panel_data(panel_id_ptr, panel_id_len, json_ptr, json_len) -> i32` — `UiPanels` capability; the trait surface doesn't expose panel-data emission, so the implementation downcasts the `UiApi` to the concrete `TauriUiApi` via `as_any` and calls `emit_panel_data` so the broadcast channel picks the value up.
+
+**Async bridge.** `StorageApi::read` / `write` are currently synchronous (the `async_trait` is forward-looking), but every host call still drives the work through `tokio::runtime::Handle::current().block_on(...)` so future async implementations compose without changing the WASM side.
+
+**Lifecycle wiring** — `WasmPlugin::on_load` reads the artifact, compiles it with `Module::new`, builds the linker, constructs the store with the inline `MemoryLimitState`, sets the epoch deadline, instantiates, and dispatches `_algomln_on_load` if exported. `on_enable` / `on_disable` follow the same pattern for `_algomln_on_enable` / `_algomln_on_disable`. `on_unload` calls `_algomln_on_unload` (errors ignored) and drops both the store and the instance, releasing all memory back to wasmtime.
