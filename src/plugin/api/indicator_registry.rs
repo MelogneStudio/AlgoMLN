@@ -84,30 +84,20 @@ pub struct FnIndicatorInstance {
 impl IndicatorRegistryApi for SharedIndicatorRegistry {
     fn register(
         &self,
-        name: &str,
-        factory: Arc<dyn Fn() -> Box<dyn IndicatorInstance> + Send + Sync>,
+        name: String,
+        registered_by: PluginId,
+        f: std::sync::Arc<dyn Fn(&[Candle], usize) -> Vec<f64> + Send + Sync>,
     ) -> PluginResult<()> {
-        // The trait-level factory does not carry a plugin id, so we attribute
-        // registrations to an "anonymous" id. This means two different plugins
-        // registering the same name through the trait would silently overwrite
-        // each other — the spec's plugin-id-aware semantics are exposed via
-        // `register_fn` above.
-        let anon = PluginId::from("__anonymous_trait_register__");
-        // We can't meaningfully bridge `factory -> IndicatorFn` without state, so
-        // we store a no-op identity function. The real path is `register_fn`.
-        let _ = factory;
-        let f: Arc<IndicatorFn> = Arc::new(|candles, _window| {
-            candles.iter().map(|c| c.close).collect()
-        });
         let mut map = self.inner.write();
-        if let Some((existing, _)) = map.get(name) {
-            if existing != &anon {
+        if let Some((existing, _)) = map.get(&name) {
+            if existing != &registered_by {
                 return Err(PluginError::ApiError(format!(
                     "indicator '{name}' already registered by plugin '{existing}'"
                 )));
             }
+            // Same plugin re-registration: silent overwrite.
         }
-        map.insert(name.to_string(), (anon, f));
+        map.insert(name, (registered_by, f));
         Ok(())
     }
 

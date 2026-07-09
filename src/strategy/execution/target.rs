@@ -9,6 +9,11 @@ pub trait ExecutionTarget: Send + Sync {
     async fn get_positions(&self) -> Result<Vec<Position>, ExecutionError>;
     fn is_paper(&self) -> bool;
     fn name(&self) -> &str;
+    /// Downcast hook so the engine can recover concrete broker state
+    /// (e.g. the `PaperBroker`'s `trade_history` to publish a
+    /// `TradeExecuted` event). Mirrors the `as_any` pattern on
+    /// `IndicatorRegistryApi` / `UiApi`.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[derive(Debug, Clone, Serialize)]

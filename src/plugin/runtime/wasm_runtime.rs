@@ -84,6 +84,12 @@ pub struct WasmPlugin {
 /// resource limiter. Kept narrow so that `WasmState` (and therefore
 /// `WasmPlugin`) can satisfy the `Send + Sync` bound that the
 /// `Plugin` trait requires.
+///
+/// Note: WASI is intentionally **not** linked in this build. `WasiCtx`
+/// in wasmtime 23 holds trait objects that are `Send`-only and not
+/// `Sync`, which would prevent the resulting `Store<WasmState>` (and
+/// therefore `WasmPlugin`) from satisfying the `Plugin: Send + Sync`
+/// bound. There is therefore no `wasi` field on this struct.
 pub struct WasmState {
     pub host: Arc<PluginHost>,
     #[allow(private_interfaces)]
@@ -235,9 +241,9 @@ fn build_linker(engine: &Engine) -> PluginResult<Linker<WasmState>> {
 
     // ---- Per-plugin storage (Storage capability). ----
     //
-    // `StorageApi::read` is currently synchronous despite the
-    // `async_trait`; we still drive it through the current Tokio
-    // handle so future async implementations compose cleanly.
+    // `StorageApi::read` and `StorageApi::write` are synchronous
+    // (the `async_trait` is on the trait only for forward compat), so
+    // we call them directly without going through `block_on`.
     linker
         .func_wrap(
             "algomln",
@@ -258,8 +264,7 @@ fn build_linker(engine: &Engine) -> PluginResult<Linker<WasmState>> {
                         return -1;
                     }
                 };
-                let result =
-                    tokio::runtime::Handle::current().block_on(async { storage.read(&key) });
+                let result = storage.read(&key);
                 match result {
                     Ok(Some(bytes)) => {
                         write_bytes_to_memory(&mut caller, out_ptr, &bytes);
@@ -305,8 +310,7 @@ fn build_linker(engine: &Engine) -> PluginResult<Linker<WasmState>> {
                         return -1;
                     }
                 };
-                let result = tokio::runtime::Handle::current()
-                    .block_on(async { storage.write(&key, &val) });
+                let result = storage.write(&key, &val);
                 match result {
                     Ok(()) => 0,
                     Err(e) => {

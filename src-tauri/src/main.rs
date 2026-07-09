@@ -5,16 +5,27 @@ use algomln::{
     commands::{
         self,
         registry::{DeployedStrategy, StrategyMode, StrategyRegistry, StrategyStatus},
+        state::AppState,
         strategy::{run_backtest_dsl, BacktestResultWire},
     },
     models::{Candle, Quote},
+    plugin::{
+        api::{
+            analytics::SharedAnalyticsRegistry,
+            dsl_extension::SharedDslExtensionRegistry,
+            events::EventBus,
+            execution::NoopExecutionApi,
+            indicator_registry::SharedIndicatorRegistry,
+            log::NamespacedLog,
+            market_data::BrokerMarketDataApi,
+            scheduler::CronScheduler,
+            storage::PluginKvStore,
+            ui::TauriUiApi,
+        },
+        registry::PluginRegistry,
+    },
 };
-use tauri::State;
-
-struct AppState {
-    data: commands::data::DataState,
-    strategies: Arc<StrategyRegistry>,
-}
+use tauri::{Emitter, State};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +99,37 @@ async fn set_strategy_status(
     state.strategies.set_status(&strategy_id, status).await
 }
 
+// ---------- Plugin IPC ----------
+//
+// The `#[tauri::command]` attribute generates module-private macro
+// artifacts (`__cmd__name`, `__tauri_command_name_name`) that
+// `tauri::generate_handler!` looks up by name. Those artifacts only
+// exist in the module where the function is annotated, so the plugin
+// command wrappers live here in `main.rs` and delegate to the
+// plain-async implementations in `commands::plugins`.
+
+#[tauri::command]
+async fn list_plugins(
+    state: State<'_, AppState>,
+) -> Result<Vec<algomln::plugin::PluginListEntry>, String> {
+    commands::plugins::list_plugins(&state).await
+}
+
+#[tauri::command]
+async fn enable_plugin(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    commands::plugins::enable_plugin(&state, id).await
+}
+
+#[tauri::command]
+async fn disable_plugin(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    commands::plugins::disable_plugin(&state, id).await
+}
+
+#[tauri::command]
+async fn reload_plugins(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    commands::plugins::reload_plugins(&state).await
+}
+
 fn main() {
     load_dotenv();
 
@@ -95,7 +137,7 @@ fn main() {
         .expect("Set DHAN_ACCESS_TOKEN in .env before starting the Tauri app");
 
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             use tauri::Manager;
 
             let store_dir = app
@@ -110,11 +152,113 @@ fn main() {
                         store_path.display()
                     )
                 });
-            app.manage(AppState {
-                data,
-                strategies: Arc::new(registry),
+            let strategies = Arc::new(registry);
+
+            // ---------- Plugin shared infrastructure ----------
+            //
+            // Built once and cloned into every plugin host so that indicators,
+            // analytics, DSL keywords, scheduled jobs, and event-bus subscribers
+            // registered by one plugin are visible to the engine and to other
+            // plugins. The plugin registry, plugin host, and the strategy
+            // engine all hold `Arc`s into the same maps.
+            let indicator_registry = Arc::new(SharedIndicatorRegistry::new());
+            let analytics_registry = Arc::new(SharedAnalyticsRegistry::new());
+            let dsl_ext_registry = Arc::new(SharedDslExtensionRegistry::new());
+            // `EventBus::new()` already returns `Arc<Self>`, so don't double-wrap.
+            let event_bus = EventBus::new();
+            let (tauri_ui_api_concrete, ui_receiver) = TauriUiApi::new();
+            // `TauriUiApi::new()` already returns an `Arc<TauriUiApi>` as its
+            // first element. Re-cast that to `Arc<dyn UiApi>` so the
+            // builder's `ui` field accepts it. The concrete `Arc` is kept
+            // (under the same name) to subscribe new receivers for the
+            // forwarder below.
+            let tauri_ui_api: Arc<dyn algomln::plugin::api::UiApi> =
+                tauri_ui_api_concrete.clone() as Arc<dyn algomln::plugin::api::UiApi>;
+            let scheduler = CronScheduler::new();
+
+            // The plugin's "market data" capability is backed by the same
+            // broker the rest of the app uses (Dhan in production). The
+            // "execution" capability is a no-op stub for now — see
+            // `src/plugin/api/execution.rs`.
+            let broker_arc = data.broker.clone();
+            let market_data_api: Arc<dyn algomln::plugin::api::MarketDataApi> =
+                Arc::new(BrokerMarketDataApi::new(broker_arc));
+            let execution_api: Arc<dyn algomln::plugin::api::ExecutionApi> =
+                Arc::new(NoopExecutionApi);
+
+            // Per-plugin storage lives under `<app_data>/plugins/<plugin_id>/storage`.
+            let plugins_dir = store_dir.join("plugins");
+            let _ = std::fs::create_dir_all(&plugins_dir);
+            let plugins_dir_for_factory = plugins_dir.clone();
+
+            let host_factory: algomln::plugin::registry::HostFactory = Arc::new(
+                move |id: algomln::plugin::PluginId,
+                      caps: Vec<algomln::plugin::Capability>,
+                      perms: algomln::plugin::manifest::PluginPermissions| {
+                    let storage_dir = plugins_dir_for_factory
+                        .join(id.as_ref())
+                        .join("storage");
+                    let storage = Arc::new(
+                        PluginKvStore::new(id.clone(), storage_dir)
+                            .expect("plugin storage dir should be creatable"),
+                    );
+                    let log: Arc<dyn algomln::plugin::api::LogApi> =
+                        Arc::new(NamespacedLog::new(id.clone()));
+                    algomln::plugin::host::PluginHostBuilder {
+                        id: id.clone(),
+                        market_data: market_data_api.clone(),
+                        execution: execution_api.clone(),
+                        storage,
+                        event_bus: event_bus.clone(),
+                        indicators: indicator_registry.clone(),
+                        analytics: analytics_registry.clone(),
+                        dsl: dsl_ext_registry.clone(),
+                        ui: tauri_ui_api.clone(),
+                        scheduler: scheduler.clone(),
+                        log,
+                        capabilities: caps,
+                        permissions: perms,
+                    }
+                    .build()
+                },
+            );
+
+            let plugin_registry = PluginRegistry::new(plugins_dir.clone(), host_factory);
+
+            // Synchronous `setup` driving the async `scan_and_load`. Tauri 2
+            // installs a multi-thread tokio runtime on the builder, so
+            // `tauri::async_runtime::block_on` is safe here.
+            let load_results = tauri::async_runtime::block_on(plugin_registry.scan_and_load());
+            for (id, result) in &load_results {
+                match result {
+                    Ok(()) => eprintln!("[plugins] loaded: {id}"),
+                    Err(e) => eprintln!("[plugins] failed to load {id}: {e}"),
+                }
+            }
+
+            // ---------- Forward plugin UI messages to the Tauri bus ----------
+            //
+            // Plugins call `ui.register_panel` / `ui.notify` / `emit_panel_data`
+            // via the `TauriUiApi`, which broadcasts `UiMessage`s on a tokio
+            // channel. We re-emit each message on the Tauri event bus as
+            // `"plugin-ui-message"` so the React app can subscribe to a single
+            // channel and dispatch on the `UiMessage` variant.
+            let app_handle = app.handle().clone();
+            let mut ui_rx = tauri_ui_api_concrete.receiver();
+            tauri::async_runtime::spawn(async move {
+                while let Ok(msg) = ui_rx.recv().await {
+                    let _ = app_handle.emit("plugin-ui-message", &msg);
+                }
             });
 
+            // TODO stage 9: when constructing a StrategyEngine for paper
+            // trading (not backtest), set engine.event_bus =
+            // Some(shared_event_bus.clone()) where shared_event_bus is the
+            // Arc<EventBus> created in stage 9's shared infrastructure.
+            // Backtest engines must keep event_bus = None (see
+            // `commands::strategy::run_backtest_internal`).
+
+            // ---------- Acrylic window chrome (Windows only) ----------
             #[cfg(target_os = "windows")]
             {
                 use window_vibrancy::apply_acrylic;
@@ -152,6 +296,13 @@ fn main() {
                 apply_acrylic(&win, Some((34, 34, 34, 153)))
                     .expect("Acrylic requires Windows 10 1803+");
             }
+
+            app.manage(AppState {
+                data,
+                strategies,
+                plugin_registry,
+                ui_receiver,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -162,7 +313,11 @@ fn main() {
             validate_dsl,
             deploy_strategy,
             list_strategies,
-            set_strategy_status
+            set_strategy_status,
+            list_plugins,
+            enable_plugin,
+            disable_plugin,
+            reload_plugins,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AlgoMLN");

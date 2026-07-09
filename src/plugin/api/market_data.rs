@@ -26,7 +26,7 @@ impl BrokerMarketDataApi {
 
 #[async_trait::async_trait]
 impl MarketDataApi for BrokerMarketDataApi {
-    fn subscribe(
+    fn subscribe_ticks(
         &self,
         symbol: &str,
         callback: Arc<dyn Fn(MarketDataEvent) + Send + Sync>,
@@ -70,13 +70,12 @@ impl MarketDataApi for BrokerMarketDataApi {
         })
         .abort_handle();
 
-        // Insert into the map. The trait is sync but we need to lock an async Mutex;
-        // do so via block_in_place so the runtime can drive the future.
+        // SAFETY: requires a multi-thread Tokio runtime to be current on this thread.
         let map_for_insert = self.subscriptions.clone();
         let h = handle;
         let a = abort;
-        let inserted = tokio::task::block_in_place(move || {
-            let mut guard = futures::executor::block_on(map_for_insert.lock());
+        let inserted = tokio::runtime::Handle::current().block_on(async move {
+            let mut guard = map_for_insert.lock().await;
             guard.insert(h, a).is_some()
         });
         let _ = inserted;
@@ -84,10 +83,11 @@ impl MarketDataApi for BrokerMarketDataApi {
         Ok(handle)
     }
 
-    fn unsubscribe(&self, handle: SubscriptionHandle) -> PluginResult<()> {
+    fn unsubscribe_ticks(&self, handle: SubscriptionHandle) -> PluginResult<()> {
+        // SAFETY: requires a multi-thread Tokio runtime to be current on this thread.
         let map = self.subscriptions.clone();
-        let removed = tokio::task::block_in_place(move || {
-            let mut guard = futures::executor::block_on(map.lock());
+        let removed = tokio::runtime::Handle::current().block_on(async move {
+            let mut guard = map.lock().await;
             guard.remove(&handle)
         });
         match removed {
@@ -102,13 +102,12 @@ impl MarketDataApi for BrokerMarketDataApi {
     fn latest_candle(&self, symbol: &str) -> PluginResult<Candle> {
         let broker = self.broker.clone();
         let sym = symbol.to_string();
+        // SAFETY: requires a multi-thread Tokio runtime to be current on this thread.
         let res: anyhow::Result<Vec<crate::models::Candle>> =
-            tokio::task::block_in_place(move || {
-                futures::executor::block_on(async move {
-                    let timeframe = Timeframe::M1;
-                    let now = chrono::Utc::now().timestamp();
-                    broker.get_ohlcv(&sym, timeframe, now - 60, now).await
-                })
+            tokio::runtime::Handle::current().block_on(async move {
+                let timeframe = Timeframe::M1;
+                let now = chrono::Utc::now().timestamp();
+                broker.get_ohlcv(&sym, timeframe, now - 60, now).await
             });
         let candles = res.map_err(|e| PluginError::ApiError(e.to_string()))?;
         let last = candles

@@ -294,15 +294,12 @@ fn register_host_functions(
                         .register_fn(&name, pid_clone.clone(), indicator_fn)
                         .is_ok();
                 }
-                // Fallback: trait-level path, factory form. We supply a
-                // no-op factory so the entry exists but isn't
-                // user-computable from the trait path. The user can
-                // still invoke the function from Rhai via the closure
-                // they captured, so this is intentionally best-effort.
-                let factory: std::sync::Arc<
-                    dyn Fn() -> Box<dyn crate::plugin::api::IndicatorInstance> + Send + Sync,
-                > = std::sync::Arc::new(|| Box::new(NoopIndicator));
-                registry.register(&name, factory).is_ok()
+                // No downcast: the trait-level register path requires a
+                // plugin-id-attributed indicator function which we already
+                // constructed above. The trait-level register method now
+                // matches the spec shape and the factory-based fallback is
+                // intentionally removed.
+                false
             },
         );
     }

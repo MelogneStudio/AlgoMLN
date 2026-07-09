@@ -17,6 +17,7 @@ pub struct PluginHost {
     pub market_data: Arc<dyn MarketDataApi>,
     pub execution: Arc<dyn ExecutionApi>,
     pub storage: Arc<dyn StorageApi>,
+    pub event_bus: Arc<crate::plugin::api::events::EventBus>,
     pub indicators: Arc<dyn IndicatorRegistryApi>,
     pub analytics: Arc<dyn AnalyticsApi>,
     pub dsl: Arc<dyn DslExtensionApi>,
@@ -63,6 +64,13 @@ impl PluginHost {
         Ok(&self.storage)
     }
 
+    pub fn event_bus_guarded(
+        &self,
+    ) -> PluginResult<&Arc<crate::plugin::api::events::EventBus>> {
+        self.require_capability(&Capability::Events)?;
+        Ok(&self.event_bus)
+    }
+
     pub fn indicators_guarded(&self) -> PluginResult<&Arc<dyn IndicatorRegistryApi>> {
         self.require_capability(&Capability::Indicators)?;
         Ok(&self.indicators)
@@ -103,6 +111,7 @@ pub struct PluginHostBuilder {
     pub market_data: Arc<dyn MarketDataApi>,
     pub execution: Arc<dyn ExecutionApi>,
     pub storage: Arc<dyn StorageApi>,
+    pub event_bus: Arc<crate::plugin::api::events::EventBus>,
     pub indicators: Arc<dyn IndicatorRegistryApi>,
     pub analytics: Arc<dyn AnalyticsApi>,
     pub dsl: Arc<dyn DslExtensionApi>,
@@ -120,6 +129,7 @@ impl PluginHostBuilder {
             market_data: self.market_data,
             execution: self.execution,
             storage: self.storage,
+            event_bus: self.event_bus,
             indicators: self.indicators,
             analytics: self.analytics,
             dsl: self.dsl,

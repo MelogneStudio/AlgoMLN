@@ -63,6 +63,10 @@ impl UiApi for TauriUiApi {
         Ok(())
     }
 
+    fn list_panels(&self) -> Vec<(String, String)> {
+        self.panels.read().clone()
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -75,9 +79,5 @@ impl TauriUiApi {
             .insert(panel_id.clone(), data.clone());
         let _ = self.sender.send(UiMessage::PanelData { panel_id, data });
         Ok(())
-    }
-
-    pub fn list_panels(&self) -> Vec<(String, String)> {
-        self.panels.read().clone()
     }
 }

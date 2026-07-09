@@ -12,11 +12,12 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::plugin::host::PluginHost;
+use crate::plugin::host::{self, PluginHost};
 use crate::plugin::loader::PluginLoader;
 use crate::plugin::manifest::{PluginManifest, PluginPermissions};
 use crate::plugin::types::{
-    PluginError, PluginId, PluginListEntry, PluginResult, PluginStatus, ScheduleHandle,
+    Capability, PluginError, PluginId, PluginListEntry, PluginMeta, PluginResult, PluginStatus,
+    PluginVersion, ScheduleHandle,
 };
 
 use super::Plugin;
@@ -150,37 +151,108 @@ impl PluginRegistry {
 
     /// Move a loaded plugin into the `Enabled` state.
     pub async fn enable(&self, id: &PluginId) -> PluginResult<()> {
-        let mut guard = self.plugins.write();
-        let entry = guard
-            .get_mut(id)
-            .ok_or_else(|| PluginError::NotFound(id.to_string()))?;
-        if let PluginStatus::Failed(msg) = &entry.status {
-            return Err(PluginError::ApiError(format!(
-                "cannot enable failed plugin: {msg}"
-            )));
+        // Take the lock briefly to verify the plugin exists and is not in
+        // a failed state, then release it before awaiting. Holding a
+        // parking_lot write guard across an `.await` would (a) make the
+        // future `!Send` and (b) risk deadlock if the awaited future
+        // re-enters the registry. There is a small TOCTOU window between
+        // the check and the status write, but `on_enable` is idempotent
+        // for the plugins shipped in this repo and the registry is
+        // single-process.
+        enum Check {
+            Enable(Box<dyn Plugin>),
+            Failed(String),
+            Missing,
         }
-        entry.plugin.on_enable().await?;
-        entry.status = PluginStatus::Enabled;
-        Ok(())
+        let to_run = {
+            let mut guard = self.plugins.write();
+            match guard.get_mut(id) {
+                None => Check::Missing,
+                Some(entry) => {
+                    if let PluginStatus::Failed(msg) = &entry.status {
+                        Check::Failed(msg.clone())
+                    } else {
+                        // Replace the plugin slot with a marker entry so
+                        // the registry stays consistent while `on_enable`
+                        // is in flight. We move the plugin out and back
+                        // via the entry to avoid a separate per-plugin
+                        // lock.
+                        let entry = std::mem::replace(
+                            entry,
+                            PluginEntry {
+                                plugin: Box::new(EmptyPlugin),
+                                status: PluginStatus::Loaded,
+                                manifest: entry.manifest.clone(),
+                                schedule_handles: Vec::new(),
+                            },
+                        );
+                        Check::Enable(entry.plugin)
+                    }
+                }
+            }
+        };
+        match to_run {
+            Check::Missing => Err(PluginError::NotFound(id.to_string())),
+            Check::Failed(msg) => Err(PluginError::ApiError(format!(
+                "cannot enable failed plugin: {msg}"
+            ))),
+            Check::Enable(plugin) => {
+                let mut plugin = plugin;
+                plugin.on_enable().await?;
+                let mut guard = self.plugins.write();
+                if let Some(entry) = guard.get_mut(id) {
+                    entry.plugin = plugin;
+                    entry.status = PluginStatus::Enabled;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Move an enabled plugin back to `Disabled`.
     pub async fn disable(&self, id: &PluginId) -> PluginResult<()> {
+        // Same release-before-await pattern as `enable`. See the comment
+        // there for why.
+        let to_run = {
+            let mut guard = self.plugins.write();
+            match guard.get_mut(id) {
+                None => return Err(PluginError::NotFound(id.to_string())),
+                Some(entry) => {
+                    let entry = std::mem::replace(
+                        entry,
+                        PluginEntry {
+                            plugin: Box::new(EmptyPlugin),
+                            status: PluginStatus::Loaded,
+                            manifest: entry.manifest.clone(),
+                            schedule_handles: Vec::new(),
+                        },
+                    );
+                    entry.plugin
+                }
+            }
+        };
+        let mut plugin = to_run;
+        plugin.on_disable().await?;
         let mut guard = self.plugins.write();
-        let entry = guard
-            .get_mut(id)
-            .ok_or_else(|| PluginError::NotFound(id.to_string()))?;
-        entry.plugin.on_disable().await?;
-        entry.status = PluginStatus::Disabled;
+        if let Some(entry) = guard.get_mut(id) {
+            entry.plugin = plugin;
+            entry.status = PluginStatus::Disabled;
+        }
         Ok(())
     }
 
     /// Tear down a plugin and remove it from the registry.
     pub async fn unload(&self, id: &PluginId) -> PluginResult<()> {
-        let mut guard = self.plugins.write();
-        let mut entry = guard
-            .remove(id)
-            .ok_or_else(|| PluginError::NotFound(id.to_string()))?;
+        // `on_unload` is sync, so the guard is never held across an
+        // `.await`. We do still need to drop the lock before calling
+        // `on_unload` because the plugin could re-enter the registry
+        // (e.g. via storage cleanup) and we don't want a deadlock.
+        let mut entry = {
+            let mut guard = self.plugins.write();
+            guard
+                .remove(id)
+                .ok_or_else(|| PluginError::NotFound(id.to_string()))?
+        };
         entry.plugin.on_unload();
         Ok(())
     }
@@ -204,4 +276,43 @@ impl PluginRegistry {
     pub fn get_status(&self, id: &PluginId) -> Option<PluginStatus> {
         self.plugins.read().get(id).map(|e| e.status.clone())
     }
+}
+
+/// Placeholder plugin used to swap a real plugin out of a registry
+/// entry while its `on_enable` / `on_disable` future is in flight.
+/// Holds the write lock for a much shorter window than the old
+/// "hold across await" design — see `PluginRegistry::enable` for the
+/// TOCTOU rationale.
+struct EmptyPlugin;
+
+#[async_trait::async_trait]
+impl Plugin for EmptyPlugin {
+    fn meta(&self) -> &PluginMeta {
+        static META: PluginMeta = PluginMeta {
+            id: PluginId(String::new()),
+            name: String::new(),
+            version: PluginVersion { major: 0, minor: 0, patch: 0 },
+            description: String::new(),
+            author: String::new(),
+        };
+        &META
+    }
+
+    fn capabilities(&self) -> &[Capability] {
+        &[]
+    }
+
+    async fn on_load(&mut self, _host: std::sync::Arc<host::PluginHost>) -> PluginResult<()> {
+        Ok(())
+    }
+
+    async fn on_enable(&mut self) -> PluginResult<()> {
+        Ok(())
+    }
+
+    async fn on_disable(&mut self) -> PluginResult<()> {
+        Ok(())
+    }
+
+    fn on_unload(&mut self) {}
 }

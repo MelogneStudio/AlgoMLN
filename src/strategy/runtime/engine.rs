@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::broker::Timeframe;
 use crate::models::{Candle, Position};
-use crate::plugin::api::events::EventKind;
+use crate::plugin::api::events::{EventBus, EventKind};
 use crate::strategy::dsl::{
     ActionNode, CompareOp, ConditionNode, ExprNode, IndicatorKind, PriceField, RuleNode,
     StrategyNode,
@@ -61,7 +61,10 @@ pub struct StrategyEngine {
     indicator_provider: Box<dyn IndicatorProvider>,
     logger: StrategyLogger,
     profile: StrategyEngineProfile,
-    pub event_bus: Option<Arc<crate::plugin::api::events::EventBus>>,
+    /// Optional event bus used to broadcast engine events to plugins. Set to
+    /// `None` for backtest paths (determinism) and live/paper paths until the
+    /// stage-9 wiring lands. See `src-tauri/src/main.rs` for the live hook.
+    pub event_bus: Option<Arc<EventBus>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -163,10 +166,11 @@ impl StrategyEngine {
             self.update_cross_state(rule, &ctx);
         }
 
-        self.indicator_provider.advance(ctx.current);
-        if let (Some(bus), Some(last)) = (&self.event_bus, candles.last()) {
-            bus.publish(EventKind::CandleProcessed(last.clone()));
+        if let Some(bus) = &self.event_bus {
+            bus.publish(EventKind::CandleProcessed(ctx.current.clone()));
         }
+
+        self.indicator_provider.advance(ctx.current);
         let entries = self.logger.drain_entries();
         self.profile.on_candle_time += started.elapsed();
         entries
@@ -244,7 +248,6 @@ impl StrategyEngine {
 
         let started = Instant::now();
         self.profile.broker_execute_calls += 1;
-        let order_for_trade = order.clone();
         let execution_result = self.instance.execution_target.execute(order).await;
         self.profile.broker_execute_time += started.elapsed();
 
@@ -258,17 +261,9 @@ impl StrategyEngine {
                     ctx.current.timestamp,
                 );
                 if let Some(bus) = &self.event_bus {
-                    let trade = PaperTrade {
-                        id: result.order_id.clone(),
-                        timestamp: result.timestamp,
-                        symbol: order_for_trade.symbol.clone(),
-                        side: order_for_trade.side,
-                        quantity: order_for_trade.quantity as usize,
-                        price: order_for_trade.price.unwrap_or(ctx.current.close),
-                        rule_id: rule.id.clone(),
-                        pnl: None,
-                    };
-                    bus.publish(EventKind::TradeExecuted(trade));
+                    if let Some(trade) = self.latest_paper_trade() {
+                        bus.publish(EventKind::TradeExecuted(trade));
+                    }
                 }
             }
             Err(error) => self.logger.log(
@@ -290,6 +285,19 @@ impl StrategyEngine {
             .into_iter()
             .find(|position| position.symbol == self.instance.symbol)
             .map(position_to_paper)
+    }
+
+    /// Pull the most recent paper trade from the execution target, if it's a
+    /// `PaperBroker`. Returns `None` for live brokers or if no trade has been
+    /// recorded yet. Used to fire `EventKind::TradeExecuted` after a successful
+    /// execution.
+    fn latest_paper_trade(&self) -> Option<PaperTrade> {
+        if !self.instance.execution_target.is_paper() {
+            return None;
+        }
+        let any = self.instance.execution_target.as_any();
+        let paper = any.downcast_ref::<crate::strategy::execution::PaperBroker>()?;
+        paper.get_state().trade_history.last().cloned()
     }
 
     fn update_cross_state(&mut self, rule: &RuleNode, ctx: &EvalContext<'_>) {

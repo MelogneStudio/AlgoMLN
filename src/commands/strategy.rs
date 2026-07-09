@@ -84,6 +84,8 @@ pub async fn run_backtest_internal(
         execution_target: broker.clone(),
     };
     let mut engine = StrategyEngine::new(instance);
+    // EventBus is not wired during backtests — plugins observe live/paper sessions only.
+    // engine.event_bus remains None.
     let mut logs = Vec::new();
 
     for index in 1..=candles.len() {

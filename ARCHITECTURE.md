@@ -134,7 +134,8 @@ AlgoMLN/
 | Plugin registry (in-memory map, lifecycle, host factory) | `src/plugin/registry.rs` (`PluginRegistry`) |
 | Rhai script runtime (engine budgets, host fns, lifecycle) | `src/plugin/runtime/rhai_runtime.rs` (`RhaiPlugin`) |
 | WASM plugin runtime (wasmtime, capability-gated host fns) | `src/plugin/runtime/wasm_runtime.rs` |
-| Event bus used by `StrategyEngine` to publish `RuleFired` / `TradeExecuted` / `CandleProcessed` | `src/plugin/api/events.rs` (`EventBus`, `EventKind`) |
+| Broadcast pub/sub for plugin subscribers (no engine coupling) | `src/plugin/api/events.rs` (`EventBus`, `EventKind`) |
+| Engine event-bus hook (publishes `RuleFired` / `TradeExecuted` / `CandleProcessed` from `on_candle`) | `src/strategy/runtime/engine.rs` (`StrategyEngine::event_bus`, `latest_paper_trade`) |
 
 ### Execution / Brokers
 

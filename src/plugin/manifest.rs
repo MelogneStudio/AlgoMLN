@@ -13,7 +13,7 @@ lazy_static! {
         Regex::new(r"^[a-z0-9][a-z0-9\-]*[a-z0-9]$").expect("valid plugin id regex");
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
     pub id: String,
     pub name: String,

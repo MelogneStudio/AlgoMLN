@@ -5,12 +5,12 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::plugin::types::{PluginError, PluginResult, ScheduleHandle};
+use crate::plugin::types::{PluginError, PluginId, PluginResult, ScheduleHandle};
 
 use super::SchedulerApi;
 
 pub struct CronScheduler {
-    handles: Arc<Mutex<HashMap<ScheduleHandle, CancellationToken>>>,
+    handles: Arc<Mutex<HashMap<ScheduleHandle, (PluginId, CancellationToken)>>>,
 }
 
 impl CronScheduler {
@@ -32,6 +32,7 @@ impl SchedulerApi for CronScheduler {
             .map_err(|e| PluginError::ApiError(format!("invalid cron expression: {e}")))?;
         let handle = ScheduleHandle(uuid::Uuid::new_v4());
         let token = CancellationToken::new();
+        let plugin_id = PluginId::from("__scheduler_unknown__");
 
         let task_token = token.clone();
         tokio::spawn(async move {
@@ -58,17 +59,30 @@ impl SchedulerApi for CronScheduler {
             }
         });
 
-        self.handles.lock().insert(handle, token);
+        self.handles.lock().insert(handle, (plugin_id, token));
         Ok(handle)
     }
 
     fn cancel(&self, handle: ScheduleHandle) -> PluginResult<()> {
-        let token = self
+        let (_, token) = self
             .handles
             .lock()
             .remove(&handle)
             .ok_or_else(|| PluginError::NotFound("schedule not found".into()))?;
         token.cancel();
         Ok(())
+    }
+
+    fn cancel_all_for(&self, plugin_id: &PluginId) {
+        let mut map = self.handles.lock();
+        let to_cancel: Vec<ScheduleHandle> = map
+            .iter()
+            .filter_map(|(handle, (id, _))| if id == plugin_id { Some(*handle) } else { None })
+            .collect();
+        for handle in to_cancel {
+            if let Some((_, token)) = map.remove(&handle) {
+                token.cancel();
+            }
+        }
     }
 }

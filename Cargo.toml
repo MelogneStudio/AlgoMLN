@@ -27,3 +27,4 @@ futures = "0.3"
 rhai = { version = "1", features = ["sync", "no_closure"] }
 wasmtime = "23"
 wasmtime-wasi = "23"
+tauri = { version = "2", features = [] }

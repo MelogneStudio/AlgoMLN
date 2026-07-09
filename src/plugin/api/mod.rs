@@ -1,5 +1,7 @@
 pub mod analytics;
+pub mod dsl_extension;
 pub mod events;
+pub mod execution;
 pub mod indicator_registry;
 pub mod log;
 pub mod market_data;
@@ -13,12 +15,12 @@ use crate::plugin::types::{NotificationKind, PluginId, PluginResult, ScheduleHan
 
 #[async_trait::async_trait]
 pub trait MarketDataApi: Send + Sync {
-    fn subscribe(
+    fn subscribe_ticks(
         &self,
         symbol: &str,
         callback: Arc<dyn Fn(MarketDataEvent) + Send + Sync>,
     ) -> PluginResult<SubscriptionHandle>;
-    fn unsubscribe(&self, handle: SubscriptionHandle) -> PluginResult<()>;
+    fn unsubscribe_ticks(&self, handle: SubscriptionHandle) -> PluginResult<()>;
     fn latest_candle(&self, symbol: &str) -> PluginResult<Candle>;
 }
 
@@ -89,7 +91,12 @@ pub trait StorageApi: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait IndicatorRegistryApi: Send + Sync {
-    fn register(&self, name: &str, factory: Arc<dyn Fn() -> Box<dyn IndicatorInstance> + Send + Sync>) -> PluginResult<()>;
+    fn register(
+        &self,
+        name: String,
+        registered_by: crate::plugin::PluginId,
+        f: std::sync::Arc<dyn Fn(&[crate::models::Candle], usize) -> Vec<f64> + Send + Sync>,
+    ) -> crate::plugin::PluginResult<()>;
     fn get(&self, name: &str) -> PluginResult<Box<dyn IndicatorInstance>>;
     /// Downcast hook so plugin runtimes (e.g. Rhai) can recover the
     /// concrete registry type to access plugin-id-attributed APIs
@@ -105,32 +112,45 @@ pub trait IndicatorInstance: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait AnalyticsApi: Send + Sync {
-    fn record_metric(&self, name: &str, value: f64, tags: &[(&str, &str)]) -> PluginResult<()>;
-    fn record_event(&self, name: &str, properties: &[(&str, &str)]) -> PluginResult<()>;
+    fn register_metric(
+        &self,
+        name: String,
+        registered_by: crate::plugin::PluginId,
+        f: std::sync::Arc<dyn Fn(&[crate::models::PaperTrade]) -> f64 + Send + Sync>,
+    ) -> crate::plugin::PluginResult<()>;
+    fn get_metric(
+        &self,
+        name: &str,
+    ) -> Option<std::sync::Arc<dyn Fn(&[crate::models::PaperTrade]) -> f64 + Send + Sync>>;
+    fn list_metrics(&self) -> Vec<String>;
 }
 
 #[async_trait::async_trait]
 pub trait DslExtensionApi: Send + Sync {
-    fn register_function(&self, name: &str, func: Arc<dyn Fn(&[DslValue]) -> DslResult + Send + Sync>) -> PluginResult<()>;
-}
-
-pub enum DslValue {
-    Number(f64),
-    Bool(bool),
-    String(String),
-}
-
-pub enum DslResult {
-    Number(f64),
-    Bool(bool),
-    String(String),
-    Unit,
+    fn register_keyword(
+        &self,
+        keyword: String,
+        registered_by: crate::plugin::PluginId,
+        handler: std::sync::Arc<
+            dyn Fn(&crate::strategy::runtime::context::EvalContext) -> bool + Send + Sync,
+        >,
+    ) -> crate::plugin::PluginResult<()>;
+    fn get_keyword(
+        &self,
+        keyword: &str,
+    ) -> Option<
+        std::sync::Arc<
+            dyn Fn(&crate::strategy::runtime::context::EvalContext) -> bool + Send + Sync,
+        >,
+    >;
+    fn unregister_all_for(&self, plugin_id: &crate::plugin::PluginId);
 }
 
 #[async_trait::async_trait]
 pub trait UiApi: Send + Sync {
     fn register_panel(&self, panel: UiPanel) -> PluginResult<()>;
     fn notify(&self, kind: NotificationKind, message: &str) -> PluginResult<()>;
+    fn list_panels(&self) -> Vec<(String, String)>;
     /// Downcast hook so plugin runtimes (e.g. WASM) can recover the
     /// concrete `TauriUiApi` type to call `emit_panel_data`, which
     /// lives outside the trait surface.
@@ -152,6 +172,7 @@ pub trait SchedulerApi: Send + Sync {
         task: Arc<dyn Fn() + Send + Sync>,
     ) -> PluginResult<ScheduleHandle>;
     fn cancel(&self, handle: ScheduleHandle) -> PluginResult<()>;
+    fn cancel_all_for(&self, plugin_id: &PluginId);
 }
 
 #[async_trait::async_trait]

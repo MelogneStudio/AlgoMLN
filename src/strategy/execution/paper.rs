@@ -147,6 +147,10 @@ impl ExecutionTarget for PaperBroker {
     fn name(&self) -> &str {
         "paper"
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 fn execute_buy(
