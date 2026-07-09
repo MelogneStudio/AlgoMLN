@@ -37,7 +37,9 @@ AlgoMLN/
 │   │   │   ├── storage.rs      PluginKvStore — per-plugin sandboxed file KV
 │   │   │   ├── indicator_registry.rs  SharedIndicatorRegistry (plugin-id dedup)
 │   │   │   ├── analytics.rs    SharedAnalyticsRegistry (plugin-id dedup)
+│   │   │   ├── dsl_extension.rs  SharedDslExtensionRegistry (DSL keyword registration)
 │   │   │   ├── events.rs       EventBus + EventKind + EventFilter (pub/sub)
+│   │   │   ├── execution.rs    NoopExecutionApi — stub until wired into engine
 │   │   │   ├── scheduler.rs    CronScheduler — cron + CancellationToken per task
 │   │   │   ├── log.rs          NamespacedLog — eprintln! gated by plugin_id
 │   │   │   └── ui.rs           TauriUiApi — broadcast channel for UI panels
@@ -53,7 +55,9 @@ AlgoMLN/
 │   ├── commands/               Tauri IPC command implementations
 │   │   ├── data.rs             broker + feed wrappers
 │   │   ├── strategy.rs         DSL helpers, backtest orchestrator, wire types
-│   │   └── registry.rs         StrategyRegistry — JSON-persisted deploy/list/status
+│   │   ├── registry.rs         StrategyRegistry — JSON-persisted deploy/list/status
+│   │   ├── state.rs            AppState — the struct held by Tauri::manage
+│   │   └── plugins.rs          list/enable/disable/reload plugin command bodies
 │   └── bin/
 │       └── behavioral_backtest.rs   CLI runner (uses commands::strategy::run_backtest_internal)
 │
@@ -136,6 +140,69 @@ AlgoMLN/
 | WASM plugin runtime (wasmtime, capability-gated host fns) | `src/plugin/runtime/wasm_runtime.rs` |
 | Broadcast pub/sub for plugin subscribers (no engine coupling) | `src/plugin/api/events.rs` (`EventBus`, `EventKind`) |
 | Engine event-bus hook (publishes `RuleFired` / `TradeExecuted` / `CandleProcessed` from `on_candle`) | `src/strategy/runtime/engine.rs` (`StrategyEngine::event_bus`, `latest_paper_trade`) |
+| DSL keyword registration (plugin-extensible AST handlers) | `src/plugin/api/dsl_extension.rs` (`SharedDslExtensionRegistry`) |
+| Execution capability stub (rejects orders until wired into engine) | `src/plugin/api/execution.rs` (`NoopExecutionApi`) |
+
+### Plugin IPC (Tauri side)
+
+The Tauri binary wires the plugin layer to the desktop shell at startup
+(see `src-tauri/src/main.rs::main`):
+
+1. **Shared infrastructure** is built once inside the `setup` closure
+   and `Arc`-cloned into every host the registry creates. This means a
+   registration made by one plugin is visible to the engine and to
+   other plugins:
+
+   | Resource | What the plugin sees |
+   |---|---|
+   | `SharedIndicatorRegistry` | `register(name, fn)` and `get(name)` (mutex-guarded map) |
+   | `SharedAnalyticsRegistry` | `register_metric(name, fn)` and `get_metric(name)` |
+   | `SharedDslExtensionRegistry` | `register_keyword(name, handler)` (DSL keyword plugins can resolve) |
+   | `EventBus` | `publish` / `subscribe` (candle + trade + rule + status events) |
+   | `TauriUiApi` | `register_panel` / `notify` / `emit_panel_data` (broadcast to the Tauri bus) |
+   | `CronScheduler` | `schedule(cron, task)` / `cancel(handle)` |
+   | `BrokerMarketDataApi` | wraps the same `DhanClient` the strategy layer uses |
+   | `NoopExecutionApi` | stub — `submit_order` returns `ApiError` until a future revision wires a real broker adapter |
+   | `PluginKvStore` | per-plugin sandboxed file KV under `<app_data>/plugins/<id>/storage` |
+   | `NamespacedLog` | `eprintln!` gated by plugin id |
+
+2. **Host factory** is a single `Arc<HostFactory>` closure bound to the
+   `plugins_dir` path. The registry calls it for every plugin it
+   discovers, with the plugin's declared `Capability` set and
+   `PluginPermissions` from its `plugin.toml`.
+
+3. **Load + scan** runs once at startup via
+   `tauri::async_runtime::block_on(registry.scan_and_load())`. Each
+   `plugin.toml`-bearing subdirectory of `<app_data>/plugins/` is
+   loaded; per-plugin load results are logged to `stderr`.
+
+4. **UI forwarder** is a `tokio::spawn` that subscribes a fresh
+   `broadcast::Receiver<UiMessage>` from the `TauriUiApi` and re-emits
+   every message on the Tauri event bus as `"plugin-ui-message"`. The
+   React app subscribes once and dispatches on the `UiMessage` variant
+   (`PanelRegistered` / `Notification` / `PanelData`).
+
+5. **Tauri commands** (defined in `src-tauri/src/main.rs`, delegating
+   to the plain-async bodies in `src/commands/plugins.rs`):
+
+   | Command | Args | Returns |
+   |---|---|---|
+   | `list_plugins` | — | `Vec<PluginListEntry>` (id, name, status, capabilities) |
+   | `enable_plugin` | `id: String` | `()` |
+   | `disable_plugin` | `id: String` | `()` |
+   | `reload_plugins` | — | `Vec<String>` (per-plugin error messages, empty = clean) |
+
+   `#[tauri::command]` wrappers are kept in `main.rs` because the
+   macro generates module-private artifacts (`__cmd__name`,
+   `__tauri_command_name_name`) that `tauri::generate_handler!` must
+   be able to resolve in the same scope.
+
+6. **Lifecycle lock discipline**: `PluginRegistry::enable`,
+   `disable`, and `unload` swap the real plugin out of the entry
+   under the write lock, then call `on_enable` / `on_disable` /
+   `on_unload` outside the lock, then swap it back. This keeps the
+   futures `Send` (parking_lot guards are `!Send`) and avoids
+   deadlock if a plugin re-enters the registry during its callback.
 
 ### Execution / Brokers
 
@@ -210,7 +277,7 @@ AlgoMLN/
 - **New indicator?** Pure `fn name(candles: &[Candle], period: usize) -> Vec<f64>` in `src/indicators/`, register in `src/indicators/mod.rs`, add AST variant in `src/strategy/dsl/ast.rs`, add a parser token in `lexer.rs`, add an evaluator branch in the engine.
 - **New broker?** Implement `BrokerClient` in `src/broker/` and `ExecutionTarget` in `src/strategy/execution/`. The engine needs no changes.
 - **New DSL keyword?** Lexer → parser → AST → validator → engine evaluator (five files in `src/strategy/dsl/` + `src/strategy/runtime/`). Mirror `cross_above` / `cross_below` as the closest reference.
-- **New Tauri command?** Implement in `src/commands/` (pick `data.rs` / `strategy.rs` / `registry.rs`), register with `#[tauri::command]` in `src-tauri/src/main.rs`, add to `invoke_handler!`.
+- **New Tauri command?** Implement the body as a plain `async fn` in `src/commands/` (pick `data.rs` / `strategy.rs` / `registry.rs` / `plugins.rs` / or add a new file), then add a thin `#[tauri::command]` wrapper in `src-tauri/src/main.rs` that delegates, and add the wrapper to `invoke_handler!`. `AppState` is defined in `src/commands/state.rs` and re-exported as `commands::AppState` so command bodies can use it without depending on the binary crate.
 - **New shared CSV loader?** Add to `src/data/csv.rs`; both the CLI and `commands::strategy::run_backtest_dsl` use it.
 - **New field on a wire type?** Add the TS interface field in `src/types/`, add the Rust struct field (with `#[serde(rename_all = "camelCase")]`), and if it doesn't belong in `BacktestResult` (e.g. profile/log fields the UI doesn't render), extend `BacktestResultWire` in `src/commands/strategy.rs`.
 - **New screen?** Add `src/screens/<Name>/<Name>Screen.tsx`, register it in `src/App.tsx` next to the existing `screen === 'builder'` branches. If it needs nav, add a `NavItem` entry in `src/components/Sidebar/Sidebar.tsx`.

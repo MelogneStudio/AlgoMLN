@@ -154,9 +154,29 @@ All IPC wrappers live in `src/types/tauri.ts` and are thin `invoke<T>(name, args
 - `deployStrategy(dsl, name, mode) -> { strategyId }`
 - `setStrategyStatus(strategyId, status) -> void`
 - `listStrategies() -> DeployedStrategy[]`
+- `listPlugins() -> PluginListEntry[]`
+- `enablePlugin(id) -> void`
+- `disablePlugin(id) -> void`
+- `reloadPlugins() -> string[]` (per-plugin error messages, empty = clean)
 - `isTauri()` — checks `'__TAURI_INTERNALS__' in window`.
 
 The naming convention is camelCase on the TS side because that's what Tauri's invoke expects for argument keys.
+
+### Plugin UI messages
+
+Plugins communicate with the UI through a single Tauri event channel, `"plugin-ui-message"`. The Rust side subscribes a fresh `broadcast::Receiver<UiMessage>` from the `TauriUiApi` and re-emits every message on the bus. The frontend listener (`src/hooks/usePluginUiMessages.ts` or equivalent) does the inverse: one `listen<UiMessage>("plugin-ui-message", ...)` call, then dispatches on the `kind` discriminator:
+
+| `kind` | Payload | UI action |
+|---|---|---|
+| `panelRegistered` | `{ id, title }` | Add a panel entry to the plugin-sidebar registry (lazy mount on first render) |
+| `notification` | `{ msg, kind }` | Show a toast (info / warning / error) |
+| `panelData` | `{ panelId, data }` | Forward `data` to the panel mounted under `panelId` (use a `useEffect` keyed on the data) |
+
+The `UiMessage` interface lives in `src/types/plugin.ts` next to the other wire types so changes stay in sync.
+
+### Plugin management UI
+
+A `Plugins` screen (`src/screens/Plugins/`) shows the snapshot from `listPlugins()` — one row per plugin with its `name`, `version`, `status` chip (`Loaded` / `Enabled` / `Disabled` / `Failed(msg)`), and a row of actions: **Enable** (calls `enablePlugin(id)`), **Disable** (`disablePlugin(id)`), **Reload all** (calls `reloadPlugins()` and toasts the per-plugin errors). The hook (`usePlugins()`) refetches after each action and also subscribes to a future `"plugin-list-changed"` event if/when one is added.
 
 ---
 

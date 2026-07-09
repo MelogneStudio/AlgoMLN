@@ -138,7 +138,7 @@ After the backtest, it converts the internal `BacktestResult` to `BacktestResult
 
 ## Tauri commands and the strategy registry
 
-`src-tauri/src/main.rs` is a thin shell. Each `#[tauri::command]` is a one-liner that grabs `State<'_, AppState>` and forwards to a library function. `AppState` carries the `DataState` (broker + feed) and an `Arc<StrategyRegistry>`.
+`src-tauri/src/main.rs` is a thin shell. Each `#[tauri::command]` is a one-liner that grabs `State<'_, AppState>` and forwards to a library function. `AppState` (defined in `src/commands/state.rs` and re-exported as `commands::AppState`) carries the `DataState` (broker + feed), an `Arc<StrategyRegistry>`, an `Arc<PluginRegistry>`, and a `tokio::sync::broadcast::Receiver<UiMessage>`.
 
 Registered commands:
 
@@ -200,8 +200,27 @@ Per-capability implementations live in `src/plugin/api/`:
 - `scheduler.rs` — `CronScheduler` parses cron expressions via the `cron` crate, sleeps to the next firing time with `tokio::time::sleep_until`, and uses `tokio_util::sync::CancellationToken` so `cancel` can interrupt the sleep without polling. Per-plugin tracking lives outside the scheduler in `PluginRegistry`.
 - `log.rs` — `NamespacedLog` formats `[plugin:{id}] [{LEVEL}] {msg}` to stderr; logging is intentionally unguarded.
 - `ui.rs` — `TauriUiApi` keeps a `tokio::sync::broadcast::Sender<UiMessage>` (capacity 256). The Tauri layer holds the receiver and renders `PanelRegistered` / `Notification` / `PanelData` events.
+- `dsl_extension.rs` — `SharedDslExtensionRegistry` is a `parking_lot::RwLock<HashMap<keyword, (PluginId, Arc<KeywordHandler>)>>`. The `DslExtensionApi` trait covers the keyword resolution surface the strategy engine calls during evaluation; `unregister_all_for(plugin_id)` lets the registry drop a plugin's keywords on disable/unload.
+- `execution.rs` — `NoopExecutionApi` returns `PluginError::ApiError` from `submit_order` / `cancel_order` and an empty list from `positions`. It exists so the `Execution` capability slot has a real type until the strategy engine is wired to a broker-agnostic execution facade.
 
-The plugin layer is wired into `PluginHostBuilder`. `PluginLoader::load_from_dir(dir)` (in `src/plugin/loader.rs`) reads `dir/plugin.toml`, derives `PluginMeta` and `Vec<Capability>` from it, and dispatches on the entry file's extension to either `RhaiPlugin::new` or `WasmPlugin::new` (passing the manifest's `permissions.max_memory_mb` to the WASM runtime). Unknown extensions yield `PluginError::LoadFailed`. `PluginRegistry` (in `src/plugin/registry.rs`) holds an `Arc<RwLock<HashMap<PluginId, PluginEntry>>>`; entries carry the boxed `Plugin`, the original `PluginManifest`, the current `PluginStatus`, and any `ScheduleHandle`s the plugin has armed. The registry is constructed with a `plugins_dir: PathBuf` and a `host_factory: Arc<dyn Fn(PluginId, Vec<Capability>, PluginPermissions) -> Arc<PluginHost> + Send + Sync>` so the host's wiring (broker handles, storage roots, UI broadcast sender, etc.) lives in the application, not in the plugin layer. `PluginRegistry::scan_and_load` walks the plugins directory, loads each subdirectory via the loader, builds a host via the factory, calls `plugin.on_load(host)`, and records `Loaded` (success) or `Failed(err)` (load error). `enable` / `disable` / `unload` are the lifecycle entrypoints; `unload` removes the entry from the map and calls `on_unload` on the way out. `list` returns sorted `PluginListEntry` snapshots for the UI.
+The plugin layer is wired into `PluginHostBuilder`. `PluginLoader::load_from_dir(dir)` (in `src/plugin/loader.rs`) reads `dir/plugin.toml`, derives `PluginMeta` and `Vec<Capability>` from it, and dispatches on the entry file's extension to either `RhaiPlugin::new` or `WasmPlugin::new` (passing the manifest's `permissions.max_memory_mb` to the WASM runtime). Unknown extensions yield `PluginError::LoadFailed`. `PluginRegistry` (in `src/plugin/registry.rs`) holds an `Arc<RwLock<HashMap<PluginId, PluginEntry>>>`; entries carry the boxed `Plugin`, the original `PluginManifest`, the current `PluginStatus`, and any `ScheduleHandle`s the plugin has armed. The registry is constructed with a `plugins_dir: PathBuf` and a `host_factory: Arc<dyn Fn(PluginId, Vec<Capability>, PluginPermissions) -> Arc<PluginHost> + Send + Sync>` so the host's wiring (broker handles, storage roots, UI broadcast sender, etc.) lives in the application, not in the plugin layer. `PluginRegistry::scan_and_load` walks the plugins directory, loads each subdirectory via the loader, builds a host via the factory, calls `plugin.on_load(host)`, and records `Loaded` (success) or `Failed(err)` (load error).
+
+`enable` / `disable` / `unload` swap the real plugin out of the entry under the write lock (via an `EmptyPlugin` placeholder) before awaiting `on_enable` / `on_disable` / `on_unload`, then swap it back. This keeps the futures `Send` (parking_lot guards are `!Send` and holding one across `.await` would break Tauri's command dispatcher) and avoids deadlock if a plugin re-enters the registry during its callback. There is a small TOCTOU window between swap-out and swap-back, but `on_enable` / `on_disable` are idempotent for the plugins shipped in this repo and the registry is single-process.
+
+### Tauri wiring (`src-tauri/src/main.rs`)
+
+The Tauri shell exposes four plugin commands and one Tauri-event channel:
+
+| Command | Args | Body | Purpose |
+|---|---|---|---|
+| `list_plugins` | — | `commands::plugins::list_plugins(&state)` | Snapshot of every loaded plugin for the UI |
+| `enable_plugin` | `id: String` | `commands::plugins::enable_plugin(&state, id)` | Move a loaded plugin into `Enabled` |
+| `disable_plugin` | `id: String` | `commands::plugins::disable_plugin(&state, id)` | Move an enabled plugin back to `Disabled` |
+| `reload_plugins` | — | `commands::plugins::reload_plugins(&state)` | Re-scan `plugins_dir`; returns per-plugin error messages |
+
+Each `#[tauri::command]` wrapper is one line because the `tauri::command` macro generates module-private artifacts (`__cmd__name`, `__tauri_command_name_name`) that `tauri::generate_handler!` must resolve in the same scope — so the wrappers live in `main.rs` and the bodies live in the library.
+
+`AppState` is defined in `src/commands/state.rs` and re-exported as `commands::AppState`. It carries `DataState`, `Arc<StrategyRegistry>`, `Arc<PluginRegistry>`, and a `tokio::sync::broadcast::Receiver<UiMessage>` for downstream consumers (e.g. a future audit-log command). The Tauri `setup` closure builds the plugin's shared infrastructure (registries, event bus, scheduler, broker wrappers, noop execution) and wires them into a single `HostFactory` closure that the registry calls per plugin. After `scan_and_load`, a `tokio::spawn` subscribes a fresh `TauriUiApi` receiver and re-emits every `UiMessage` on the Tauri event bus as `"plugin-ui-message"` so the React frontend can subscribe once and dispatch on the `UiMessage` variant.
 
 ### Rhai plugin runtime (`src/plugin/runtime/rhai_runtime.rs`)
 
