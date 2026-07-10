@@ -28,11 +28,12 @@ Data → Indicators → Strategy Engine → Backtesting → Execution → UI
 ```
 Phase 1 (Data) · Phase 2 (Indicators) · Phase 2.5–2.9 (Strategy Engine) ✅
 Phase 3–5 UI (Builder / Strategies / Coder / Uploader / Settings) ✅
+Phase 6 (Plugin System — Rhai + WASM runtimes, capability gating) ✅
 Phase 7 (Live Trading) — pending
 ```
 
 Run `cargo test --workspace` for the current test count
-Current count: `118 passing | 1 ignored | 0 failed`.
+Current count: `132 passing | 1 ignored | 0 failed`.
 
 ### ✅ Phase 1 — Data Layer
 - Broker abstraction trait (`BrokerClient`)
@@ -172,6 +173,34 @@ SELL ALL
 
 ---
 
+## Plugin System
+
+AlgoMLN can be extended without touching the engine. Plugins load from `<app_data>/plugins/<id>/` (each with a `plugin.toml` manifest) and run in one of two sandboxed runtimes:
+
+- **Rhai** — a hardened script engine (op/recursion/collection budgets, no module loading, `print` swallowed).
+- **WASM** — `wasmtime`-based, with a bounded linear memory limiter, epoch-interruption watchdog, and no WASI (plugins only ever see the `algomln::*` host functions).
+
+Plugins only reach the engine through capability-gated accessors — a plugin must declare a capability (Market Data, Storage, Indicators, Analytics, DSL Extension, UI Panels, Scheduler, Execution) in its manifest, or the call is rejected with a permission error. Logging is the one always-on capability.
+
+What plugins can currently do:
+
+| Capability | What it gives the plugin |
+|---|---|
+| Indicators | Register a custom indicator function callable from `.algomln` strategies |
+| Analytics | Register a custom backtest metric |
+| DSL Extension | Register a new DSL keyword the parser/evaluator can resolve |
+| Storage | A sandboxed per-plugin file-backed key/value store |
+| UI Panels | Register a panel, push notifications/toasts, stream data into the panel |
+| Scheduler | Cron-based recurring tasks |
+| Market Data | Read-only access to the same broker client the strategy engine uses |
+| Execution | Reserved — currently a no-op stub until the engine's execution path is broker-agnostic |
+
+Plugins publish and subscribe to engine events (`RuleFired`, `TradeExecuted`, `CandleProcessed`) over a broadcast event bus. **Backtests never wire up the event bus**, so plugin callbacks can't run during replay — this keeps backtests deterministic. The bus is only attached to the engine for paper/live runs.
+
+Manage plugins from the desktop app's **Plugins** screen (list, enable, disable, reload) or via the `list_plugins` / `enable_plugin` / `disable_plugin` / `reload_plugins` Tauri commands.
+
+---
+
 ## Running a Strategy
 
 ```powershell
@@ -289,10 +318,25 @@ src/
       log.rs           StrategyLog, LogEntry, LogEntryKind
     analytics.rs      Backtest result metrics
     tests/            Integration tests (backtest_integration.rs)
+  plugin/
+    api/              Capability trait defs + per-capability impls (market data, storage,
+                      indicator/analytics/DSL-extension registries, event bus, scheduler,
+                      log, UI broadcast, no-op execution stub)
+    runtime/
+      rhai_runtime.rs Rhai script plugin — hardened engine, capability-gated host fns
+      wasm_runtime.rs WASM plugin — wasmtime 23, bounded memory, epoch interruption
+    host.rs           PluginHost — capability-gated `*_guarded` accessors
+    loader.rs         Manifest → boxed Plugin (dispatches on entry file extension)
+    registry.rs       In-memory plugin map, lifecycle (Loaded/Enabled/Disabled/Failed)
+    manifest.rs       PluginManifest + PluginPermissions
+    types.rs          PluginId, PluginMeta, Capability, PluginError
   commands/
     mod.rs            Re-exports
     data.rs           Tauri IPC commands — data / broker
     strategy.rs       Tauri IPC commands — backtest, deploy, list, validate
+    registry.rs       StrategyRegistry — JSON-persisted deploy/list/status
+    state.rs          AppState — struct held by Tauri::manage
+    plugins.rs        list/enable/disable/reload plugin command bodies
   bin/
     behavioral_backtest.rs  CLI backtest runner (calls commands::strategy::run_backtest_internal)
 src-tauri/
@@ -323,10 +367,12 @@ src/                       React frontend root (TypeScript, Vite, React 19)
     StrategyCoder/         Modal .algomln source editor
     StrategyUploader/      Modal .algomln file loader
     Settings/              UI scale, default capital, about
+    Plugins/               List/enable/disable/reload loaded plugins
   hooks/
     useStrategyBuilder     Builder state + loadFromDsl() round-trip
     useDslSync             Derives live DSL from builder state, debounced validate
     useBacktest            Runs runBacktest IPC; browser fallback synthesizes empty result
+    usePlugins             list/enable/disable/reload plugin IPC + "plugin-ui-message" listener
   lib/scaling.ts           DESIGN_WIDTH/HEIGHT (1550x757), computeFitScale(), applyScale()
   types/                   tauri.ts (IPC wrappers + isTauri()), strategy.ts, backtest.ts
 ```
@@ -352,7 +398,17 @@ Drag-and-drop blocks → Generated DSL → AST → Strategy Engine
 ```
 Same runtime as text strategies. No separate execution path.
 
-### Phase 6 — Advanced Strategy Features (pending)
+### Phase 6 — Plugin System ✅
+```
+Plugin manifest → PluginLoader → Rhai / WASM runtime → capability-gated PluginHost
+```
+- Rhai script runtime (hardened engine: op/recursion/collection budgets)
+- WASM runtime (wasmtime 23, bounded memory, epoch-interruption watchdog, no WASI)
+- Capability gating: Market Data, Storage, Indicators, Analytics, DSL Extension, UI Panels, Scheduler, Execution (stub)
+- Broadcast event bus (`RuleFired` / `TradeExecuted` / `CandleProcessed`) — wired for paper/live only, never for backtests
+- Desktop Plugins screen: list / enable / disable / reload
+
+### Phase 6.5 — Advanced Strategy Features (pending)
 - Position sizing rules
 - Stop loss / take profit
 - Risk controls
@@ -360,6 +416,7 @@ Same runtime as text strategies. No separate execution path.
 
 ### Phase 7 — Live Trading (pending)
 - Live broker execution via `ExecutionTarget`
+- Wire the plugin `Execution` capability to a real broker-agnostic facade (currently a no-op stub)
 - Two hard confirmation steps required
 - User-defined risk limits (max loss, max orders)
 - Immutable trade log
