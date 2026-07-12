@@ -207,6 +207,10 @@ The plugin layer is wired into `PluginHostBuilder`. `PluginLoader::load_from_dir
 
 `enable` / `disable` / `unload` swap the real plugin out of the entry under the write lock (via an `EmptyPlugin` placeholder) before awaiting `on_enable` / `on_disable` / `on_unload`, then swap it back. This keeps the futures `Send` (parking_lot guards are `!Send` and holding one across `.await` would break Tauri's command dispatcher) and avoids deadlock if a plugin re-enters the registry during its callback. There is a small TOCTOU window between swap-out and swap-back, but `on_enable` / `on_disable` are idempotent for the plugins shipped in this repo and the registry is single-process.
 
+**Plugin tests** (`src/plugin/tests.rs`) cover five areas: `storage_roundtrip` (write/read/delete/list cycle), `storage_key_sanitization` (path-traversal keys stay inside the plugin's base dir), `indicator_registry_dedup` (same plugin may re-register, different plugin is rejected with `ApiError`, `unregister_all_for` clears the map), `event_bus_filter` (callbacks fire only for matching `EventFilter`), and `manifest_validation` (valid manifest, bad version, unknown capability, wrong extension, missing entry file).
+
+**Example plugin** (`strategies/example_plugin/`) is a reference Rhai plugin that demonstrates `Indicators` + `Storage` capabilities. `on_load` persists a monotonically-increasing load counter via `storage_set`/`storage_get` and registers a `double_ema` indicator (double EMA implemented in pure Rhai using `simple_ema`). `on_enable` / `on_disable` / `on_unload` log lifecycle events.
+
 ### Tauri wiring (`src-tauri/src/main.rs`)
 
 The Tauri shell exposes four plugin commands and one Tauri-event channel:

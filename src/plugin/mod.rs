@@ -6,6 +6,9 @@ pub mod registry;
 pub mod runtime;
 pub mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use types::*;
 
 #[async_trait::async_trait]

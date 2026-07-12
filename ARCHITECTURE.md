@@ -51,6 +51,7 @@ AlgoMLN/
 │   │   │   ├── rhai_runtime.rs RhaiPlugin — Rhai script compilation + host fns
 │   │   │   └── wasm_runtime.rs WasmPlugin — wasmtime module + `algomln::*` host fns
 │   │   ├── types.rs            PluginId, PluginMeta, Capability, PluginError, handles
+│   │   ├── tests.rs            Plugin unit tests (storage, indicator registry, event bus, manifest)
 │   │   └── mod.rs              Plugin trait, plugin module root
 │   ├── commands/               Tauri IPC command implementations
 │   │   ├── data.rs             broker + feed wrappers
@@ -72,14 +73,15 @@ AlgoMLN/
 │   ├── App.module.css
 │   ├── components/             AppWindow, TitleBar, Sidebar, Button, RuleRow, IndicatorPicker,
 │   │                           NumberInput, OptionSlider, ScaleSlider
-│   ├── screens/                Builder / Strategies / Settings / StrategyCoder / StrategyUploader
+│   ├── screens/                Builder / Strategies / Plugins / Settings / StrategyCoder / StrategyUploader
 │   │   └── Builder/components/ BacktestPanel, RuleSection
 │   ├── hooks/                  useStrategyBuilder, useDslSync, useBacktest
 │   ├── lib/                    scaling.ts (DESIGN_WIDTH/HEIGHT, computeFitScale, applyScale)
-│   └── types/                  tauri.ts (IPC wrappers + isTauri), strategy.ts, backtest.ts
+│   └── types/                  tauri.ts (IPC wrappers + isTauri), strategy.ts, backtest.ts, plugin.ts
 │
 ├── sample-data/                bundled NIFTY 1-min CSV for offline backtests
-├── strategies/                 sample .algomln files
+├── strategies/                 sample .algomln files + plugin examples
+│   └── example_plugin/         reference Rhai plugin (double_ema indicator, load-count storage)
 ├── plans/                      design notes (data layer, scripting, runtime, etc.)
 └── .env.example                DHAN_ACCESS_TOKEN template
 ```
@@ -251,8 +253,10 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | DSL editor modal | `src/screens/StrategyCoder/StrategyCoderScreen.tsx` |
 | File upload modal | `src/screens/StrategyUploader/StrategyUploaderScreen.tsx` |
 | Deployed strategies list | `src/screens/Strategies/StrategiesScreen.tsx` |
+| Plugin management (list/enable/disable/reload, DEMO_PLUGINS fallback) | `src/screens/Plugins/PluginsScreen.tsx` |
 | Settings (default capital, about) | `src/screens/Settings/SettingsScreen.tsx` |
-| Sidebar nav (Builder/Strategies/Settings) | `src/components/Sidebar/Sidebar.tsx` |
+| Plugin wire types (`PluginListEntry`, `PluginMeta`, `PluginStatus`, `Capability`) | `src/types/plugin.ts` |
+| Sidebar nav (Builder/Strategies/Plugins/Settings) | `src/components/Sidebar/Sidebar.tsx` |
 
 ### Data
 

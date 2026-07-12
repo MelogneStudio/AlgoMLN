@@ -60,13 +60,13 @@ On Windows, the Tauri shell additionally applies acrylic via `window_vibrancy::a
 `App.tsx` owns three pieces of routing state:
 
 ```ts
-type Screen = 'builder' | 'strategies' | 'settings';
+type Screen = 'builder' | 'strategies' | 'plugins' | 'settings';
 type Modal  = 'none' | 'uploader' | 'coder';
 ```
 
-The screen determines the main content (`BuilderScreen`, `StrategiesScreen`, `SettingsScreen`). The modal layers a `StrategyCoderScreen` (DSL editor) or `StrategyUploaderScreen` (file upload) on top. Only one modal at a time; clicking a different modal target swaps it.
+The screen determines the main content (`BuilderScreen`, `StrategiesScreen`, `PluginsScreen`, `SettingsScreen`). The modal layers a `StrategyCoderScreen` (DSL editor) or `StrategyUploaderScreen` (file upload) on top. Only one modal at a time; clicking a different modal target swaps it.
 
-The sidebar (`src/components/Sidebar/Sidebar.tsx`) holds a `NavItem` array of three entries: Builder, Strategies, Settings. `onNavigate` flows back into `App.tsx` as `setScreen`. The active item gets an `aria-current="page"` and the `itemActive` style.
+The sidebar (`src/components/Sidebar/Sidebar.tsx`) holds a `NavItem` array of four entries: Builder, Strategies, Plugins, Settings (Plugins sits between Strategies and Settings). `onNavigate` flows back into `App.tsx` as `setScreen`. The active item gets an `aria-current="page"` and the `itemActive` style.
 
 ---
 
@@ -176,7 +176,9 @@ The `UiMessage` interface lives in `src/types/plugin.ts` next to the other wire 
 
 ### Plugin management UI
 
-A `Plugins` screen (`src/screens/Plugins/`) shows the snapshot from `listPlugins()` — one row per plugin with its `name`, `version`, `status` chip (`Loaded` / `Enabled` / `Disabled` / `Failed(msg)`), and a row of actions: **Enable** (calls `enablePlugin(id)`), **Disable** (`disablePlugin(id)`), **Reload all** (calls `reloadPlugins()` and toasts the per-plugin errors). The hook (`usePlugins()`) refetches after each action and also subscribes to a future `"plugin-list-changed"` event if/when one is added.
+A `Plugins` screen (`src/screens/Plugins/PluginsScreen.tsx` + `.module.css`) shows the snapshot from `listPlugins()` — one card per plugin with its `name`, `id`, `description`, `version`, `author`, a `status` badge (`Loaded` / `Enabled` / `Disabled` / `Failed`), a row of capability chips, and a single toggle button: **Enable** (calls `enablePlugin(id)`) or **Disable** (`disablePlugin(id)`) depending on current status. A header **Reload** button calls `reloadPlugins()` and lists the returned per-plugin error strings above the plugin list. Failed plugins show their failure message and their toggle button is disabled.
+
+State lives inline in the component (`plugins`, `loading`, `reloading`, `togglingId`, `reloadErrors`) — there is no separate `usePlugins()` hook. On mount it calls `listPlugins()` when `isTauri()`, otherwise falls back to a hardcoded `DEMO_PLUGINS` constant so `npm run dev` stays demoable. After each toggle or reload it refetches via `listPlugins()`. Card and badge styling follows the `SettingsScreen` / `Button` design tokens; enabled status uses `--text-green`, disabled/loaded use `--text-dim`, and failed/error text uses a red literal (`#c85a54`) since there is no red design token.
 
 ---
 

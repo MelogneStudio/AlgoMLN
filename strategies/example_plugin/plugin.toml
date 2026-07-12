@@ -1,0 +1,12 @@
+id = "example-plugin"
+name = "Example Plugin"
+version = "0.1.0"
+description = "Demonstrates custom indicator registration and storage"
+author = "AlgoMLN"
+capabilities = ["Indicators", "Storage"]
+entry = "plugin.rhai"
+
+[permissions]
+max_memory_mb = 8
+network = false
+file_system = false
