@@ -7,6 +7,7 @@ import { StrategyCoderScreen } from './screens/StrategyCoder/StrategyCoderScreen
 import { StrategyUploaderScreen } from './screens/StrategyUploader/StrategyUploaderScreen';
 import { StrategiesScreen } from './screens/Strategies/StrategiesScreen';
 import { SettingsScreen } from './screens/Settings/SettingsScreen';
+import { PluginsScreen } from './screens/Plugins/PluginsScreen';
 import { useStrategyBuilder } from './hooks/useStrategyBuilder';
 import { useBacktest } from './hooks/useBacktest';
 import { strategyToDsl, useDslSync } from './hooks/useDslSync';
@@ -21,7 +22,7 @@ import { isTauri, validateDsl } from './types/tauri';
 import type { BuilderRule } from './types/strategy';
 import styles from './App.module.css';
 
-export type Screen = 'builder' | 'strategies' | 'settings';
+export type Screen = 'builder' | 'strategies' | 'plugins' | 'settings';
 export type Modal = 'none' | 'uploader' | 'coder';
 
 export function App() {
@@ -198,6 +199,7 @@ export function App() {
               onChanged={bumpStrategies}
             />
           )}
+          {screen === 'plugins' && <PluginsScreen />}
           {screen === 'settings' && <SettingsScreen />}
         </div>
       </div>

@@ -4,6 +4,7 @@ use tokio::sync::broadcast;
 
 use crate::commands::data::DataState;
 use crate::commands::registry::StrategyRegistry;
+use crate::plugin::api::events::EventBus;
 use crate::plugin::api::ui::UiMessage;
 use crate::plugin::registry::PluginRegistry;
 
@@ -15,5 +16,6 @@ pub struct AppState {
     pub data: DataState,
     pub strategies: Arc<StrategyRegistry>,
     pub plugin_registry: Arc<PluginRegistry>,
+    pub event_bus: Arc<EventBus>,
     pub ui_receiver: broadcast::Receiver<UiMessage>,
 }

@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { BacktestResult } from './backtest';
 import type { DeployedStrategy } from './strategy';
+import type { PluginListEntry } from './plugin';
 
 // Run a backtest by passing raw DSL text
 export async function runBacktest(
@@ -42,3 +43,13 @@ export async function validateDsl(dslSource: string): Promise<string[]> {
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
+
+// ----- Plugins -----
+export const listPlugins = (): Promise<PluginListEntry[]> =>
+  invoke<PluginListEntry[]>('list_plugins', {});
+export const enablePlugin = (id: string): Promise<void> =>
+  invoke<void>('enable_plugin', { id });
+export const disablePlugin = (id: string): Promise<void> =>
+  invoke<void>('disable_plugin', { id });
+export const reloadPlugins = (): Promise<string[]> =>
+  invoke<string[]>('reload_plugins', {});

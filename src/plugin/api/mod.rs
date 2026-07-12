@@ -168,6 +168,7 @@ pub struct UiPanel {
 pub trait SchedulerApi: Send + Sync {
     fn schedule(
         &self,
+        plugin_id: PluginId,
         cron: &str,
         task: Arc<dyn Fn() + Send + Sync>,
     ) -> PluginResult<ScheduleHandle>;

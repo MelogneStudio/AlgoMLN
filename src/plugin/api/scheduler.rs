@@ -25,6 +25,7 @@ impl CronScheduler {
 impl SchedulerApi for CronScheduler {
     fn schedule(
         &self,
+        plugin_id: PluginId,
         cron_expr: &str,
         task: Arc<dyn Fn() + Send + Sync>,
     ) -> PluginResult<ScheduleHandle> {
@@ -32,7 +33,6 @@ impl SchedulerApi for CronScheduler {
             .map_err(|e| PluginError::ApiError(format!("invalid cron expression: {e}")))?;
         let handle = ScheduleHandle(uuid::Uuid::new_v4());
         let token = CancellationToken::new();
-        let plugin_id = PluginId::from("__scheduler_unknown__");
 
         let task_token = token.clone();
         tokio::spawn(async move {

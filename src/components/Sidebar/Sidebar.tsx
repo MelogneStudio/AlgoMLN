@@ -68,6 +68,21 @@ const ITEMS: NavItem[] = [
     ),
   },
   {
+    id: 'plugins',
+    label: 'Plugins',
+    icon: (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+        <path
+          d="M10 3v4M14 3v4M6 7h12v5a6 6 0 0 1-12 0V7zM12 18v3"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    ),
+  },
+  {
     id: 'settings',
     label: 'Settings',
     icon: (

@@ -166,6 +166,7 @@ fn main() {
             let dsl_ext_registry = Arc::new(SharedDslExtensionRegistry::new());
             // `EventBus::new()` already returns `Arc<Self>`, so don't double-wrap.
             let event_bus = EventBus::new();
+            let event_bus_for_state = event_bus.clone();
             let (tauri_ui_api_concrete, ui_receiver) = TauriUiApi::new();
             // `TauriUiApi::new()` already returns an `Arc<TauriUiApi>` as its
             // first element. Re-cast that to `Arc<dyn UiApi>` so the
@@ -251,13 +252,6 @@ fn main() {
                 }
             });
 
-            // TODO stage 9: when constructing a StrategyEngine for paper
-            // trading (not backtest), set engine.event_bus =
-            // Some(shared_event_bus.clone()) where shared_event_bus is the
-            // Arc<EventBus> created in stage 9's shared infrastructure.
-            // Backtest engines must keep event_bus = None (see
-            // `commands::strategy::run_backtest_internal`).
-
             // ---------- Acrylic window chrome (Windows only) ----------
             #[cfg(target_os = "windows")]
             {
@@ -301,6 +295,7 @@ fn main() {
                 data,
                 strategies,
                 plugin_registry,
+                event_bus: event_bus_for_state,
                 ui_receiver,
             });
             Ok(())
