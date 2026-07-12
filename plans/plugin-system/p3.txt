@@ -1,0 +1,126 @@
+Project: AlgoMLN.
+Read these before writing:
+  src/plugin/types.rs
+  src/models/mod.rs  (Candle, Tick, Quote, Order, OrderResult, Position, Portfolio)
+  src/strategy/execution/target.rs
+  src/strategy/analytics.rs  (PaperTrade)
+  src/broker/mod.rs  (Timeframe)
+
+Create src/plugin/api/mod.rs.
+Declare submodules inside it (files created in later prompts):
+  pub mod market_data;
+  pub mod storage;
+  pub mod indicator_registry;
+  pub mod events;
+  pub mod ui;
+  pub mod scheduler;
+  pub mod log;
+  pub mod analytics;
+  pub mod dsl;
+
+Define all API traits in mod.rs itself (not in the submodule files):
+
+#[async_trait::async_trait]
+pub trait MarketDataApi: Send + Sync {
+  async fn get_candles(&self, symbol: &str, timeframe: crate::broker::Timeframe, limit: usize)
+    -> crate::plugin::PluginResult<Vec<crate::models::Candle>>;
+  async fn get_quote(&self, symbol: &str)
+    -> crate::plugin::PluginResult<crate::models::Quote>;
+  async fn subscribe_ticks(
+    &self,
+    symbol: &str,
+    callback: Box<dyn Fn(crate::models::Tick) + Send + Sync + 'static>,
+  ) -> crate::plugin::PluginResult<crate::plugin::SubscriptionHandle>;
+  async fn unsubscribe_ticks(&self, handle: crate::plugin::SubscriptionHandle)
+    -> crate::plugin::PluginResult<()>;
+}
+
+#[async_trait::async_trait]
+pub trait ExecutionApi: Send + Sync {
+  async fn place_order(&self, order: crate::models::Order)
+    -> crate::plugin::PluginResult<crate::models::OrderResult>;
+  async fn cancel_order(&self, order_id: &str)
+    -> crate::plugin::PluginResult<()>;
+  async fn get_positions(&self)
+    -> crate::plugin::PluginResult<Vec<crate::models::Position>>;
+  async fn get_portfolio(&self)
+    -> crate::plugin::PluginResult<crate::models::Portfolio>;
+}
+
+#[async_trait::async_trait]
+pub trait StorageApi: Send + Sync {
+  async fn get(&self, key: &str) -> crate::plugin::PluginResult<Option<String>>;
+  async fn set(&self, key: &str, value: &str) -> crate::plugin::PluginResult<()>;
+  async fn delete(&self, key: &str) -> crate::plugin::PluginResult<()>;
+  async fn list_keys(&self, prefix: &str) -> crate::plugin::PluginResult<Vec<String>>;
+}
+
+pub trait IndicatorRegistryApi: Send + Sync {
+  fn register(
+    &self,
+    name: String,
+    registered_by: crate::plugin::PluginId,
+    f: std::sync::Arc<dyn Fn(&[crate::models::Candle], usize) -> Vec<f64> + Send + Sync>,
+  ) -> crate::plugin::PluginResult<()>;
+  fn get(
+    &self,
+    name: &str,
+  ) -> Option<std::sync::Arc<dyn Fn(&[crate::models::Candle], usize) -> Vec<f64> + Send + Sync>>;
+  fn list(&self) -> Vec<String>;
+  fn unregister_all_for(&self, plugin_id: &crate::plugin::PluginId);
+}
+
+pub trait AnalyticsApi: Send + Sync {
+  fn register_metric(
+    &self,
+    name: String,
+    registered_by: crate::plugin::PluginId,
+    f: std::sync::Arc<dyn Fn(&[crate::models::PaperTrade]) -> f64 + Send + Sync>,
+  ) -> crate::plugin::PluginResult<()>;
+  fn get_metric(&self, name: &str)
+    -> Option<std::sync::Arc<dyn Fn(&[crate::models::PaperTrade]) -> f64 + Send + Sync>>;
+  fn list_metrics(&self) -> Vec<String>;
+}
+
+pub trait DslExtensionApi: Send + Sync {
+  fn register_keyword(
+    &self,
+    keyword: String,
+    registered_by: crate::plugin::PluginId,
+    handler: std::sync::Arc
+      dyn Fn(&crate::strategy::runtime::context::EvalContext) -> bool + Send + Sync
+    >,
+  ) -> crate::plugin::PluginResult<()>;
+  fn get_keyword(
+    &self,
+    keyword: &str,
+  ) -> Option<std::sync::Arc<dyn Fn(&crate::strategy::runtime::context::EvalContext) -> bool + Send + Sync>>;
+}
+
+pub trait UiApi: Send + Sync {
+  fn register_panel(&self, id: String, title: String) -> crate::plugin::PluginResult<()>;
+  fn send_notification(&self, msg: String, kind: crate::plugin::NotificationKind)
+    -> crate::plugin::PluginResult<()>;
+  fn emit_panel_data(&self, panel_id: &str, data: serde_json::Value)
+    -> crate::plugin::PluginResult<()>;
+  fn list_panels(&self) -> Vec<(String, String)>;
+}
+
+pub trait SchedulerApi: Send + Sync {
+  fn schedule(
+    &self,
+    cron_expr: &str,
+    callback: std::sync::Arc<dyn Fn() + Send + Sync>,
+  ) -> crate::plugin::PluginResult<crate::plugin::ScheduleHandle>;
+  fn cancel(&self, handle: crate::plugin::ScheduleHandle) -> crate::plugin::PluginResult<()>;
+  fn cancel_all_for(&self, plugin_id: &crate::plugin::PluginId);
+}
+
+pub trait LogApi: Send + Sync {
+  fn info(&self, msg: &str);
+  fn warn(&self, msg: &str);
+  fn error(&self, msg: &str);
+  fn debug(&self, msg: &str);
+}
+
+Output code only. No questions. No explanations.

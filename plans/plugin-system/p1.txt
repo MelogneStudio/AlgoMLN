@@ -1,0 +1,104 @@
+Project: AlgoMLN — Tauri v2 desktop trading app, Rust backend, React frontend.
+Read these files before writing anything:
+  src/lib.rs
+  src/models/mod.rs  (or wherever Candle, Order, Position, Portfolio are defined)
+  src/strategy/execution/target.rs
+
+Create two files: src/plugin/mod.rs and src/plugin/types.rs
+
+=== src/plugin/types.rs ===
+
+All types derive Debug, Clone, Serialize, Deserialize unless stated otherwise.
+Use serde from the existing Cargo.toml (it's already a dependency).
+
+pub struct PluginId(pub String);
+  — Implement Display, From<String>, From<&str>, AsRef<str>, Deref<Target=String>.
+  — Implement PartialEq, Eq, Hash so it can be a HashMap key.
+
+pub struct PluginVersion { pub major: u32, pub minor: u32, pub patch: u32 }
+  — Implement Display as "{major}.{minor}.{patch}".
+  — Implement TryFrom<&str> that parses "1.2.3" format, returns Err(String) on failure.
+
+pub struct PluginMeta {
+  pub id: PluginId,
+  pub name: String,
+  pub version: PluginVersion,
+  pub description: String,
+  pub author: String,
+}
+
+pub enum Capability {
+  MarketData, Execution, Storage, Events,
+  Indicators, Analytics, DslExtension, UiPanels, Scheduler,
+}
+  — Implement TryFrom<&str> (case-insensitive) returning Err(String) for unknown variants.
+  — Implement Display.
+
+pub enum PluginStatus {
+  Loaded,
+  Enabled,
+  Disabled,
+  Failed(String),
+}
+
+pub enum PluginError {
+  ManifestParse(String),
+  LoadFailed(String),
+  ApiError(String),
+  PermissionDenied { capability: String, plugin_id: String },
+  Timeout(String),
+  NotFound(String),
+}
+  — Implement Display and std::error::Error.
+
+pub type PluginResult<T> = Result<T, PluginError>;
+
+pub struct SubscriptionHandle(pub uuid::Uuid);
+  — add uuid = { version = "1", features = ["v4"] } to Cargo.toml if not present.
+  — Implement Display, PartialEq, Eq, Hash.
+
+pub struct ScheduleHandle(pub uuid::Uuid);
+  — Same derives as SubscriptionHandle.
+
+pub enum NotificationKind { Info, Warning, Error }
+  — Implement Display.
+
+pub struct PluginListEntry {
+  pub meta: PluginMeta,
+  pub status: PluginStatus,
+  pub capabilities: Vec<Capability>,
+}
+  — This crosses the IPC boundary: add #[serde(rename_all = "camelCase")] at struct level.
+
+=== src/plugin/mod.rs ===
+
+Declare these submodules (files don't exist yet, just declare):
+  pub mod types;
+  pub mod manifest;
+  pub mod host;
+  pub mod api;
+  pub mod loader;
+  pub mod registry;
+  pub mod runtime;
+
+Re-export the entire types module: pub use types::*;
+
+Declare the Plugin trait here (not in a separate file):
+
+#[async_trait::async_trait]
+pub trait Plugin: Send + Sync {
+  fn meta(&self) -> &PluginMeta;
+  fn capabilities(&self) -> &[Capability];
+  async fn on_load(&mut self, host: std::sync::Arc<host::PluginHost>) -> PluginResult<()>;
+  async fn on_enable(&mut self) -> PluginResult<()>;
+  async fn on_disable(&mut self) -> PluginResult<()>;
+  fn on_unload(&mut self);
+  fn has_capability(&self, cap: &Capability) -> bool {
+    self.capabilities().iter().any(|c| std::mem::discriminant(c) == std::mem::discriminant(cap))
+  }
+}
+
+Add async-trait = "0.1" to Cargo.toml if not present.
+Add the plugin module to src/lib.rs: pub mod plugin;
+
+Output code only. No questions. No explanations. No comments beyond what's needed to understand the code.

@@ -1,0 +1,93 @@
+Project: AlgoMLN.
+Read these before writing:
+  src/plugin/mod.rs  (Plugin trait)
+  src/plugin/host.rs
+  src/plugin/types.rs
+  src/models/mod.rs  (Candle)
+
+Add to Cargo.toml: rhai = { version = "1", features = ["sync", "no_closure"] }
+
+Create src/plugin/runtime/mod.rs (declares: pub mod rhai_runtime; pub mod wasm_runtime;)
+Create src/plugin/runtime/rhai_runtime.rs
+
+pub struct RhaiPlugin {
+  meta: PluginMeta,
+  capabilities: Vec<Capability>,
+  source_path: std::path::PathBuf,
+  host: Option<std::sync::Arc<crate::plugin::host::PluginHost>>,
+  engine: rhai::Engine,
+  ast: Option<rhai::AST>,
+}
+
+RhaiPlugin::new(meta: PluginMeta, capabilities: Vec<Capability>, source_path: PathBuf) -> PluginResult<Self>
+  Build a rhai::Engine with ALL of these restrictions applied:
+    engine.set_max_operations(200_000);
+    engine.set_max_call_levels(32);
+    engine.set_max_string_size(65_536);
+    engine.set_max_array_size(10_000);
+    engine.set_max_map_size(1_000);
+    engine.disable_print_fn();  (if rhai supports this; use engine.on_print(|_| {}) otherwise)
+    Do NOT call engine.set_module_resolver — leave module loading disabled by default.
+  Return Ok(Self { meta, capabilities, source_path, host: None, engine, ast: None }).
+
+fn register_host_functions(engine: &mut rhai::Engine, host: Arc<PluginHost>)
+  Register these functions. Use engine.register_fn for each.
+  Each function captures a clone of the host Arc.
+
+  "log_info":  |msg: &str| { host.log().info(msg); }
+  "log_warn":  |msg: &str| { host.log().warn(msg); }
+  "log_error": |msg: &str| { host.log().error(msg); }
+
+  "storage_get": |key: &str| -> rhai::Dynamic {
+    match tokio::runtime::Handle::current().block_on(host.storage_guarded()?.get(key)) {
+      Ok(Some(v)) => rhai::Dynamic::from(v),
+      _           => rhai::Dynamic::UNIT,
+    }
+  }
+  "storage_set": |key: &str, val: &str| -> bool {
+    host.storage_guarded()
+      .and_then(|s| tokio::runtime::Handle::current().block_on(s.set(key, val)))
+      .is_ok()
+  }
+
+  "notify_info":    |msg: &str| { let _ = host.ui_guarded().map(|ui| ui.send_notification(msg.into(), NotificationKind::Info)); }
+  "notify_warning": |msg: &str| { ... NotificationKind::Warning ... }
+  "notify_error":   |msg: &str| { ... NotificationKind::Error ... }
+
+  "register_indicator": a function that takes (name: String, func: rhai::FnPtr) and calls
+    indicators_guarded()?.register(name, plugin_id, Arc::new(move |candles, period| {
+      Build a rhai::Array of rhai::Dynamic maps from the candles (open, high, low, close, volume).
+      Call func.call::<rhai::Array>(&engine, &ast, (candles_array, period as i64)).
+      Convert rhai::Array of rhai::Dynamic floats to Vec<f64>.
+      On any error: return vec of NaN the same length as candles.
+    }))
+    NOTE: storing engine and ast references inside this closure requires Arc wrapping them.
+    Wrap engine in Arc<rhai::Engine> (rhai::Engine is not Clone, use Arc).
+    Store AST as Arc<rhai::AST>.
+
+Register Candle as a Rhai custom type:
+  engine.register_type_with_name::<CandleWrapper>("Candle");
+  Define CandleWrapper(Candle) as a newtype.
+  Register getters: engine.register_get("open", ...), "high", "low", "close", "volume", "timestamp".
+
+Implement Plugin for RhaiPlugin (using async_trait):
+  on_load(host):
+    Store host in self.host.
+    Register all host functions by calling register_host_functions(&mut self.engine, host.clone()).
+    Compile source_path: self.engine.compile_file(self.source_path.clone())
+      map error to PluginError::LoadFailed.
+    Store AST in self.ast.
+    Call script function "on_load" if it exists:
+      self.engine.call_fn::<()>(&mut scope, &ast, "on_load", ())
+      ignore EvalAltResult::ErrorFunctionNotFound, map other errors to PluginError::LoadFailed.
+  on_enable:
+    Call script "on_enable" if it exists. Map errors to PluginError::ApiError.
+  on_disable:
+    Call script "on_disable" if it exists. Map errors to PluginError::ApiError.
+  on_unload:
+    Call script "on_unload" if it exists. Ignore errors.
+    Drop self.host, self.ast.
+
+Use a rhai::Scope stored in self for all call_fn calls.
+
+Output code only. No questions. No explanations.

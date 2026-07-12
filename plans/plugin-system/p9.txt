@@ -1,0 +1,104 @@
+Project: AlgoMLN.
+Read these before writing:
+  src-tauri/src/main.rs
+  src/commands/strategy.rs
+  src/commands/registry.rs
+  src/plugin/registry.rs
+  src/plugin/api/ui.rs
+  src/plugin/api/events.rs
+  src/plugin/api/indicator_registry.rs
+  src/plugin/api/analytics.rs
+  src/plugin/api/scheduler.rs
+  src/plugin/host.rs
+
+Edit src-tauri/src/main.rs:
+
+Add to AppState:
+  pub plugin_registry: Arc<crate::plugin::registry::PluginRegistry>,
+  pub ui_receiver: tokio::sync::broadcast::Receiver<crate::plugin::api::ui::UiMessage>,
+
+In the main builder, before .run():
+  1. Create shared infrastructure:
+     let indicator_registry = Arc::new(SharedIndicatorRegistry::new());
+     let analytics_registry = Arc::new(SharedAnalyticsRegistry::new());
+     let event_bus = Arc::new(EventBus::new());
+     let (tauri_ui_api, ui_receiver) = TauriUiApi::new();
+     let scheduler = CronScheduler::new();
+     let tauri_ui_api = Arc::new(tauri_ui_api);
+
+  2. Create plugins_dir = app.path().app_data_dir()?.join("plugins"):
+     std::fs::create_dir_all(&plugins_dir) — ignore error.
+
+  3. Build host_factory closure — captures all shared infra above:
+     let host_factory = Arc::new(move |id: PluginId, caps: Vec<Capability>, perms: PluginPermissions| {
+       let storage_dir = plugins_dir.join(id.as_ref()).join("storage");
+       let storage = Arc::new(PluginKvStore::new(id.clone(), storage_dir).unwrap_or_else(|_| todo!("fallback")));
+       let log = Arc::new(NamespacedLog { plugin_id: id.to_string() });
+       Arc::new(
+         PluginHostBuilder {
+           id: id.clone(),
+           market_data: broker_arc.clone(),  // pass broker from DataState
+           execution: paper_broker_arc.clone(),  // or a no-op execution target
+           storage,
+           indicators: indicator_registry.clone(),
+           analytics: analytics_registry.clone(),
+           dsl: dsl_ext.clone(),
+           ui: tauri_ui_api.clone(),
+           scheduler: scheduler.clone(),
+           log,
+           capabilities: caps,
+           permissions: perms,
+         }.build()
+       )
+     });
+
+  4. Create plugin registry and scan:
+     let plugin_registry = PluginRegistry::new(plugins_dir.clone(), host_factory);
+     let load_results = plugin_registry.scan_and_load().await;
+     for (id, result) in &load_results {
+       match result {
+         Ok(()) => eprintln!("[plugins] loaded: {}", id),
+         Err(e) => eprintln!("[plugins] failed to load {}: {}", id, e),
+       }
+     }
+
+  5. Forward UiMessages to Tauri events:
+     let app_handle = app.handle().clone();
+     let mut ui_rx = tauri_ui_api.receiver();
+     tokio::spawn(async move {
+       while let Ok(msg) = ui_rx.recv().await {
+         let _ = app_handle.emit("plugin-ui-message", &msg);
+       }
+     });
+
+Create src/commands/plugins.rs:
+
+use tauri::State;
+use crate::plugin::{PluginId, PluginListEntry};
+use crate::commands::AppState;
+
+#[tauri::command]
+pub async fn list_plugins(state: State<'_, AppState>) -> Result<Vec<PluginListEntry>, String> {
+  Ok(state.plugin_registry.list())
+}
+
+#[tauri::command]
+pub async fn enable_plugin(id: String, state: State<'_, AppState>) -> Result<(), String> {
+  state.plugin_registry.enable(&PluginId(id)).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn disable_plugin(id: String, state: State<'_, AppState>) -> Result<(), String> {
+  state.plugin_registry.disable(&PluginId(id)).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reload_plugins(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+  let results = state.plugin_registry.scan_and_load().await;
+  Ok(results.into_iter().filter_map(|(id, r)| r.err().map(|e| format!("{}: {}", id, e))).collect())
+}
+
+Add all four to invoke_handler! in main.rs.
+Add src/commands/plugins.rs to src/commands/mod.rs as pub mod plugins;
+
+Output code only. No questions. No explanations.

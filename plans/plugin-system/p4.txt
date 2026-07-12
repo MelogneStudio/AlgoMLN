@@ -1,0 +1,53 @@
+Project: AlgoMLN.
+Read src/plugin/api/mod.rs and src/plugin/manifest.rs before writing.
+
+Create src/plugin/host.rs.
+
+pub struct PluginHost {
+  pub id: crate::plugin::PluginId,
+  pub market_data: std::sync::Arc<dyn crate::plugin::api::MarketDataApi>,
+  pub execution: std::sync::Arc<dyn crate::plugin::api::ExecutionApi>,
+  pub storage: std::sync::Arc<dyn crate::plugin::api::StorageApi>,
+  pub indicators: std::sync::Arc<dyn crate::plugin::api::IndicatorRegistryApi>,
+  pub analytics: std::sync::Arc<dyn crate::plugin::api::AnalyticsApi>,
+  pub dsl: std::sync::Arc<dyn crate::plugin::api::DslExtensionApi>,
+  pub ui: std::sync::Arc<dyn crate::plugin::api::UiApi>,
+  pub scheduler: std::sync::Arc<dyn crate::plugin::api::SchedulerApi>,
+  pub log: std::sync::Arc<dyn crate::plugin::api::LogApi>,
+  pub(crate) capabilities: Vec<crate::plugin::Capability>,
+  pub(crate) permissions: crate::plugin::manifest::PluginPermissions,
+}
+
+Implement PluginHost with these guard methods:
+
+pub fn require_capability(&self, cap: &crate::plugin::Capability) -> crate::plugin::PluginResult<()>
+  Checks self.capabilities contains a variant matching cap (use std::mem::discriminant).
+  Returns PluginError::PermissionDenied if not.
+
+pub fn market_data_guarded(&self) -> crate::plugin::PluginResult<&std::sync::Arc<dyn crate::plugin::api::MarketDataApi>>
+  Calls require_capability(Capability::MarketData), then returns &self.market_data.
+
+pub fn execution_guarded(&self) -> crate::plugin::PluginResult<&std::sync::Arc<dyn crate::plugin::api::ExecutionApi>>
+  Calls require_capability(Capability::Execution), then returns &self.execution.
+
+pub fn storage_guarded(&self) -> crate::plugin::PluginResult<&std::sync::Arc<dyn crate::plugin::api::StorageApi>>
+  Calls require_capability(Capability::Storage), then returns &self.storage.
+
+pub fn indicators_guarded(&self) -> crate::plugin::PluginResult<&std::sync::Arc<dyn crate::plugin::api::IndicatorRegistryApi>>
+  Calls require_capability(Capability::Indicators), then returns &self.indicators.
+
+(Define equivalent _guarded methods for analytics, dsl, ui, scheduler.)
+
+pub fn log(&self) -> &std::sync::Arc<dyn crate::plugin::api::LogApi>
+  No capability guard — all plugins can log.
+
+pub fn scheduler_guarded(&self) -> crate::plugin::PluginResult<&std::sync::Arc<dyn crate::plugin::api::SchedulerApi>>
+  Calls require_capability(Capability::Scheduler), then returns &self.scheduler.
+
+Also add a PluginHostBuilder struct:
+  Fields mirror PluginHost.
+  pub fn build(self) -> std::sync::Arc<PluginHost>
+
+No async_trait needed here. No trait impls on PluginHost itself — it's a plain struct.
+
+Output code only. No questions. No explanations.

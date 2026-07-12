@@ -1,0 +1,107 @@
+Project: AlgoMLN.
+Read src/plugin/mod.rs and src/plugin/host.rs before writing.
+
+Add to Cargo.toml:
+  wasmtime = "23"
+  wasmtime-wasi = "23"
+
+Create src/plugin/runtime/wasm_runtime.rs.
+
+pub struct WasmPlugin {
+  meta: PluginMeta,
+  capabilities: Vec<Capability>,
+  wasm_path: std::path::PathBuf,
+  memory_limit_bytes: usize,
+  host: Option<std::sync::Arc<PluginHost>>,
+  engine: wasmtime::Engine,
+  store: Option<wasmtime::Store<WasmState>>,
+  instance: Option<wasmtime::Instance>,
+}
+
+pub struct WasmState {
+  host: std::sync::Arc<PluginHost>,
+  wasi: wasmtime_wasi::WasiCtx,
+}
+
+WasmPlugin::new(meta, capabilities, wasm_path, memory_limit_mb: u32) -> PluginResult<Self>
+  Build wasmtime::Config:
+    config.async_support(false);
+    config.epoch_interruption(true);
+    config.cranelift_opt_level(wasmtime::OptLevel::Speed);
+  Build wasmtime::Engine::new(&config) map err to PluginError::LoadFailed.
+  memory_limit_bytes = memory_limit_mb as usize * 1024 * 1024.
+
+fn build_linker(engine: &wasmtime::Engine, host: Arc<PluginHost>) -> PluginResult<wasmtime::Linker<WasmState>>
+  Create linker.
+  Add WASI: wasmtime_wasi::add_to_linker(&mut linker, |s| &mut s.wasi).
+  Link host functions in the "algomln" module namespace:
+
+  linker.func_wrap("algomln", "log_info", |mut caller: Caller<WasmState>, ptr: i32, len: i32| {
+    let msg = read_string_from_memory(&mut caller, ptr, len);
+    caller.data().host.log().info(&msg);
+  });
+  linker.func_wrap("algomln", "log_warn", ...same pattern...);
+  linker.func_wrap("algomln", "log_error", ...same pattern...);
+
+  linker.func_wrap("algomln", "storage_get",
+    |mut caller: Caller<WasmState>, key_ptr: i32, key_len: i32, out_ptr: i32, out_len_ptr: i32| -> i32 {
+      Read key string from WASM memory.
+      Call block_on(caller.data().host.storage_guarded()?.get(&key)).
+      On Ok(Some(val)): write val bytes into WASM memory at out_ptr, write val.len() as i32 to out_len_ptr. Return 0.
+      On Ok(None): write 0 to out_len_ptr. Return 1.
+      On Err: return -1.
+    }
+  );
+  linker.func_wrap("algomln", "storage_set",
+    |mut caller: ..., key_ptr, key_len, val_ptr, val_len| -> i32 {
+      Read key and value. Call block_on(storage.set(&key, &val)).
+      Return 0 on Ok, -1 on Err.
+    }
+  );
+  linker.func_wrap("algomln", "notify",
+    |mut caller: ..., msg_ptr: i32, msg_len: i32, kind: i32| {
+      Read msg. Map kind: 0=Info, 1=Warning, 2=Error.
+      Call ui.send_notification.
+    }
+  );
+  linker.func_wrap("algomln", "emit_panel_data",
+    |mut caller: ..., panel_id_ptr: i32, panel_id_len: i32, json_ptr: i32, json_len: i32| -> i32 {
+      Read panel_id and json_str.
+      Parse json_str as serde_json::Value. On parse failure return -1.
+      Call ui.emit_panel_data. Return 0 on Ok, -1 on Err.
+    }
+  );
+
+Helper function:
+fn read_string_from_memory(caller: &mut Caller<WasmState>, ptr: i32, len: i32) -> String
+  Gets "memory" export, reads bytes at [ptr..ptr+len], converts to UTF-8 lossy.
+
+fn write_bytes_to_memory(caller: &mut Caller<WasmState>, ptr: i32, bytes: &[u8])
+  Gets "memory" export, writes bytes starting at ptr.
+  Panics if out of bounds (WASM traps automatically — just let it trap).
+
+Implement Plugin for WasmPlugin (async_trait):
+  on_load(host):
+    Store host.
+    Read wasm_path bytes.
+    Compile: wasmtime::Module::new(&self.engine, &bytes) map to PluginError::LoadFailed.
+    Build WasiCtx with wasmtime_wasi::WasiCtxBuilder::new().inherit_stdio().build().
+    Build Store with memory limiter:
+      store.limiter(|state| &mut /* MemoryLimiter wrapping state.memory_limit */);
+      (Implement a simple struct MemoryLimitState that implements wasmtime::ResourceLimiter
+       and rejects allocations beyond self.memory_limit_bytes.)
+    Set epoch deadline: store.set_epoch_deadline(1).
+    Build linker and instantiate.
+    Call exported function "_algomln_on_load" if it exists:
+      instance.get_typed_func::<(), ()>(&mut store, "_algomln_on_load")
+        .ok().map(|f| f.call(&mut store, ())).transpose().map_err(|e| PluginError::LoadFailed(e.to_string()))?;
+  on_enable: call "_algomln_on_enable" if exported.
+  on_disable: call "_algomln_on_disable" if exported.
+  on_unload:
+    Call "_algomln_on_unload" if exported.
+    Drop self.store and self.instance.
+    self.host = None.
+
+Use tokio::runtime::Handle::current().block_on(...) for all async calls inside sync linker functions.
+
+Output code only. No questions. No explanations.

@@ -1,0 +1,145 @@
+Project: AlgoMLN.
+Read these before writing:
+  src/App.tsx
+  src/components/Sidebar/Sidebar.tsx
+  src/types/tauri.ts
+  src/screens/Settings/SettingsScreen.tsx
+  src/screens/Settings/SettingsScreen.module.css
+
+Constraints: no UI libraries, no Tailwind, CSS Modules only, React 18 strict mode.
+
+=== src/types/plugin.ts ===
+
+export interface PluginVersion { major: number; minor: number; patch: number; }
+export interface PluginMeta { id: string; name: string; version: PluginVersion; description: string; author: string; }
+export type PluginStatus = 'Loaded' | 'Enabled' | 'Disabled' | { Failed: string };
+export type Capability =
+  | 'MarketData' | 'Execution' | 'Storage' | 'Events'
+  | 'Indicators' | 'Analytics' | 'DslExtension' | 'UiPanels' | 'Scheduler';
+export interface PluginListEntry { meta: PluginMeta; status: PluginStatus; capabilities: Capability[]; }
+
+=== Add to src/types/tauri.ts ===
+
+export const listPlugins = (): Promise<PluginListEntry[]> =>
+  invoke<PluginListEntry[]>('list_plugins', {});
+export const enablePlugin = (id: string): Promise<void> =>
+  invoke<void>('enable_plugin', { id });
+export const disablePlugin = (id: string): Promise<void> =>
+  invoke<void>('disable_plugin', { id });
+export const reloadPlugins = (): Promise<string[]> =>
+  invoke<string[]>('reload_plugins', {});
+
+=== src/screens/Plugins/PluginsScreen.tsx ===
+
+Import: listPlugins, enablePlugin, disablePlugin, reloadPlugins, isTauri from tauri.ts.
+Import: PluginListEntry, PluginStatus, Capability from types/plugin.ts.
+Import styles from PluginsScreen.module.css.
+
+const DEMO_PLUGINS: PluginListEntry[] = [
+  { meta: { id: 'example-plugin', name: 'Example Plugin', version: {major:0,minor:1,patch:0}, description: 'A demo indicator plugin', author: 'AlgoMLN' }, status: 'Enabled', capabilities: ['Indicators','Storage'] },
+  { meta: { id: 'rsi-divergence', name: 'RSI Divergence', version: {major:1,minor:0,patch:0}, description: 'Detects RSI divergence signals', author: 'Community' }, status: 'Disabled', capabilities: ['Indicators','Events'] },
+  { meta: { id: 'telegram-alerts', name: 'Telegram Alerts', version: {major:0,minor:3,patch:1}, description: 'Sends trade alerts to Telegram', author: 'Community' }, status: { Failed: 'Missing TELEGRAM_TOKEN in plugin config' }, capabilities: ['Events','Scheduler'] },
+];
+
+function getStatusLabel(status: PluginStatus): string
+  'Enabled' -> 'Enabled', 'Disabled' -> 'Disabled', 'Loaded' -> 'Loaded', { Failed } -> 'Failed'
+
+function getStatusClass(status: PluginStatus): string (returns CSS module classname key)
+  'Enabled' -> 'statusEnabled', 'Disabled' -> 'statusDisabled', 'Loaded' -> 'statusLoaded', Failed -> 'statusFailed'
+
+function isEnabled(status: PluginStatus): boolean
+function isFailed(status: PluginStatus): boolean
+function getFailureMsg(status: PluginStatus): string | null
+
+Component PluginsScreen():
+  State: plugins, loading, reloading, togglingId, reloadErrors.
+  useEffect on mount: if isTauri() call listPlugins and setPlugins, else setPlugins(DEMO_PLUGINS).
+  handleToggle(entry):
+    Set togglingId = entry.meta.id.
+    If isEnabled: call disablePlugin. Else: call enablePlugin.
+    On success: call listPlugins and update state. On error: log to console.
+    Clear togglingId.
+  handleReload:
+    Set reloading=true.
+    Call reloadPlugins().
+    Call listPlugins() to refresh.
+    Set reloadErrors from result.
+    Set reloading=false.
+
+Render:
+  <div className={styles.screen}>
+    <div className={styles.header}>
+      <h2 className={styles.title}>Plugins</h2>
+      <button onClick={handleReload} disabled={reloading} className={styles.reloadBtn}>
+        {reloading ? 'Reloading...' : 'Reload'}
+      </button>
+    </div>
+    {reloadErrors.length > 0 && (
+      <div className={styles.errorList}>
+        {reloadErrors.map(e => <p key={e} className={styles.errorItem}>{e}</p>)}
+      </div>
+    )}
+    <p className={styles.pluginsPath}>Plugins folder: %APPDATA%\com.algomln.app\plugins\</p>
+    {loading ? <p className={styles.loadingText}>Loading plugins...</p> : (
+      plugins.length === 0
+        ? <p className={styles.emptyText}>No plugins installed.</p>
+        : <div className={styles.list}>
+            {plugins.map(entry => (
+              <div key={entry.meta.id} className={styles.card}>
+                <div className={styles.cardHeader}>
+                  <div>
+                    <span className={styles.pluginName}>{entry.meta.name}</span>
+                    <span className={styles.pluginId}>{entry.meta.id}</span>
+                  </div>
+                  <span className={`${styles.statusBadge} ${styles[getStatusClass(entry.status)]}`}>
+                    {getStatusLabel(entry.status)}
+                  </span>
+                </div>
+                <p className={styles.pluginDescription}>{entry.meta.description}</p>
+                <div className={styles.cardMeta}>
+                  <span className={styles.metaItem}>v{entry.meta.version.major}.{entry.meta.version.minor}.{entry.meta.version.patch}</span>
+                  <span className={styles.metaItem}>{entry.meta.author}</span>
+                </div>
+                <div className={styles.chips}>
+                  {entry.capabilities.map(cap => (
+                    <span key={cap} className={styles.chip}>{cap}</span>
+                  ))}
+                </div>
+                {isFailed(entry.status) && (
+                  <p className={styles.failureMsg}>{getFailureMsg(entry.status)}</p>
+                )}
+                <button
+                  className={isEnabled(entry.status) ? styles.disableBtn : styles.enableBtn}
+                  disabled={isFailed(entry.status) || togglingId === entry.meta.id}
+                  onClick={() => handleToggle(entry)}
+                >
+                  {togglingId === entry.meta.id ? '...' : isEnabled(entry.status) ? 'Disable' : 'Enable'}
+                </button>
+              </div>
+            ))}
+          </div>
+    )}
+  </div>
+
+=== src/screens/Plugins/PluginsScreen.module.css ===
+
+Match exact spacing, font sizes, card radius, and color variable usage from SettingsScreen.module.css.
+statusEnabled: color using var(--text-success) equivalent or green-toned CSS variable.
+statusDisabled: color using var(--text-secondary).
+statusFailed: color using a red-toned variable.
+statusLoaded: color using var(--text-secondary) same as disabled.
+chips: small pill shape, border, var(--text-secondary) text, var(--surface-1) background.
+failureMsg: small red-toned text below the chips.
+enableBtn / disableBtn: match the ghost Button style from Button.module.css in appearance.
+
+=== Edits to App.tsx ===
+
+Add 'plugins' to the Screen type union.
+Add screen === 'plugins' case that renders <PluginsScreen />.
+
+=== Edits to src/components/Sidebar/Sidebar.tsx ===
+
+Add a nav item: { screen: 'plugins', label: 'Plugins', icon: <the same icon component pattern already used> }
+Place it between Strategies and Settings.
+
+Output code only. No questions. No explanations.

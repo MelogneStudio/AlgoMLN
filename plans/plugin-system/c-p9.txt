@@ -1,0 +1,213 @@
+You are auditing the AlgoMLN plugin system through stage 9 (Tauri IPC integration).
+Do NOT write any new code. Do NOT fix anything.
+Output a single structured report at the end. Nothing else.
+
+=== STEP 1 — File existence ===
+
+Check each path. Mark EXISTS or MISSING:
+
+src/plugin/mod.rs
+src/plugin/types.rs
+src/plugin/manifest.rs
+src/plugin/host.rs
+src/plugin/loader.rs
+src/plugin/registry.rs
+src/plugin/api/mod.rs
+src/plugin/api/market_data.rs
+src/plugin/api/storage.rs
+src/plugin/api/indicator_registry.rs
+src/plugin/api/events.rs
+src/plugin/api/log.rs
+src/plugin/api/analytics.rs
+src/plugin/api/scheduler.rs
+src/plugin/api/ui.rs
+src/plugin/runtime/mod.rs
+src/plugin/runtime/rhai_runtime.rs
+src/plugin/runtime/wasm_runtime.rs
+src/commands/plugins.rs
+src-tauri/src/main.rs
+
+=== STEP 2 — Cargo.toml dependencies ===
+
+Read Cargo.toml. Mark each PRESENT or MISSING:
+
+async-trait
+uuid with features including "v4"
+toml 0.8+
+regex
+lazy_static
+rhai with features including "sync"
+wasmtime 23+
+wasmtime-wasi 23+
+parking_lot
+cron
+tokio-util with features including "rt"
+chrono
+
+=== STEP 3 — Compile ===
+
+Run: cargo check --lib 2>&1
+Run: cargo check 2>&1
+
+Report for each:
+- Total error count
+- Total warning count
+- Every error: file path, line number, error code, one-line message
+- Do not truncate. List every single one.
+
+=== STEP 4 — Structural checks ===
+
+Read each EXISTS file and check the items below.
+For MISSING files write "UNVERIFIABLE — file missing".
+
+--- src/plugin/mod.rs ---
+[ ] Declares submodules: types, manifest, host, api, loader, registry, runtime
+[ ] Plugin trait has methods: meta, capabilities, on_load, on_enable, on_disable, on_unload, has_capability
+[ ] Plugin trait uses #[async_trait::async_trait]
+[ ] pub use types::* is present
+[ ] pub mod plugin declared in src/lib.rs
+
+--- src/plugin/types.rs ---
+[ ] PluginId implements Hash + Eq + PartialEq
+[ ] PluginListEntry has #[serde(rename_all = "camelCase")]
+[ ] PluginError implements std::error::Error and Display
+[ ] SubscriptionHandle and ScheduleHandle are distinct newtypes
+
+--- src/plugin/manifest.rs ---
+[ ] load() validates kebab-case id
+[ ] load() checks entry file exists on disk
+[ ] load() rejects extensions other than .rhai and .wasm
+[ ] load() validates all capability strings
+[ ] to_meta() and to_capabilities() exist
+
+--- src/plugin/host.rs ---
+[ ] PluginHost has all 9 API fields plus event_bus: Arc<EventBus>
+[ ] require_capability uses std::mem::discriminant
+[ ] _guarded methods exist for: market_data, execution, storage, indicators, analytics, dsl, ui, scheduler, event_bus
+[ ] log() has no capability guard
+[ ] PluginHostBuilder exists with build() -> Arc<PluginHost>
+
+--- src/plugin/api/mod.rs ---
+[ ] IndicatorRegistryApi::register takes registered_by: PluginId
+[ ] AnalyticsApi has register_metric(name, registered_by, fn), get_metric, list_metrics
+[ ] DslExtensionApi has register_keyword(keyword, registered_by, handler), get_keyword, unregister_all_for
+[ ] UiApi has list_panels
+[ ] SchedulerApi has cancel_all_for
+
+--- src/plugin/api/events.rs ---
+[ ] EventKind has: CandleProcessed, TradeExecuted, RuleFired, StrategyStatusChanged, SystemShutdown
+[ ] EventBus::publish releases the read lock before spawning tokio tasks
+[ ] EventBus::subscribe and unsubscribe exist
+
+--- src/plugin/api/ui.rs ---
+[ ] UiMessage derives Serialize with rename_all = "camelCase"
+[ ] UiMessage has: PanelRegistered, Notification, PanelData variants
+[ ] new() returns (Arc<Self>, Receiver<UiMessage>)
+[ ] receiver() method exists for additional subscribers
+[ ] list_panels is implemented on the UiApi trait impl (not just the struct)
+
+--- src/plugin/api/indicator_registry.rs ---
+[ ] register rejects name already owned by a different plugin_id
+[ ] register allows re-registration by the same plugin_id
+[ ] unregister_all_for removes all entries for a given plugin_id
+
+--- src/plugin/api/scheduler.rs ---
+[ ] handles map stores (PluginId, CancellationToken) per handle
+[ ] cancel_all_for collects matching handles, cancels tokens, removes from map
+
+--- src/plugin/loader.rs ---
+[ ] load_from_dir dispatches on .rhai and .wasm extensions
+[ ] returns PluginError::LoadFailed for unknown extensions
+
+--- src/plugin/registry.rs ---
+[ ] PluginRegistry has plugins_dir and host_factory fields
+[ ] scan_and_load walks plugins_dir subdirectories
+[ ] scan_and_load calls plugin.on_load(host) and records Loaded or Failed status
+[ ] enable calls on_enable and sets status Enabled
+[ ] disable calls on_disable and sets status Disabled
+[ ] unload removes entry and calls on_unload
+[ ] list returns Vec<PluginListEntry> sorted by id
+
+--- src/strategy/runtime/engine.rs ---
+[ ] pub event_bus: Option<Arc<EventBus>> field exists
+[ ] event_bus defaults to None in all constructors
+[ ] bus.publish(EventKind::RuleFired) is called in the rule-fire path
+[ ] bus.publish(EventKind::TradeExecuted) is called after successful execution
+[ ] bus.publish(EventKind::CandleProcessed) is called at the end of on_candle
+[ ] NO bus.publish calls exist inside the cross-update pass
+[ ] NO bus.publish calls exist inside the indicator-advance pass
+
+--- src/commands/plugins.rs ---
+[ ] list_plugins command exists returning Result<Vec<PluginListEntry>, String>
+[ ] enable_plugin command exists taking id: String
+[ ] disable_plugin command exists taking id: String
+[ ] reload_plugins command exists returning Result<Vec<String>, String>
+[ ] All four are annotated with #[tauri::command]
+[ ] reload_plugins returns per-plugin error strings (empty vec = all clean)
+
+--- src-tauri/src/main.rs ---
+[ ] AppState has plugin_registry: Arc<PluginRegistry>
+[ ] AppState has a ui_receiver or equivalent for UiMessage broadcast
+[ ] Shared infrastructure is built in setup: indicator_registry, analytics_registry, event_bus, tauri_ui_api, scheduler
+[ ] plugins_dir is set to app_data_dir/plugins and created if missing
+[ ] host_factory closure is built capturing all shared infra
+[ ] plugin_registry.scan_and_load().await is called at startup
+[ ] Each load result is logged via eprintln!
+[ ] A tokio::spawn forwards UiMessages to the Tauri event bus as "plugin-ui-message"
+[ ] All four plugin commands registered in tauri::generate_handler!
+[ ] pub mod plugins declared in src/commands/mod.rs
+
+=== STEP 5 — Stage 8 boundary check ===
+
+[ ] src/strategy/runtime/engine.rs has NO use crate::plugin imports other than crate::plugin::api::events
+[ ] event_bus field is the ONLY plugin-related addition to engine.rs
+[ ] commands/strategy.rs run_backtest_internal leaves event_bus as None (backtests are deterministic)
+[ ] A comment in commands/strategy.rs explains why event_bus is None for backtests
+
+=== STEP 6 — IPC contract check ===
+
+Read src/commands/plugins.rs and src/plugin/types.rs.
+
+[ ] PluginListEntry fields match between Rust (camelCase serde) and the command return type
+[ ] enable_plugin and disable_plugin take { id: String } (Tauri invoke expects named args)
+[ ] reload_plugins return type is Vec<String> not Vec<PluginError> (errors are stringified)
+[ ] No command returns a raw PluginError — all are mapped to String via .map_err(|e| e.to_string())
+
+=== OUTPUT FORMAT ===
+
+Produce this exact structure:
+
+STAGE COMPLETION
+  Stage 1 (types):        DONE / PARTIAL / NOT STARTED
+  Stage 2 (manifest):     DONE / PARTIAL / NOT STARTED
+  Stage 3 (API traits):   DONE / PARTIAL / NOT STARTED
+  Stage 4 (host):         DONE / PARTIAL / NOT STARTED
+  Stage 5 (API impls):    DONE / PARTIAL / NOT STARTED
+  Stage 6 (Rhai):         DONE / PARTIAL / NOT STARTED
+  Stage 7 (WASM):         DONE / PARTIAL / NOT STARTED
+  Stage 8 (engine wiring):DONE / PARTIAL / NOT STARTED
+  Stage 9 (Tauri IPC):    DONE / PARTIAL / NOT STARTED
+
+MISSING FILES
+  List each on its own line. NONE if empty.
+
+MISSING DEPENDENCIES
+  List each on its own line. NONE if empty.
+
+COMPILE ERRORS
+  cargo check --lib: N errors, N warnings
+  cargo check:       N errors, N warnings
+  List each error: [file:line] E0XXX — message
+
+STRUCTURAL FAILURES
+  List each failed checkbox as: [filename] — item description
+  If all checks passed for a file write: [filename] — OK
+
+CRITICAL ISSUES
+  Anything that would cause silent runtime failures, data races,
+  broken IPC contracts, or broken determinism.
+  NONE if clean.
+
+RECOMMENDED FIX ORDER
+  Top 3 things to fix first. One line each. File + what specifically.
+  NONE if clean.

@@ -1,0 +1,107 @@
+Project: AlgoMLN.
+Read these before writing:
+  src/plugin/api/storage.rs
+  src/plugin/api/events.rs
+  src/plugin/api/indicator_registry.rs
+  src/plugin/manifest.rs
+  src/plugin/runtime/rhai_runtime.rs
+
+=== src/plugin/tests.rs ===
+
+Add #[cfg(test)] mod tests to src/plugin/mod.rs pointing here.
+
+Test 1 — storage_roundtrip
+  #[tokio::test]
+  Create a tempdir (use tempfile crate — add tempfile = "3" to dev-dependencies).
+  Build a PluginKvStore with that dir and a dummy plugin id.
+  storage.set("hello", "world").await.unwrap();
+  assert_eq!(storage.get("hello").await.unwrap(), Some("world".to_string()));
+  storage.delete("hello").await.unwrap();
+  assert_eq!(storage.get("hello").await.unwrap(), None);
+  let keys = storage.list_keys("").await.unwrap();
+  assert!(keys.is_empty());
+
+Test 2 — storage_key_sanitization
+  storage.set("../../etc/passwd", "bad").await.unwrap();
+  The file must NOT exist at ../../etc/passwd.
+  storage.get("../../etc/passwd").await.unwrap() must equal what was stored (sanitized key is used consistently).
+  assert!(storage.list_keys("").await.unwrap().iter().all(|k| !k.contains("..")));
+
+Test 3 — indicator_registry_dedup
+  Create two SharedIndicatorRegistries sharing the same Arc<RwLock<...>> — actually create one.
+  Register "my_ind" from plugin_id "plugin-a". Assert Ok.
+  Register "my_ind" from plugin_id "plugin-a" again. Assert Ok (re-registration allowed).
+  Register "my_ind" from plugin_id "plugin-b". Assert Err(PluginError::ApiError(_)).
+  unregister_all_for("plugin-a"). list() must be empty.
+
+Test 4 — event_bus_filter
+  #[tokio::test]
+  Create EventBus.
+  let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+  let cc = call_count.clone();
+  bus.subscribe(EventFilter::TradeExecuted, Arc::new(move |_| { cc.fetch_add(1, Ordering::SeqCst); }));
+  bus.publish(EventKind::CandleProcessed(dummy_candle()));
+  tokio::time::sleep(Duration::from_millis(50)).await;
+  assert_eq!(call_count.load(Ordering::SeqCst), 0);
+  bus.publish(EventKind::TradeExecuted(dummy_trade()));
+  tokio::time::sleep(Duration::from_millis(50)).await;
+  assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+Test 5 — manifest_validation
+  Use tempfile. Write a valid plugin.toml, also create a dummy plugin.rhai file.
+  Assert PluginManifest::load succeeds and to_meta() returns correct fields.
+  Write a toml with version = "bad". Assert ManifestParse error.
+  Write a toml with capabilities = ["Unknown"]. Assert ManifestParse error.
+  Write a toml with entry = "plugin.dll". Assert ManifestParse error about extension.
+  Write a toml with entry = "nonexistent.rhai" (no actual file). Assert ManifestParse error about file not found.
+
+=== strategies/example_plugin/plugin.toml ===
+
+id = "example-plugin"
+name = "Example Plugin"
+version = "0.1.0"
+description = "Demonstrates custom indicator registration and storage"
+author = "AlgoMLN"
+capabilities = ["Indicators", "Storage"]
+entry = "plugin.rhai"
+
+[permissions]
+max_memory_mb = 8
+network = false
+file_system = false
+
+=== strategies/example_plugin/plugin.rhai ===
+
+fn on_load() {
+  log_info("Example plugin loaded");
+  let count = storage_get("load_count");
+  let n = if count == () { 0 } else { parse_int(count) };
+  storage_set("load_count", to_string(n + 1));
+  log_info("Load count: " + to_string(n + 1));
+  register_indicator("double_ema", double_ema);
+}
+
+fn double_ema(candles, period) {
+  let closes = [];
+  for c in candles { closes += c.close; }
+  let ema1 = simple_ema(closes, period);
+  let ema2 = simple_ema(ema1, period);
+  ema2
+}
+
+fn simple_ema(values, period) {
+  let result = [];
+  let k = 2.0 / (period + 1);
+  let prev = values[0];
+  for v in values {
+    prev = v * k + prev * (1.0 - k);
+    result += prev;
+  }
+  result
+}
+
+fn on_enable()  { log_info("Example plugin enabled");  }
+fn on_disable() { log_info("Example plugin disabled"); }
+fn on_unload()  { log_info("Example plugin unloaded"); }
+
+Output code only. No questions. No explanations.

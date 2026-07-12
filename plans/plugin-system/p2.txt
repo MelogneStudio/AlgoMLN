@@ -1,0 +1,63 @@
+Project: AlgoMLN. Read src/plugin/types.rs before writing.
+
+Create src/plugin/manifest.rs.
+
+Add to Cargo.toml: toml = "0.8"
+
+=== Structs ===
+
+#[derive(Debug, Deserialize)]
+pub struct PluginManifest {
+  pub id: String,
+  pub name: String,
+  pub version: String,
+  pub description: String,
+  pub author: String,
+  pub capabilities: Vec<String>,
+  pub entry: String,
+  pub permissions: PluginPermissions,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginPermissions {
+  #[serde(default)]
+  pub network: bool,
+  #[serde(default)]
+  pub file_system: bool,
+  #[serde(default = "default_memory")]
+  pub max_memory_mb: u32,
+  #[serde(default)]
+  pub allowed_symbols: Vec<String>,
+}
+fn default_memory() -> u32 { 32 }
+
+=== Methods on PluginManifest ===
+
+pub fn load(plugin_dir: &std::path::Path) -> PluginResult<Self>
+  Steps:
+  1. Read plugin_dir/plugin.toml to String. Map IO errors to PluginError::ManifestParse.
+  2. Parse with toml::from_str::<PluginManifest>. Map parse errors to PluginError::ManifestParse.
+  3. Validate id: must match regex ^[a-z0-9][a-z0-9\-]*[a-z0-9]$ (at least 2 chars).
+     If invalid: return PluginError::ManifestParse("id must be kebab-case".into()).
+  4. Validate version: PluginVersion::try_from(self.version.as_str()) must succeed.
+     If not: return PluginError::ManifestParse with the error message.
+  5. Validate each capability string: Capability::try_from(cap.as_str()) must succeed for all.
+     Collect unknown names, if any: return PluginError::ManifestParse("unknown capabilities: x, y".into()).
+  6. Check plugin_dir.join(&self.entry) exists as a file.
+     If not: return PluginError::ManifestParse(format!("entry file '{}' not found", self.entry)).
+  7. Check entry extension is "rhai" or "wasm".
+     If not: return PluginError::ManifestParse("entry must be .rhai or .wasm".into()).
+  8. Return Ok(self).
+
+pub fn to_meta(&self) -> PluginResult<PluginMeta>
+  Constructs PluginMeta from the validated fields.
+  Calls PluginVersion::try_from, wraps errors as PluginError::ManifestParse.
+
+pub fn to_capabilities(&self) -> PluginResult<Vec<Capability>>
+  Maps each string in self.capabilities via Capability::try_from.
+  Returns the first error encountered wrapped in PluginError::ManifestParse.
+
+For the regex validation, add regex = "1" and lazy_static = "1" to Cargo.toml.
+Use lazy_static! to define the compiled regex once.
+
+Output code only. No questions. No explanations.

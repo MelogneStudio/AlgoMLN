@@ -1,0 +1,104 @@
+Project: AlgoMLN.
+Read these before writing:
+  src/plugin/manifest.rs
+  src/plugin/runtime/rhai_runtime.rs
+  src/plugin/runtime/wasm_runtime.rs
+  src/plugin/types.rs
+  src/strategy/runtime/engine.rs
+
+Create src/plugin/loader.rs:
+
+pub struct PluginLoader;
+impl PluginLoader {
+  pub fn load_from_dir(dir: &std::path::Path) -> PluginResult<Box<dyn Plugin>>
+    1. PluginManifest::load(dir)?
+    2. let meta = manifest.to_meta()?;
+    3. let capabilities = manifest.to_capabilities()?;
+    4. let entry = dir.join(&manifest.entry);
+    5. Match entry extension:
+       "rhai" => Ok(Box::new(RhaiPlugin::new(meta, capabilities, entry)?))
+       "wasm" => Ok(Box::new(WasmPlugin::new(meta, capabilities, entry, manifest.permissions.max_memory_mb)?))
+       other  => Err(PluginError::LoadFailed(format!("unknown entry type: {}", other)))
+}
+
+Create src/plugin/registry.rs:
+
+pub struct PluginEntry {
+  pub plugin: Box<dyn Plugin>,
+  pub status: PluginStatus,
+  pub manifest: PluginManifest,
+  pub schedule_handles: Vec<ScheduleHandle>,
+}
+
+pub struct PluginRegistry {
+  plugins: Arc<parking_lot::RwLock<HashMap<PluginId, PluginEntry>>>,
+  plugins_dir: std::path::PathBuf,
+  host_factory: Arc
+    dyn Fn(PluginId, Vec<Capability>, PluginPermissions) -> Arc<PluginHost> + Send + Sync
+  >,
+}
+
+impl PluginRegistry {
+  pub fn new(
+    plugins_dir: PathBuf,
+    host_factory: Arc<dyn Fn(PluginId, Vec<Capability>, PluginPermissions) -> Arc<PluginHost> + Send + Sync>,
+  ) -> Arc<Self>
+
+  pub async fn scan_and_load(&self) -> Vec<(String, PluginResult<()>)>
+    Reads plugins_dir. For each entry that is a directory:
+      Let dir_name = entry.file_name().to_string_lossy().to_string().
+      Match PluginLoader::load_from_dir(&entry.path()):
+        Err(e) => push (dir_name, Err(e)) and continue.
+        Ok(mut plugin) =>
+          Let id = plugin.meta().id.clone().
+          Let caps = plugin.meta().capabilities — wait, Plugin trait doesn't expose capabilities directly.
+          Actually call plugin.capabilities().to_vec().
+          Let permissions = load from manifest (re-parse manifest here for permissions, or store on entry).
+          Actually: call PluginManifest::load(&entry.path()) again to get permissions
+            (or store the manifest before boxing the plugin — prefer storing it).
+          Let host = (self.host_factory)(id.clone(), caps.clone(), permissions.clone()).
+          Call plugin.on_load(host).await:
+            Err(e) => push (id.to_string(), Err(e)), insert entry with status=Failed, continue.
+            Ok(()) => insert entry with status=Loaded, push (id.to_string(), Ok(())).
+    Return the results vec.
+
+  pub async fn enable(&self, id: &PluginId) -> PluginResult<()>
+    Acquire write lock. Look up entry (NotFound if missing).
+    Match entry.status: if Failed(e), return Err(PluginError::ApiError("cannot enable failed plugin".into())).
+    Call entry.plugin.on_enable().await?
+    Set entry.status = PluginStatus::Enabled.
+    Ok(())
+
+  pub async fn disable(&self, id: &PluginId) -> PluginResult<()>
+    Acquire write lock. Look up entry.
+    Call entry.plugin.on_disable().await?
+    Set status = Disabled. Ok(())
+
+  pub async fn unload(&self, id: &PluginId) -> PluginResult<()>
+    Acquire write lock. Remove entry.
+    Call entry.plugin.on_unload().
+    Ok(())
+
+  pub fn list(&self) -> Vec<PluginListEntry>
+    Acquire read lock. Map each entry to PluginListEntry using meta from plugin.meta() and status.
+    Sort by id.
+
+  pub fn get_status(&self, id: &PluginId) -> Option<PluginStatus>
+    Acquire read lock. entry.status.clone().
+}
+
+Edit src/strategy/runtime/engine.rs:
+  Add field: pub event_bus: Option<Arc<crate::plugin::api::events::EventBus>>
+  In the StrategyEngine constructor, default this to None.
+  After the trade execution log in on_candle:
+    if let Some(bus) = &self.event_bus {
+      bus.publish(EventKind::TradeExecuted(trade.clone()));
+    }
+  After the second pass (cross update), at the end of on_candle:
+    if let Some(bus) = &self.event_bus {
+      bus.publish(EventKind::CandleProcessed(candles.last().cloned().unwrap()));
+    }
+  Also after rule fires:
+    bus.publish(EventKind::RuleFired { rule_id: rule.id.clone(), strategy_id: self.instance.id.clone() });
+
+Output code only. No questions. No explanations.
