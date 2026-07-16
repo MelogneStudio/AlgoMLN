@@ -4,6 +4,7 @@ pub mod events;
 pub mod execution;
 pub mod indicator_registry;
 pub mod log;
+pub mod log_file;
 pub mod market_data;
 pub mod scheduler;
 pub mod storage;

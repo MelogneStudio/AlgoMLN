@@ -41,7 +41,8 @@ AlgoMLN/
 │   │   │   ├── events.rs       EventBus + EventKind + EventFilter (pub/sub)
 │   │   │   ├── execution.rs    NoopExecutionApi — stub until wired into engine
 │   │   │   ├── scheduler.rs    CronScheduler — cron + CancellationToken per task
-│   │   │   ├── log.rs          NamespacedLog — eprintln! gated by plugin_id
+│   │   │   ├── log.rs          NamespacedLog — eprintln! gated by plugin_id (CLI)
+│   │   │   ├── log_file.rs     RateLimitedFileLog — token-bucket rate limit + 5MB rolling file per plugin
 │   │   │   └── ui.rs           TauriUiApi — broadcast channel for UI panels
 │   │   ├── host.rs             PluginHost (capability-gated accessors) + Builder
 │   │   ├── loader.rs           PluginLoader — manifest → boxed Plugin (rhai/wasm)
@@ -166,7 +167,8 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
    | `BrokerMarketDataApi` | wraps the same `DhanClient` the strategy layer uses |
    | `NoopExecutionApi` | stub — `submit_order` returns `ApiError` until a future revision wires a real broker adapter |
    | `PluginKvStore` | per-plugin sandboxed file KV under `<app_data>/plugins/<id>/storage` |
-   | `NamespacedLog` | `eprintln!` gated by plugin id |
+   | `NamespacedLog` | `eprintln!` gated by plugin id (CLI path) |
+   | `RateLimitedFileLog` | per-plugin token-bucket (10/sec burst, 100/min) + 5MB rolling file under `<app_data>/logs/plugin-<id>.log` (Tauri path) |
 
 2. **Host factory** is a single `Arc<HostFactory>` closure bound to the
    `plugins_dir` path. The registry calls it for every plugin it

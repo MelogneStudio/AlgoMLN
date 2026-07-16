@@ -14,9 +14,9 @@ use algomln::{
             analytics::SharedAnalyticsRegistry,
             dsl_extension::SharedDslExtensionRegistry,
             events::EventBus,
-            execution::NoopExecutionApi,
+                execution::NoopExecutionApi,
             indicator_registry::SharedIndicatorRegistry,
-            log::NamespacedLog,
+            log_file::RateLimitedFileLog,
             market_data::BrokerMarketDataApi,
             scheduler::CronScheduler,
             storage::PluginKvStore,
@@ -192,6 +192,14 @@ fn main() {
             let _ = std::fs::create_dir_all(&plugins_dir);
             let plugins_dir_for_factory = plugins_dir.clone();
 
+            // Per-plugin rolling logs live under `<app_data>/logs/`.
+            // The directory is created lazily by `RateLimitedFileLog::open`,
+            // but we ensure it exists now so a misbehaving plugin can't
+            // spam `log_info` before the first log call hits a missing dir.
+            let logs_dir = store_dir.join("logs");
+            let _ = std::fs::create_dir_all(&logs_dir);
+            let logs_dir_for_factory = logs_dir.clone();
+
             let host_factory: algomln::plugin::registry::HostFactory = Arc::new(
                 move |id: algomln::plugin::PluginId,
                       caps: Vec<algomln::plugin::Capability>,
@@ -203,8 +211,15 @@ fn main() {
                         PluginKvStore::new(id.clone(), storage_dir)
                             .expect("plugin storage dir should be creatable"),
                     );
-                    let log: Arc<dyn algomln::plugin::api::LogApi> =
-                        Arc::new(NamespacedLog::new(id.clone()));
+                    // Plugins are untrusted code — every `log_*` call goes
+                    // through a per-plugin token-bucket rate limiter and a
+                    // 5MB rolling file under `<app_data>/logs/`. The CLI
+                    // path keeps using `NamespacedLog` (terminal-friendly,
+                    // no file) because the CLI does not load plugins.
+                    let log: Arc<dyn algomln::plugin::api::LogApi> = Arc::new(
+                        RateLimitedFileLog::open(&logs_dir_for_factory, id.clone())
+                            .expect("plugin log file should be creatable"),
+                    );
                     algomln::plugin::host::PluginHostBuilder {
                         id: id.clone(),
                         market_data: market_data_api.clone(),
