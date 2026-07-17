@@ -1,0 +1,226 @@
+---
+# PROMPT 2 — Portfolio Engine
+
+## Context
+
+Prompt 1 is complete. `TradeIn`, `IndexAlias`, `IndexRegistry`, and `SymbolMap` exist. `AppState` carries `Arc<IndexRegistry>` and `Arc<RwLock<SymbolMap>>`. Do not re-implement anything from Prompt 1.
+
+## Output rules
+
+- Code only. No explanations. No preamble.
+- Do not ask questions. Output every file in full.
+- Preserve all existing `StrategyEngine`, `PaperBroker`, and `ExecutionTarget` APIs. Add to them; do not break them.
+
+---
+
+## Section A — `src/strategy/portfolio/mod.rs` (new)
+
+```rust
+pub mod engine;
+pub use engine::PortfolioEngine;
+```
+
+## Section B — `src/strategy/portfolio/engine.rs` (new)
+
+```rust
+use std::collections::HashMap;
+use std::sync::Arc;
+use crate::models::Candle;
+use crate::strategy::{
+    dsl::ast::StrategyNode,
+    runtime::engine::StrategyEngine,
+    execution::paper::PaperBroker,
+    logging::log::LogEntry,
+};
+use crate::plugin::api::events::EventBus;
+use crate::commands::registry::{StrategyInstance, StrategyStatus, StrategyMode};
+
+/// Runs N independent `StrategyEngine` instances — one per symbol — against a single
+/// shared `PaperBroker`. Capital is shared (positions across all symbols sum up).
+/// Each sub-engine stamps orders with its own symbol; the `PaperBroker` tracks them
+/// separately in its existing `HashMap<String, PaperPosition>`.
+///
+/// Invariant: sub-engines are never accessed concurrently. `on_tick` takes `&mut self`
+/// and dispatches to exactly one sub-engine per call.
+pub struct PortfolioEngine {
+    /// Symbol (uppercase) → StrategyEngine
+    sub_engines: HashMap<String, StrategyEngine>,
+    /// Shared broker — held here for direct position/PnL inspection
+    broker: Arc<PaperBroker>,
+    /// Symbols in insertion order (deterministic for logging)
+    symbol_order: Vec<String>,
+}
+
+impl PortfolioEngine {
+    /// Create a portfolio engine for the given parsed strategy and symbol list.
+    ///
+    /// `strategy` must NOT have `trade_in` validated here — that is the caller's job.
+    /// `symbols` must be non-empty.
+    /// `initial_cash` is the shared paper capital across all symbols.
+    /// `event_bus` is `None` for deterministic runs; `Some(bus)` for paper/live runs.
+    pub fn new(
+        strategy: &StrategyNode,
+        symbols: Vec<String>,
+        initial_cash: f64,
+        event_bus: Option<Arc<EventBus>>,
+    ) -> Self {
+        assert!(!symbols.is_empty(), "PortfolioEngine: symbols must be non-empty");
+
+        let broker: Arc<PaperBroker> = Arc::new(PaperBroker::new(initial_cash));
+        let mut sub_engines: HashMap<String, StrategyEngine> = HashMap::new();
+        let mut symbol_order: Vec<String> = Vec::with_capacity(symbols.len());
+
+        for symbol in &symbols {
+            let sym_upper = symbol.to_uppercase();
+            let instance = StrategyInstance {
+                id: format!("portfolio-{}", sym_upper),
+                name: strategy.name.clone(),
+                symbol: sym_upper.clone(),
+                status: StrategyStatus::Running,
+                mode: StrategyMode::Paper,
+            };
+
+            // Each sub-engine shares the same Arc<PaperBroker> cast to Arc<dyn ExecutionTarget>
+            let execution_target: Arc<dyn crate::strategy::execution::target::ExecutionTarget> =
+                Arc::clone(&broker);
+
+            let engine = StrategyEngine::new(
+                strategy.clone(),
+                instance,
+                execution_target,
+                event_bus.clone(),
+            );
+            sub_engines.insert(sym_upper.clone(), engine);
+            symbol_order.push(sym_upper);
+        }
+
+        Self { sub_engines, broker, symbol_order }
+    }
+
+    /// Advance one symbol's engine by one candle. Returns that engine's log entries.
+    /// If `symbol` is unknown, logs a warning to stderr and returns empty vec.
+    pub async fn on_tick(&mut self, symbol: &str, candles: &[Candle]) -> Vec<LogEntry> {
+        let key = symbol.to_uppercase();
+        match self.sub_engines.get_mut(&key) {
+            Some(engine) => engine.on_candle(candles).await,
+            None => {
+                eprintln!(
+                    "[PortfolioEngine] on_tick called for unregistered symbol '{}' — ignoring",
+                    symbol
+                );
+                vec![]
+            }
+        }
+    }
+
+    /// Symbols this engine is tracking, in stable insertion order.
+    pub fn symbols(&self) -> &[String] { &self.symbol_order }
+
+    /// Direct access to the shared broker for position/PnL snapshots.
+    pub fn broker(&self) -> &Arc<PaperBroker> { &self.broker }
+
+    pub fn symbol_count(&self) -> usize { self.sub_engines.len() }
+}
+```
+
+**Important:** `StrategyEngine::new` must accept a `strategy: StrategyNode` (the full AST) instead of / in addition to a `StrategyInstance`. Look at how `StrategyEngine` is currently constructed in `commands/strategy.rs::run_backtest_internal` and `run_backtest_dsl`. If `StrategyEngine::new` does not currently accept an `Arc<dyn ExecutionTarget>`, adapt the signature minimally — prefer to add an overload or adapt the existing constructor rather than refactoring the whole engine. The goal is **no regression on existing single-symbol paths**.
+
+---
+
+## Section C — `src/strategy/mod.rs` or `src/lib.rs`
+
+Declare the new submodule:
+
+```rust
+pub mod portfolio;
+```
+
+inside `src/strategy/mod.rs` (if that file exists) or directly in `src/lib.rs`.
+
+---
+
+## Section D — `src/commands/strategy.rs` — two changes only
+
+### Change 1: Guard `run_backtest_dsl` against multi-symbol strategies
+
+At the top of `run_backtest_dsl` (or `run_backtest_internal`), immediately after DSL is parsed and the AST is available:
+
+```rust
+if ast.trade_in.is_some() {
+    return Err(
+        "Multi-symbol strategies (TRADE_IN) cannot be backtested yet. \
+         Deploy as paper trading to run across the full symbol universe."
+            .to_string(),
+    );
+}
+```
+
+This is the only change to backtest logic. The rest is unchanged.
+
+### Change 2: Add `resolve_trade_in_symbols` helper
+
+Add this standalone function (not a Tauri command):
+
+```rust
+/// Resolve a `TradeIn` clause to a concrete list of NSE symbols.
+/// Returns `Err` if the index has no symbols loaded (user needs to refresh).
+pub fn resolve_trade_in_symbols(
+    trade_in: &crate::strategy::dsl::ast::TradeIn,
+    index_registry: &crate::indices::IndexRegistry,
+) -> Result<Vec<String>, String> {
+    use crate::strategy::dsl::ast::TradeIn;
+    match trade_in {
+        TradeIn::Symbols(symbols) => {
+            if symbols.is_empty() {
+                return Err("TRADE_IN symbol list is empty".to_string());
+            }
+            Ok(symbols.iter().map(|s| s.to_uppercase()).collect())
+        }
+        TradeIn::Index(alias) => {
+            let symbols = index_registry.get_symbols(alias);
+            if symbols.is_empty() {
+                Err(format!(
+                    "Index '{}' has no symbols loaded. Open Settings → Index Data and click Refresh.",
+                    alias.display_name()
+                ))
+            } else {
+                Ok(symbols)
+            }
+        }
+    }
+}
+```
+
+This function is used by Prompt 3's Tauri commands and by future live-engine wiring.
+
+---
+
+## Section E — `src/strategy/execution/paper.rs` — one change only
+
+Ensure `PaperBroker` implements:
+
+```rust
+fn as_any(&self) -> &dyn std::any::Any { self }
+```
+
+on `ExecutionTarget` (this should already exist per `CLAUDE.md` invariant 8). If it does not exist, add it to both the trait definition and the `PaperBroker` impl. No other changes.
+
+---
+
+## MD doc updates
+
+Update **`ARCHITECTURE.md`**:
+- Add `src/strategy/portfolio/` to repository layout with `engine.rs`.
+- Add a lookup row: "Portfolio engine (multi-symbol paper/live) | `src/strategy/portfolio/engine.rs`".
+
+Update **`BACKEND.md`**:
+- Add a "Portfolio Engine" subsection under "The runtime / evaluation loop":
+  - `PortfolioEngine` owns N `StrategyEngine` instances keyed by symbol.
+  - Shared `Arc<PaperBroker>` — positions accumulate across all symbols from a single capital pool.
+  - `on_tick(symbol, candles)` dispatches to the matching sub-engine.
+  - Backtests with `TRADE_IN` return an error — multi-symbol backtest is not implemented.
+
+Update **`CLAUDE.md`**:
+- Add invariant **11**: "PortfolioEngine sub-engines are never accessed concurrently. `on_tick` takes `&mut self` and is called from a single tokio task. Adding parallelism here would require `Mutex<StrategyEngine>` per sub-engine and careful determinism auditing — do not add it without a full review."
+
+---

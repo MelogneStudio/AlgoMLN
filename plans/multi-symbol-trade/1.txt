@@ -1,0 +1,999 @@
+---
+
+# PROMPT 1 — DSL + AST + Index Registry + Symbol Map
+
+## Context
+
+AlgoMLN is a Tauri v2 + Rust + React 19 trading platform. The Rust crate is at `src/` (library) and `src-tauri/src/main.rs` (Tauri shell). The strategy DSL lives in `src/strategy/dsl/`. `AppState` is defined in `src/commands/state.rs`. Do not touch any file not listed below.
+
+## Output rules
+
+- Code only. No explanations. No preamble. No summaries after the code.
+- Follow existing code style (snake_case Rust, `parking_lot` for locks, `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]` on all AST types).
+- All new Rust `use` statements at the top of each file.
+- Do not ask questions. Output every file in full.
+
+---
+
+## Section A — `src/strategy/dsl/ast.rs`
+
+Add the following types **before** the existing `StrategyNode` definition. Do not remove or alter any existing types.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum IndexAlias {
+    Nifty50,
+    NiftyNext50,
+    Nifty100,
+    Nifty200,
+    Nifty500,
+    NiftyMidcap50,
+    NiftyMidcap100,
+    NiftyMidcap150,
+    NiftySmallcap50,
+    NiftySmallcap100,
+    NiftySmallcap250,
+    NiftyBank,
+    NiftyIt,
+    NiftyPharma,
+    NiftyAuto,
+    NiftyFmcg,
+    NiftyMetal,
+    NiftyRealty,
+    NiftyEnergy,
+    NiftyInfra,
+    NiftyPsuBank,
+    NiftyFinancialServices,
+}
+
+impl IndexAlias {
+    /// Parse from the DSL keyword string (case-insensitive, underscore-separated).
+    pub fn from_dsl_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "NIFTY_50"                  => Some(Self::Nifty50),
+            "NIFTY_NEXT_50"             => Some(Self::NiftyNext50),
+            "NIFTY_100"                 => Some(Self::Nifty100),
+            "NIFTY_200"                 => Some(Self::Nifty200),
+            "NIFTY_500"                 => Some(Self::Nifty500),
+            "NIFTY_MIDCAP_50"           => Some(Self::NiftyMidcap50),
+            "NIFTY_MIDCAP_100"          => Some(Self::NiftyMidcap100),
+            "NIFTY_MIDCAP_150"          => Some(Self::NiftyMidcap150),
+            "NIFTY_SMALLCAP_50"         => Some(Self::NiftySmallcap50),
+            "NIFTY_SMALLCAP_100"        => Some(Self::NiftySmallcap100),
+            "NIFTY_SMALLCAP_250"        => Some(Self::NiftySmallcap250),
+            "NIFTY_BANK"                => Some(Self::NiftyBank),
+            "NIFTY_IT"                  => Some(Self::NiftyIt),
+            "NIFTY_PHARMA"              => Some(Self::NiftyPharma),
+            "NIFTY_AUTO"                => Some(Self::NiftyAuto),
+            "NIFTY_FMCG"                => Some(Self::NiftyFmcg),
+            "NIFTY_METAL"               => Some(Self::NiftyMetal),
+            "NIFTY_REALTY"              => Some(Self::NiftyRealty),
+            "NIFTY_ENERGY"              => Some(Self::NiftyEnergy),
+            "NIFTY_INFRA"               => Some(Self::NiftyInfra),
+            "NIFTY_PSU_BANK"            => Some(Self::NiftyPsuBank),
+            "NIFTY_FINANCIAL_SERVICES"  => Some(Self::NiftyFinancialServices),
+            _                           => None,
+        }
+    }
+
+    /// Human-readable display name.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Nifty50               => "NIFTY 50",
+            Self::NiftyNext50           => "NIFTY NEXT 50",
+            Self::Nifty100              => "NIFTY 100",
+            Self::Nifty200              => "NIFTY 200",
+            Self::Nifty500              => "NIFTY 500",
+            Self::NiftyMidcap50         => "NIFTY MIDCAP 50",
+            Self::NiftyMidcap100        => "NIFTY MIDCAP 100",
+            Self::NiftyMidcap150        => "NIFTY MIDCAP 150",
+            Self::NiftySmallcap50       => "NIFTY SMALLCAP 50",
+            Self::NiftySmallcap100      => "NIFTY SMALLCAP 100",
+            Self::NiftySmallcap250      => "NIFTY SMALLCAP 250",
+            Self::NiftyBank             => "NIFTY BANK",
+            Self::NiftyIt               => "NIFTY IT",
+            Self::NiftyPharma           => "NIFTY PHARMA",
+            Self::NiftyAuto             => "NIFTY AUTO",
+            Self::NiftyFmcg             => "NIFTY FMCG",
+            Self::NiftyMetal            => "NIFTY METAL",
+            Self::NiftyRealty           => "NIFTY REALTY",
+            Self::NiftyEnergy           => "NIFTY ENERGY",
+            Self::NiftyInfra            => "NIFTY INFRA",
+            Self::NiftyPsuBank          => "NIFTY PSU BANK",
+            Self::NiftyFinancialServices => "NIFTY FINANCIAL SERVICES",
+        }
+    }
+
+    /// DSL keyword form (what the user writes after TRADE_IN).
+    pub fn dsl_keyword(&self) -> &'static str {
+        match self {
+            Self::Nifty50               => "NIFTY_50",
+            Self::NiftyNext50           => "NIFTY_NEXT_50",
+            Self::Nifty100              => "NIFTY_100",
+            Self::Nifty200              => "NIFTY_200",
+            Self::Nifty500              => "NIFTY_500",
+            Self::NiftyMidcap50         => "NIFTY_MIDCAP_50",
+            Self::NiftyMidcap100        => "NIFTY_MIDCAP_100",
+            Self::NiftyMidcap150        => "NIFTY_MIDCAP_150",
+            Self::NiftySmallcap50       => "NIFTY_SMALLCAP_50",
+            Self::NiftySmallcap100      => "NIFTY_SMALLCAP_100",
+            Self::NiftySmallcap250      => "NIFTY_SMALLCAP_250",
+            Self::NiftyBank             => "NIFTY_BANK",
+            Self::NiftyIt               => "NIFTY_IT",
+            Self::NiftyPharma           => "NIFTY_PHARMA",
+            Self::NiftyAuto             => "NIFTY_AUTO",
+            Self::NiftyFmcg             => "NIFTY_FMCG",
+            Self::NiftyMetal            => "NIFTY_METAL",
+            Self::NiftyRealty           => "NIFTY_REALTY",
+            Self::NiftyEnergy           => "NIFTY_ENERGY",
+            Self::NiftyInfra            => "NIFTY_INFRA",
+            Self::NiftyPsuBank          => "NIFTY_PSU_BANK",
+            Self::NiftyFinancialServices => "NIFTY_FINANCIAL_SERVICES",
+        }
+    }
+
+    /// niftyindices.com CSV filename for this index.
+    pub fn csv_filename(&self) -> &'static str {
+        match self {
+            Self::Nifty50               => "ind_nifty50list.csv",
+            Self::NiftyNext50           => "ind_niftynext50list.csv",
+            Self::Nifty100              => "ind_nifty100list.csv",
+            Self::Nifty200              => "ind_nifty200list.csv",
+            Self::Nifty500              => "ind_nifty500list.csv",
+            Self::NiftyMidcap50         => "ind_niftymidcap50list.csv",
+            Self::NiftyMidcap100        => "ind_niftymidcap100list.csv",
+            Self::NiftyMidcap150        => "ind_niftymidcap150list.csv",
+            Self::NiftySmallcap50       => "ind_niftysmallcap50list.csv",
+            Self::NiftySmallcap100      => "ind_niftysmallcap100list.csv",
+            Self::NiftySmallcap250      => "ind_niftysmallcap250list.csv",
+            Self::NiftyBank             => "ind_niftybanklist.csv",
+            Self::NiftyIt               => "ind_niftyitlist.csv",
+            Self::NiftyPharma           => "ind_niftypharmaList.csv",
+            Self::NiftyAuto             => "ind_niftyautolist.csv",
+            Self::NiftyFmcg             => "ind_niftyfmcglist.csv",
+            Self::NiftyMetal            => "ind_niftymetallist.csv",
+            Self::NiftyRealty           => "ind_niftyrealtylist.csv",
+            Self::NiftyEnergy           => "ind_niftyenergylist.csv",
+            Self::NiftyInfra            => "ind_niftyinfraList.csv",
+            Self::NiftyPsuBank          => "ind_niftypsubanklist.csv",
+            Self::NiftyFinancialServices => "ind_niftyfinancialserviceslist.csv",
+        }
+    }
+
+    /// Lowercase filename stem used for JSON cache files (e.g. "nifty_50").
+    pub fn cache_stem(&self) -> &'static str {
+        match self {
+            Self::Nifty50               => "nifty_50",
+            Self::NiftyNext50           => "nifty_next_50",
+            Self::Nifty100              => "nifty_100",
+            Self::Nifty200              => "nifty_200",
+            Self::Nifty500              => "nifty_500",
+            Self::NiftyMidcap50         => "nifty_midcap_50",
+            Self::NiftyMidcap100        => "nifty_midcap_100",
+            Self::NiftyMidcap150        => "nifty_midcap_150",
+            Self::NiftySmallcap50       => "nifty_smallcap_50",
+            Self::NiftySmallcap100      => "nifty_smallcap_100",
+            Self::NiftySmallcap250      => "nifty_smallcap_250",
+            Self::NiftyBank             => "nifty_bank",
+            Self::NiftyIt               => "nifty_it",
+            Self::NiftyPharma           => "nifty_pharma",
+            Self::NiftyAuto             => "nifty_auto",
+            Self::NiftyFmcg             => "nifty_fmcg",
+            Self::NiftyMetal            => "nifty_metal",
+            Self::NiftyRealty           => "nifty_realty",
+            Self::NiftyEnergy           => "nifty_energy",
+            Self::NiftyInfra            => "nifty_infra",
+            Self::NiftyPsuBank          => "nifty_psu_bank",
+            Self::NiftyFinancialServices => "nifty_financial_services",
+        }
+    }
+
+    /// All variants in a stable order. Used for iteration.
+    pub fn all() -> &'static [IndexAlias] {
+        use IndexAlias::*;
+        &[
+            Nifty50, NiftyNext50, Nifty100, Nifty200, Nifty500,
+            NiftyMidcap50, NiftyMidcap100, NiftyMidcap150,
+            NiftySmallcap50, NiftySmallcap100, NiftySmallcap250,
+            NiftyBank, NiftyIt, NiftyPharma, NiftyAuto,
+            NiftyFmcg, NiftyMetal, NiftyRealty, NiftyEnergy,
+            NiftyInfra, NiftyPsuBank, NiftyFinancialServices,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TradeIn {
+    /// Explicit comma-separated list of NSE symbols (e.g. `TRADE_IN RELIANCE, INFY`).
+    Symbols(Vec<String>),
+    /// Named index alias (e.g. `TRADE_IN NIFTY_BANK`).
+    Index(IndexAlias),
+}
+```
+
+Then modify `StrategyNode` to add `trade_in`:
+
+```rust
+pub struct StrategyNode {
+    pub name: String,
+    pub trade_in: Option<TradeIn>,  // None = single-symbol (backwards compat)
+    pub rules: Vec<RuleNode>,
+}
+```
+
+Constructors and existing derives must be preserved. Anywhere `StrategyNode { name, rules }` is constructed in existing code, add `trade_in: None`.
+
+---
+
+## Section B — `src/strategy/dsl/lexer.rs`
+
+Add one new keyword token `TradeIn`. In the existing keyword-matching arm (wherever the lexer converts an uppercase string to a `Token` variant), add:
+
+```rust
+"TRADE_IN" => Token::TradeIn,
+```
+
+Add the variant to the `Token` enum:
+
+```rust
+TradeIn,
+```
+
+No other changes to the lexer. The index alias keywords (e.g. `NIFTY_50`) are **not** lexer keywords — they are parsed as `Identifier` tokens and resolved in the parser.
+
+---
+
+## Section C — `src/strategy/dsl/parser.rs`
+
+Add a `parse_trade_in` method to the parser. Call it once at the top of `parse_strategy` (or equivalent entry point), before any `WHEN` rules are parsed:
+
+```rust
+fn parse_trade_in(&mut self) -> Result<Option<TradeIn>, ParseError> {
+    // Peek — if not TRADE_IN keyword, return Ok(None) immediately (backwards compat)
+    if !self.peek_is(Token::TradeIn) {
+        return Ok(None);
+    }
+    self.advance(); // consume TRADE_IN
+
+    // Collect one or more comma-separated identifier tokens on the same logical line.
+    // Identifiers here may contain underscores and digits (e.g. NIFTY_50, RELIANCE).
+    let mut items: Vec<String> = Vec::new();
+
+    loop {
+        match self.current_token() {
+            Some(Token::Identifier(s)) | Some(Token::Symbol(s)) => {
+                items.push(s.to_uppercase());
+                self.advance();
+            }
+            _ => {
+                return Err(ParseError::new(
+                    self.current_line(),
+                    self.current_col(),
+                    "expected a symbol or index alias after TRADE_IN",
+                ));
+            }
+        }
+        if self.peek_is(Token::Comma) {
+            self.advance(); // consume comma, continue
+        } else {
+            break;
+        }
+    }
+
+    if items.is_empty() {
+        return Err(ParseError::new(
+            self.current_line(),
+            self.current_col(),
+            "TRADE_IN requires at least one symbol or index alias",
+        ));
+    }
+
+    // If exactly one item and it matches a known IndexAlias → TradeIn::Index
+    if items.len() == 1 {
+        if let Some(alias) = IndexAlias::from_dsl_str(&items[0]) {
+            return Ok(Some(TradeIn::Index(alias)));
+        }
+    }
+
+    // Multiple items: reject any that are index aliases (can't mix)
+    for item in &items {
+        if IndexAlias::from_dsl_str(item).is_some() {
+            return Err(ParseError::new(
+                self.current_line(),
+                self.current_col(),
+                &format!(
+                    "cannot mix index alias '{}' with explicit symbols in TRADE_IN — use one or the other",
+                    item
+                ),
+            ));
+        }
+    }
+
+    Ok(Some(TradeIn::Symbols(items)))
+}
+```
+
+Integrate into `parse_strategy`:
+```rust
+let trade_in = self.parse_trade_in()?;
+// ... parse rules as before ...
+Ok(StrategyNode { name, trade_in, rules })
+```
+
+Adapt the exact method/token API to match the existing parser's style. The logic above is the authoritative spec; the API calls must match what already exists.
+
+---
+
+## Section D — `src/strategy/dsl/validator.rs`
+
+In `AstValidator::validate` (or equivalent), after validating rules, add `TradeIn` validation:
+
+```rust
+fn validate_trade_in(trade_in: &TradeIn, errors: &mut Vec<ValidationError>) {
+    match trade_in {
+        TradeIn::Symbols(syms) => {
+            if syms.is_empty() {
+                errors.push(ValidationError::new("TRADE_IN symbol list is empty"));
+            }
+            if syms.len() > 500 {
+                errors.push(ValidationError::new(
+                    "TRADE_IN explicit symbol list exceeds 500 symbols; use an index alias instead"
+                ));
+            }
+            for sym in syms {
+                if sym.is_empty() {
+                    errors.push(ValidationError::new("TRADE_IN contains an empty symbol"));
+                }
+                if sym.len() > 30 {
+                    errors.push(ValidationError::new(
+                        &format!("TRADE_IN symbol '{}' is too long (max 30 chars)", sym)
+                    ));
+                }
+            }
+        }
+        TradeIn::Index(_) => {
+            // Valid — resolved at runtime from IndexRegistry
+        }
+    }
+}
+```
+
+Call `validate_trade_in` when `strategy.trade_in.is_some()`.
+
+---
+
+## Section E — `src/indices/` (new module)
+
+### `src/indices/mod.rs`
+
+```rust
+pub mod registry;
+pub mod refresh;
+
+pub use registry::{IndexRegistry, IndexInfo};
+pub use refresh::{refresh_index, refresh_all_if_stale};
+```
+
+### `src/indices/registry.rs`
+
+```rust
+use std::collections::HashMap;
+use std::path::Path;
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use crate::strategy::dsl::ast::IndexAlias;
+
+/// On-disk JSON format for a cached index constituent list.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IndexCacheFile {
+    pub alias: String,
+    pub last_updated: String, // ISO-8601 date, "never" if unknown
+    pub symbols: Vec<String>,
+}
+
+/// Wire type returned to the frontend via IPC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexInfo {
+    pub alias: String,        // e.g. "NIFTY_50"
+    pub display_name: String, // e.g. "NIFTY 50"
+    pub symbol_count: usize,
+    pub last_updated: String, // ISO date or "never"
+}
+
+struct IndexEntry {
+    symbols: Vec<String>,
+    last_updated: String,
+}
+
+pub struct IndexRegistry {
+    data: RwLock<HashMap<IndexAlias, IndexEntry>>,
+}
+
+impl IndexRegistry {
+    pub fn new() -> Self {
+        Self { data: RwLock::new(HashMap::new()) }
+    }
+
+    /// Load index constituent files from `cache_dir` (user's app data).
+    /// Falls back to `resource_dir` (bundled seed) for any file not found in cache.
+    /// Logs to stderr for any index that fails to load from both locations.
+    pub fn load_from_dirs(&self, cache_dir: &Path, resource_dir: &Path) {
+        let mut data = self.data.write();
+        for alias in IndexAlias::all() {
+            let filename = format!("{}.json", alias.cache_stem());
+            let cache_path = cache_dir.join(&filename);
+            let resource_path = resource_dir.join(&filename);
+
+            let loaded = Self::try_load_file(&cache_path)
+                .or_else(|| Self::try_load_file(&resource_path));
+
+            match loaded {
+                Some(file) => {
+                    data.insert(alias.clone(), IndexEntry {
+                        symbols: file.symbols,
+                        last_updated: file.last_updated,
+                    });
+                }
+                None => {
+                    eprintln!(
+                        "[IndexRegistry] no data for {} (tried {} and {})",
+                        alias.display_name(),
+                        cache_path.display(),
+                        resource_path.display()
+                    );
+                    // Insert empty entry so the key always exists
+                    data.insert(alias.clone(), IndexEntry {
+                        symbols: vec![],
+                        last_updated: "never".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn try_load_file(path: &Path) -> Option<IndexCacheFile> {
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    /// Returns the constituent symbol list for an alias. Empty vec if not loaded.
+    pub fn get_symbols(&self, alias: &IndexAlias) -> Vec<String> {
+        self.data.read()
+            .get(alias)
+            .map(|e| e.symbols.clone())
+            .unwrap_or_default()
+    }
+
+    /// Update an alias entry after a successful refresh.
+    pub fn update(&self, alias: IndexAlias, symbols: Vec<String>, last_updated: String) {
+        self.data.write().insert(alias, IndexEntry { symbols, last_updated });
+    }
+
+    /// List info for all 22 indices (for IPC / UI display).
+    pub fn list_info(&self) -> Vec<IndexInfo> {
+        let data = self.data.read();
+        IndexAlias::all().iter().map(|alias| {
+            let entry = data.get(alias);
+            IndexInfo {
+                alias: alias.dsl_keyword().to_string(),
+                display_name: alias.display_name().to_string(),
+                symbol_count: entry.map(|e| e.symbols.len()).unwrap_or(0),
+                last_updated: entry.map(|e| e.last_updated.clone()).unwrap_or_else(|| "never".to_string()),
+            }
+        }).collect()
+    }
+}
+
+impl Default for IndexRegistry {
+    fn default() -> Self { Self::new() }
+}
+```
+
+### `src/indices/refresh.rs`
+
+```rust
+use std::path::Path;
+use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use crate::strategy::dsl::ast::IndexAlias;
+use super::registry::{IndexRegistry, IndexCacheFile};
+
+const BASE_URL: &str = "https://www.niftyindices.com/IndexConstituent/";
+
+#[derive(Debug)]
+pub struct RefreshOutcome {
+    pub alias: String,
+    pub success: bool,
+    pub symbol_count: usize,
+    pub error: Option<String>,
+}
+
+/// Fetch a single index from niftyindices.com, parse it, write the JSON cache,
+/// and update the registry. Returns the outcome.
+pub async fn refresh_index(
+    alias: &IndexAlias,
+    cache_dir: &Path,
+    registry: &IndexRegistry,
+) -> RefreshOutcome {
+    let url = format!("{}{}", BASE_URL, alias.csv_filename());
+    let alias_str = alias.dsl_keyword().to_string();
+
+    match fetch_and_parse(&url).await {
+        Ok(symbols) => {
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let cache_file = IndexCacheFile {
+                alias: alias_str.clone(),
+                last_updated: today.clone(),
+                symbols: symbols.clone(),
+            };
+            let out_path = cache_dir.join(format!("{}.json", alias.cache_stem()));
+            if let Err(e) = std::fs::create_dir_all(cache_dir) {
+                eprintln!("[refresh_index] could not create cache dir: {}", e);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(&cache_file) {
+                if let Err(e) = std::fs::write(&out_path, json) {
+                    eprintln!("[refresh_index] could not write cache for {}: {}", alias_str, e);
+                }
+            }
+            registry.update(alias.clone(), symbols.clone(), today);
+            let count = symbols.len();
+            eprintln!("[refresh_index] {} → {} symbols", alias_str, count);
+            RefreshOutcome { alias: alias_str, success: true, symbol_count: count, error: None }
+        }
+        Err(e) => {
+            eprintln!("[refresh_index] failed for {}: {}", alias_str, e);
+            RefreshOutcome { alias: alias_str, success: false, symbol_count: 0, error: Some(e) }
+        }
+    }
+}
+
+async fn fetch_and_parse(url: &str) -> Result<Vec<String>, String> {
+    let response = reqwest::Client::builder()
+        .user_agent("AlgoMLN/1.0")
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    // Strip UTF-8 BOM if present
+    let text = text.trim_start_matches('\u{feff}');
+
+    let mut rdr = csv::Reader::from_reader(text.as_bytes());
+    let headers = rdr.headers().map_err(|e| e.to_string())?.clone();
+
+    // Find the "Symbol" column index (niftyindices CSVs use this exact header)
+    let symbol_col = headers.iter().position(|h| h.trim() == "Symbol")
+        .ok_or("CSV has no 'Symbol' column")?;
+
+    let symbols: Vec<String> = rdr.records()
+        .filter_map(|r| r.ok())
+        .filter_map(|r| r.get(symbol_col).map(|s| s.trim().to_uppercase()))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if symbols.is_empty() {
+        return Err("CSV parsed but contained no symbols".to_string());
+    }
+    Ok(symbols)
+}
+
+/// Check if `path` is older than `threshold` (or missing). Returns true if refresh is needed.
+pub fn is_stale(path: &Path, threshold: Duration) -> bool {
+    path.metadata()
+        .and_then(|m| m.modified())
+        .map(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or(Duration::MAX)
+                > threshold
+        })
+        .unwrap_or(true)
+}
+
+/// Refresh all 22 indices if the oldest cache file is stale (> threshold).
+/// Called in background on startup. Non-fatal: failures logged to stderr.
+pub async fn refresh_all_if_stale(
+    registry: Arc<IndexRegistry>,
+    cache_dir: std::path::PathBuf,
+    threshold: Duration,
+) -> Vec<RefreshOutcome> {
+    // Check staleness by looking at the nifty_50.json cache file as a proxy
+    let proxy = cache_dir.join("nifty_50.json");
+    if !is_stale(&proxy, threshold) {
+        return vec![]; // fresh enough, skip
+    }
+
+    eprintln!("[refresh_all_if_stale] indices are stale, refreshing all…");
+    let mut outcomes = vec![];
+    for alias in IndexAlias::all() {
+        let outcome = refresh_index(alias, &cache_dir, &registry).await;
+        outcomes.push(outcome);
+        // Small delay between requests to be polite to niftyindices.com
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    outcomes
+}
+```
+
+---
+
+## Section F — `src/broker/symbol_map.rs` (new file)
+
+```rust
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::Duration;
+use serde::Deserialize;
+
+const DHAN_SCRIP_MASTER_URL: &str =
+    "https://images.dhan.co/api-data/api-scrip-master-detailed.csv";
+
+/// Maps NSE equity trading symbols to Dhan security IDs.
+/// Loaded once at startup; shared via Arc.
+pub struct SymbolMap {
+    /// key: uppercase NSE symbol, value: Dhan SECURITY_ID
+    map: HashMap<String, u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScripRow {
+    #[serde(rename = "EXCH_ID")]
+    exch_id: String,
+    #[serde(rename = "SEGMENT")]
+    segment: String,
+    /// Primary: present in detailed CSV for equities
+    #[serde(rename = "SYMBOL_NAME", default)]
+    symbol_name: Option<String>,
+    /// Fallback: used for derivative underlying, but present for equities in some CSV versions
+    #[serde(rename = "UNDERLYING_SYMBOL", default)]
+    underlying_symbol: Option<String>,
+    #[serde(rename = "SECURITY_ID")]
+    security_id: Option<u32>,
+}
+
+impl SymbolMap {
+    /// Load from a CSV file (either seed or cache). Returns an error if the file
+    /// is missing or unparseable. Does NOT fall back — callers handle fallback.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+        // Strip BOM
+        let text = text.trim_start_matches('\u{feff}');
+        Self::parse_csv(text)
+    }
+
+    fn parse_csv(text: &str) -> Result<Self, String> {
+        let mut rdr = csv::Reader::from_reader(text.as_bytes());
+        let mut map: HashMap<String, u32> = HashMap::new();
+        let mut duplicates = 0usize;
+
+        for result in rdr.deserialize::<ScripRow>() {
+            let row = match result {
+                Ok(r) => r,
+                Err(_) => continue, // skip unparseable rows silently
+            };
+
+            // Filter: NSE equities only
+            if row.exch_id.trim() != "NSE" || row.segment.trim() != "E" {
+                continue;
+            }
+
+            let sec_id = match row.security_id {
+                Some(id) => id,
+                None => continue,
+            };
+
+            // Prefer SYMBOL_NAME, fall back to UNDERLYING_SYMBOL
+            let symbol = row.symbol_name
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| row.underlying_symbol.as_deref().filter(|s| !s.trim().is_empty()));
+
+            if let Some(sym) = symbol {
+                let key = sym.trim().to_uppercase();
+                if map.contains_key(&key) {
+                    duplicates += 1;
+                    // Take first occurrence (matches behaviour of user's Python script)
+                } else {
+                    map.insert(key, sec_id);
+                }
+            }
+        }
+
+        if duplicates > 0 {
+            eprintln!("[SymbolMap] {} duplicate symbols ignored (first-wins)", duplicates);
+        }
+        eprintln!("[SymbolMap] loaded {} NSE equity symbols", map.len());
+        Ok(Self { map })
+    }
+
+    /// Look up a security ID for a symbol. Case-insensitive.
+    pub fn get(&self, symbol: &str) -> Option<u32> {
+        self.map.get(&symbol.trim().to_uppercase()).copied()
+    }
+
+    /// Batch lookup. Returns (found: Vec<(symbol, security_id)>, missing: Vec<symbol>).
+    pub fn resolve_many(&self, symbols: &[String]) -> (Vec<(String, u32)>, Vec<String>) {
+        let mut found = Vec::with_capacity(symbols.len());
+        let mut missing = Vec::new();
+        for sym in symbols {
+            match self.get(sym) {
+                Some(id) => found.push((sym.clone(), id)),
+                None => missing.push(sym.clone()),
+            }
+        }
+        (found, missing)
+    }
+
+    pub fn len(&self) -> usize { self.map.len() }
+    pub fn is_empty(&self) -> bool { self.map.is_empty() }
+}
+
+/// Download the Dhan scrip master CSV, write to `cache_path`, return a loaded SymbolMap.
+/// On any failure, returns Err — callers fall back to the seed file.
+pub async fn refresh_symbol_map(cache_path: &Path) -> Result<SymbolMap, String> {
+    eprintln!("[SymbolMap] downloading scrip master from Dhan…");
+    let response = reqwest::Client::builder()
+        .user_agent("AlgoMLN/1.0")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(DHAN_SCRIP_MASTER_URL)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Dhan scrip master returned HTTP {}", response.status()));
+    }
+
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    // Atomic write via temp file
+    let tmp = cache_path.with_extension("tmp");
+    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, cache_path).map_err(|e| e.to_string())?;
+
+    let text = String::from_utf8_lossy(&bytes);
+    let text = text.trim_start_matches('\u{feff}');
+    let map = SymbolMap::parse_csv(text)?;
+    eprintln!("[SymbolMap] refreshed: {} symbols", map.len());
+    Ok(map)
+}
+```
+
+---
+
+## Section G — `src/commands/state.rs`
+
+Add `index_registry` and `symbol_map` to `AppState`. Import the new types:
+
+```rust
+use std::sync::Arc;
+use crate::indices::IndexRegistry;
+use crate::broker::symbol_map::SymbolMap;
+
+pub struct AppState {
+    pub data: DataState,
+    pub registry: Arc<StrategyRegistry>,
+    pub plugins: Arc<PluginRegistry>,
+    pub index_registry: Arc<IndexRegistry>,   // NEW
+    pub symbol_map: Arc<parking_lot::RwLock<SymbolMap>>,  // NEW — RwLock for hot-refresh
+}
+```
+
+`SymbolMap` is behind an `RwLock` so `refresh_symbol_map` can swap it in without restarting the app.
+
+---
+
+## Section H — `src/lib.rs`
+
+Add module declarations:
+
+```rust
+pub mod indices;
+```
+
+Add to the `broker` module (or `src/broker/mod.rs`):
+
+```rust
+pub mod symbol_map;
+```
+
+---
+
+## Section I — `scripts/fetch_seed_indices.py` (new file, repo root)
+
+Create this Python script. It requires only Python stdlib (no pip dependencies). The developer runs it once from the repo root to populate `src-tauri/resources/indices/`. Add instructions to `README.md` that this must be run before the first build.
+
+```python
+#!/usr/bin/env python3
+"""
+Fetch seed index constituent data from niftyindices.com.
+Run once from repo root:  python scripts/fetch_seed_indices.py
+Outputs JSON to: src-tauri/resources/indices/
+Requires: Python 3.8+, no external dependencies.
+"""
+
+import csv
+import io
+import json
+import urllib.request
+from datetime import date
+from pathlib import Path
+
+INDICES = [
+    ("NIFTY_50",                "nifty_50",                "ind_nifty50list.csv"),
+    ("NIFTY_NEXT_50",           "nifty_next_50",           "ind_niftynext50list.csv"),
+    ("NIFTY_100",               "nifty_100",               "ind_nifty100list.csv"),
+    ("NIFTY_200",               "nifty_200",               "ind_nifty200list.csv"),
+    ("NIFTY_500",               "nifty_500",               "ind_nifty500list.csv"),
+    ("NIFTY_MIDCAP_50",         "nifty_midcap_50",         "ind_niftymidcap50list.csv"),
+    ("NIFTY_MIDCAP_100",        "nifty_midcap_100",        "ind_niftymidcap100list.csv"),
+    ("NIFTY_MIDCAP_150",        "nifty_midcap_150",        "ind_niftymidcap150list.csv"),
+    ("NIFTY_SMALLCAP_50",       "nifty_smallcap_50",       "ind_niftysmallcap50list.csv"),
+    ("NIFTY_SMALLCAP_100",      "nifty_smallcap_100",      "ind_niftysmallcap100list.csv"),
+    ("NIFTY_SMALLCAP_250",      "nifty_smallcap_250",      "ind_niftysmallcap250list.csv"),
+    ("NIFTY_BANK",              "nifty_bank",              "ind_niftybanklist.csv"),
+    ("NIFTY_IT",                "nifty_it",                "ind_niftyitlist.csv"),
+    ("NIFTY_PHARMA",            "nifty_pharma",            "ind_niftypharmaList.csv"),
+    ("NIFTY_AUTO",              "nifty_auto",              "ind_niftyautolist.csv"),
+    ("NIFTY_FMCG",              "nifty_fmcg",              "ind_niftyfmcglist.csv"),
+    ("NIFTY_METAL",             "nifty_metal",             "ind_niftymetallist.csv"),
+    ("NIFTY_REALTY",            "nifty_realty",            "ind_niftyrealtylist.csv"),
+    ("NIFTY_ENERGY",            "nifty_energy",            "ind_niftyenergylist.csv"),
+    ("NIFTY_INFRA",             "nifty_infra",             "ind_niftyinfraList.csv"),
+    ("NIFTY_PSU_BANK",          "nifty_psu_bank",          "ind_niftypsubanklist.csv"),
+    ("NIFTY_FINANCIAL_SERVICES","nifty_financial_services","ind_niftyfinancialserviceslist.csv"),
+]
+
+BASE_URL = "https://www.niftyindices.com/IndexConstituent/"
+OUTPUT_DIR = Path("src-tauri/resources/indices")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+TODAY = date.today().isoformat()
+HEADERS = {"User-Agent": "Mozilla/5.0 (AlgoMLN seed fetcher)"}
+
+def fetch(alias, stem, filename):
+    url = BASE_URL + filename
+    try:
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8-sig")  # strip BOM
+        reader = csv.DictReader(io.StringIO(raw))
+        symbols = [
+            row["Symbol"].strip().upper()
+            for row in reader
+            if row.get("Symbol", "").strip()
+        ]
+        if not symbols:
+            raise ValueError("no symbols found in CSV")
+        data = {"alias": alias, "last_updated": TODAY, "symbols": symbols}
+        (OUTPUT_DIR / f"{stem}.json").write_text(json.dumps(data, indent=2))
+        print(f"  ✓  {alias:<30} {len(symbols):>4} symbols")
+        return True
+    except Exception as e:
+        print(f"  ✗  {alias:<30} FAILED: {e}")
+        # Write empty placeholder so the file exists and Rust doesn't error
+        data = {"alias": alias, "last_updated": "never", "symbols": []}
+        (OUTPUT_DIR / f"{stem}.json").write_text(json.dumps(data, indent=2))
+        return False
+
+print(f"Fetching {len(INDICES)} indices from niftyindices.com…\n")
+ok = sum(fetch(*row) for row in INDICES)
+print(f"\n{ok}/{len(INDICES)} indices fetched successfully.")
+print(f"Output: {OUTPUT_DIR.resolve()}")
+if ok < len(INDICES):
+    print("WARNING: Some indices failed. The app will show 0 symbols for those until")
+    print("the user clicks 'Refresh Indices' in Settings while connected to the internet.")
+```
+
+---
+
+## Section J — `src-tauri/tauri.conf.json`
+
+Add the resources entry so bundled seed JSON files are included in the app bundle:
+
+```json
+"bundle": {
+  "resources": [
+    "resources/indices/*"
+  ]
+}
+```
+
+If a `resources` key already exists, append `"resources/indices/*"` to the array.
+
+---
+
+## Section K — Cargo.toml additions
+
+Add to `[dependencies]` if not already present:
+
+```toml
+csv      = "1"
+reqwest  = { version = "0.12", features = ["json"] }
+chrono   = { version = "0.4", features = ["serde"] }
+```
+
+If `reqwest` is already present (likely, for Dhan REST calls), ensure the `features` include `"json"`. Add `csv` and `chrono` if missing.
+
+---
+
+## Section L — Unit tests
+
+Add to `src/indices/registry.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::strategy::dsl::ast::IndexAlias;
+
+    #[test]
+    fn all_aliases_have_csv_filename() {
+        for alias in IndexAlias::all() {
+            assert!(!alias.csv_filename().is_empty());
+            assert!(!alias.cache_stem().is_empty());
+            assert!(!alias.dsl_keyword().is_empty());
+        }
+    }
+
+    #[test]
+    fn from_dsl_str_roundtrip() {
+        for alias in IndexAlias::all() {
+            let kw = alias.dsl_keyword();
+            let parsed = IndexAlias::from_dsl_str(kw);
+            assert_eq!(parsed.as_ref(), Some(alias), "roundtrip failed for {}", kw);
+        }
+    }
+}
+```
+
+Add to `src/broker/symbol_map.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_minimal_csv() {
+        let csv = "EXCH_ID,SEGMENT,SYMBOL_NAME,SECURITY_ID\nNSE,E,RELIANCE,2885\nNSE,D,NIFTY,0\nBSE,E,RELIANCE,500325\n";
+        let map = SymbolMap::parse_csv(csv).unwrap();
+        assert_eq!(map.get("RELIANCE"), Some(2885));
+        assert_eq!(map.get("reliance"), Some(2885)); // case-insensitive
+        assert_eq!(map.get("NIFTY"), None);   // derivative filtered out
+        assert_eq!(map.len(), 1);
+    }
+}
+```
+
+---
+
+## MD doc updates (do last, after all code is written)
+
+Update **`ARCHITECTURE.md`**:
+- Add `src/indices/` to the repository layout with registry + refresh.
+- Add `src/broker/symbol_map.rs` to the broker section.
+- Add lookup table rows for "Index registry" and "Symbol map".
+- Add `src-tauri/resources/indices/` as a new resource directory.
+
+Update **`BACKEND.md`**:
+- Add a "Index Registry" section describing `IndexRegistry`, `refresh_all_if_stale`, staleness check.
+- Add a "Symbol Map" section describing `SymbolMap`, the Dhan scrip master URL, seed/cache fallback.
+
+Update **`CLAUDE.md`**:
+- Under "Critical Architecture Invariants", add invariant **10**: "Index data is read-only at runtime. `IndexRegistry::update` is the only mutator; it is called only by `refresh_index`. Strategy engines read constituents once at deploy time and do not re-read mid-run. If constituents change (quarterly rebalance), re-deploy the strategy."
+- Under "Common Commands", add `python scripts/fetch_seed_indices.py` with a note that it must be run once before first build.
+
+---

@@ -41,6 +41,14 @@ npm run build          # type-check + production frontend build
 
 There is no separate linter step — `npm run build` runs `tsc` and acts as the de-facto type check.
 
+### First-time setup
+
+```powershell
+python scripts/fetch_seed_indices.py   # populates src-tauri/resources/indices/*.json (stdlib only)
+```
+
+Run this once from the repo root before the first `npm run tauri dev` so the bundled index seed files are present. The Rust app also tolerates a missing seed (each alias falls back to an empty list and the user can refresh in Settings).
+
 ## Critical Architecture Invariants
 
 Don't break these — they are non-obvious properties the codebase is built around.
@@ -64,6 +72,8 @@ Don't break these — they are non-obvious properties the codebase is built arou
 **8. Engine event-bus gating.** `StrategyEngine` carries an `event_bus: Option<Arc<EventBus>>` (default `None`) and publishes three event kinds from `on_candle` only when the bus is `Some`: `RuleFired` after `TriggerStateMap::should_fire` returns `true` (rule-eval pass), `TradeExecuted` immediately after a successful `execution_target.execute` (paper broker recovered via `as_any` downcast on `ExecutionTarget`), and `CandleProcessed` after the cross-update pass. No event is published from the cross-update or indicator-advance passes themselves. **Backtests deliberately leave `event_bus` as `None`** (see `commands::strategy::run_backtest_internal`) so plugin callbacks never run during replay — determinism is preserved. The Tauri binary owns the live bus and assigns it to the engine only for paper/live runs (stage 9 hook in `src-tauri/src/main.rs`).
 
 **9. Tauri plugin wiring.** `AppState` is defined in `src/commands/state.rs` (re-exported as `commands::AppState`) and carried by `tauri::Manager` so `State<'_, AppState>` works in every command. The Tauri binary's `setup` closure builds the plugin's shared infrastructure once — registries, event bus, scheduler, broker wrappers, noop execution — and wires them into a single `HostFactory` closure. `PluginRegistry::scan_and_load` runs at startup via `tauri::async_runtime::block_on` (Tauri 2's `setup` is sync). `TauriUiApi` messages are forwarded to the Tauri event bus as `"plugin-ui-message"` via a `tokio::spawn`'d forwarder; the React app subscribes once and dispatches on the `UiMessage` variant. `#[tauri::command]` wrappers for plugin commands live in `src-tauri/src/main.rs` (not the library) because the macro generates module-private artifacts that `tauri::generate_handler!` must resolve in the same scope. The four plugin commands are `list_plugins` / `enable_plugin` / `disable_plugin` / `reload_plugins`. `PluginRegistry::enable` / `disable` / `unload` swap the real plugin out of the entry under the write lock before awaiting the lifecycle callback (parking_lot guards are `!Send`, so holding one across `.await` would break Tauri's command dispatcher and risk deadlock if a plugin re-enters the registry).
+
+**10. Index data is read-only at runtime.** `IndexRegistry::update` is the only mutator; it is called only by `refresh_index` (and `load_from_dirs` at startup). Strategy engines read constituents once at deploy time and do not re-read mid-run. If constituents change (quarterly rebalance), re-deploy the strategy.
 
 ## Test Layout
 

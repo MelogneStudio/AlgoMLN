@@ -1,4 +1,5 @@
 pub mod dhan;
+pub mod symbol_map;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

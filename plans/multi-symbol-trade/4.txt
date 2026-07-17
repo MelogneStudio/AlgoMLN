@@ -1,0 +1,147 @@
+---
+
+# PROMPT 4 — Frontend: Settings Card + Deploy Modal + DSL Hint
+
+## Context
+
+Prompts 1–3 are complete. `listIndices()`, `refreshIndices()`, `IndexInfo`, and `RefreshResult` exist in `src/types/tauri.ts`. The existing Settings screen is at `src/screens/Settings/SettingsScreen.tsx`. No new screens are needed.
+
+## Output rules
+
+- Code only. No explanations. No preamble.
+- Follow AlgoMLN styling conventions strictly: CSS Modules, no Tailwind, no inline styles, no external UI libraries. Use `--algomln-*` CSS custom properties (or whatever the existing token names are — check `SettingsScreen.module.css`). Match the visual language of existing cards on the Settings screen exactly.
+- Do not ask questions. Output every file in full.
+
+---
+
+## Section A — `src/screens/Settings/SettingsScreen.tsx` — add Index Data card
+
+Add a new card section after the existing "Default Backtest Capital" card and before the "About" card. The card must use the **exact same card structure** as existing Settings cards — no new layout primitives.
+
+The card content:
+
+1. **Header**: "Index Data" title + subtitle "22 NSE indices · auto-updated quarterly".
+2. **Status grid**: For each of the 22 indices (loaded via `listIndices()` IPC on mount, same pattern as `listStrategies` on the Strategies screen), show:
+   - Index display name
+   - Symbol count (or "–" if 0)
+   - Last updated date (or "never")
+3. **Refresh button**: `Button` component with `variant="ghost"`. Label: "Refresh Now". Disabled while `isRefreshing`. On click: call `refreshIndices()`, await result, update state. Show a brief inline success/error message below the button.
+
+State:
+```tsx
+const [indices, setIndices] = useState<IndexInfo[]>([]);
+const [isRefreshing, setIsRefreshing] = useState(false);
+const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
+
+useEffect(() => {
+  listIndices().then(setIndices);
+}, []);
+
+const handleRefresh = async () => {
+  setIsRefreshing(true);
+  setRefreshMsg(null);
+  try {
+    const result = await refreshIndices();
+    const ok = result.refreshed.length;
+    const fail = result.failed.length;
+    setRefreshMsg(
+      fail === 0
+        ? `All ${ok} indices refreshed.`
+        : `${ok} refreshed, ${fail} failed.`
+    );
+    // Reload the updated index list
+    listIndices().then(setIndices);
+  } catch (e) {
+    setRefreshMsg('Refresh failed — check network connection.');
+  } finally {
+    setIsRefreshing(false);
+  }
+};
+```
+
+The status grid should be scrollable if 22 rows overflow the card's allocated height. Use `overflow-y: auto` with a `max-height` matching the existing card body style in the Settings screen.
+
+---
+
+## Section B — `src/screens/StrategyCoder/StrategyCoderScreen.tsx` — TRADE_IN syntax hint
+
+In the `StrategyCoderScreen`, the textarea already has a placeholder or help text. Add a small static comment block at the top of the placeholder text (or in a hint area if one exists) that shows the `TRADE_IN` syntax. If the coder shows a "syntax reference" or "help" aside, add there instead.
+
+The hint text (as a comment block that appears in the editor or alongside it):
+
+```
+# TRADE_IN syntax (optional — place before first WHEN):
+#
+#   TRADE_IN NIFTY_50          — all 50 large-cap constituents
+#   TRADE_IN NIFTY_BANK        — banking sector
+#   TRADE_IN RELIANCE, INFY    — explicit symbol list
+#
+# Supported indices:
+#   NIFTY_50  NIFTY_NEXT_50  NIFTY_100  NIFTY_200  NIFTY_500
+#   NIFTY_MIDCAP_50  NIFTY_MIDCAP_100  NIFTY_MIDCAP_150
+#   NIFTY_SMALLCAP_50  NIFTY_SMALLCAP_100  NIFTY_SMALLCAP_250
+#   NIFTY_BANK  NIFTY_IT  NIFTY_PHARMA  NIFTY_AUTO  NIFTY_FMCG
+#   NIFTY_METAL  NIFTY_REALTY  NIFTY_ENERGY  NIFTY_INFRA
+#   NIFTY_PSU_BANK  NIFTY_FINANCIAL_SERVICES
+#
+# Multi-symbol strategies: paper/live only (backtest not yet supported).
+```
+
+If the coder shows a header bar with the strategy name and mode, add a small pill/chip below the name showing "TRADE_IN: NIFTY_50 (50 symbols)" when the parsed DSL contains a `TRADE_IN` clause. To detect this: scan the DSL source string for a line starting with `TRADE_IN` (case-insensitive) using a simple regex — no full DSL parse on the frontend.
+
+```tsx
+const tradeInMatch = dslSource.match(/^\s*TRADE_IN\s+(.+)$/im);
+const tradeInLabel = tradeInMatch ? tradeInMatch[1].trim() : null;
+```
+
+If `tradeInLabel` is non-null, render:
+```tsx
+{tradeInLabel && (
+  <span className={styles.tradeInChip}>
+    TRADE_IN: {tradeInLabel}
+  </span>
+)}
+```
+
+Style `.tradeInChip` in `StrategyCoderScreen.module.css` to match the mode chips on `StrategyCard` — a small rounded badge with `background: var(--algomln-accent-dim)` (or equivalent muted accent).
+
+---
+
+## Section C — `src/App.tsx` — no changes needed
+
+The deploy flow (`deployStrategy(dsl, name, mode)`) already passes the raw DSL to the Rust side. Since `TRADE_IN` is now part of the DSL, it is stored and used automatically. No changes to `App.tsx` are needed for this prompt.
+
+---
+
+## MD doc updates
+
+Update **`FRONTEND.md`**:
+- In the Settings screen section: describe the "Index Data" card, what it shows, and the Refresh button.
+- In the IPC hook pattern section: mention `listIndices` and `refreshIndices` as the two new IPC calls from the Settings screen.
+- Add a note under "The screens → StrategyCoder" that a `TRADE_IN` chip is shown when the DSL contains that clause.
+
+Update **`ARCHITECTURE.md`** Frontend lookup table:
+- Add row: "Index Data card (Settings) | `src/screens/Settings/SettingsScreen.tsx`".
+
+---
+
+# Post-implementation checklist (run after all 4 prompts)
+
+```powershell
+# 1. Generate seed index data (run once, requires internet)
+python scripts/fetch_seed_indices.py
+
+# 2. Full Rust test suite — must pass
+cargo test --workspace
+
+# 3. Type-check frontend
+npm run build
+
+# 4. Smoke test in Tauri dev
+npm run tauri dev
+# Open Settings → Index Data → verify 22 indices shown
+# Open Strategy Coder → type "TRADE_IN NIFTY_BANK" → verify chip appears
+# Run backtest on a TRADE_IN strategy → verify error message returned
+```
+
+If `cargo test --workspace` shows failures in `src/strategy/dsl/` tests after Prompt 1, the parser likely has a structural mismatch with how `StrategyNode` is constructed elsewhere. Fix those call sites before proceeding to Prompt 2.

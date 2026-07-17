@@ -1,0 +1,284 @@
+---
+
+# PROMPT 3 — Tauri IPC Commands + Startup Wiring
+
+## Context
+
+Prompts 1 and 2 are complete. `IndexRegistry`, `SymbolMap`, `PortfolioEngine`, `resolve_trade_in_symbols` all exist. `AppState` carries `Arc<IndexRegistry>` and `Arc<RwLock<SymbolMap>>`. Do not re-implement anything from previous prompts.
+
+## Output rules
+
+- Code only. No explanations. No preamble.
+- Do not ask questions. Output every file in full (for modified files, output the complete new file).
+- Follow existing `commands/` patterns: plain async fns in the library, thin `#[tauri::command]` wrappers in `main.rs`.
+
+---
+
+## Section A — `src/commands/indices.rs` (new file)
+
+```rust
+use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
+use crate::commands::state::AppState;
+use crate::indices::{IndexRegistry, IndexInfo, refresh_index, refresh_all_if_stale};
+use crate::broker::symbol_map::{SymbolMap, refresh_symbol_map};
+use crate::strategy::dsl::ast::{IndexAlias, TradeIn};
+
+/// Returned by `refresh_indices` IPC command.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RefreshResult {
+    /// Alias names that were successfully refreshed.
+    pub refreshed: Vec<String>,
+    /// (alias, error_message) pairs for failures.
+    pub failed: Vec<(String, String)>,
+    /// Whether the Dhan symbol map was also refreshed.
+    pub symbol_map_updated: bool,
+    /// New total symbol count in the map after refresh (0 if unchanged).
+    pub symbol_map_count: usize,
+}
+
+/// Return metadata for all 22 indices (alias, display name, count, last updated).
+/// This is a synchronous read — no I/O.
+pub fn list_indices(state: &AppState) -> Vec<IndexInfo> {
+    state.index_registry.list_info()
+}
+
+/// Return the constituent symbol list for a named index alias (e.g. "NIFTY_50").
+/// Returns Err if the alias is unrecognised.
+pub fn get_index_symbols(state: &AppState, alias: String) -> Result<Vec<String>, String> {
+    let parsed = IndexAlias::from_dsl_str(&alias)
+        .ok_or_else(|| format!("unknown index alias '{}'", alias))?;
+    Ok(state.index_registry.get_symbols(&parsed))
+}
+
+/// Refresh all 22 indices from niftyindices.com AND the Dhan scrip master.
+/// Writes updated JSON/CSV to app data cache. Non-fatal: errors are reported in the result.
+pub async fn refresh_indices(
+    app: &AppHandle,
+    state: &AppState,
+) -> RefreshResult {
+    let cache_dir = app
+        .path()
+        .app_data_dir()
+        .expect("app_data_dir unavailable");
+
+    let indices_cache = cache_dir.join("indices");
+    let _ = std::fs::create_dir_all(&indices_cache);
+
+    let registry = Arc::clone(&state.index_registry);
+
+    // Refresh all indices
+    let mut refreshed = vec![];
+    let mut failed = vec![];
+    for alias in IndexAlias::all() {
+        let outcome = refresh_index(alias, &indices_cache, &registry).await;
+        if outcome.success {
+            refreshed.push(outcome.alias);
+        } else {
+            failed.push((outcome.alias, outcome.error.unwrap_or_default()));
+        }
+        // Polite delay between requests
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    // Refresh symbol map
+    let sym_cache = cache_dir.join("sec_id_cache.csv");
+    let (symbol_map_updated, symbol_map_count) = match refresh_symbol_map(&sym_cache).await {
+        Ok(new_map) => {
+            let count = new_map.len();
+            *state.symbol_map.write() = new_map;
+            (true, count)
+        }
+        Err(e) => {
+            eprintln!("[refresh_indices] symbol map refresh failed: {}", e);
+            (false, 0)
+        }
+    };
+
+    RefreshResult { refreshed, failed, symbol_map_updated, symbol_map_count }
+}
+```
+
+Add to `src/commands/mod.rs`:
+
+```rust
+pub mod indices;
+```
+
+---
+
+## Section B — `src-tauri/src/main.rs` — additions
+
+### B1: New `#[tauri::command]` wrappers
+
+Add these next to the existing plugin command wrappers:
+
+```rust
+#[tauri::command]
+fn list_indices(state: tauri::State<'_, commands::AppState>) -> Vec<commands::indices::IndexInfo> {
+    commands::indices::list_indices(&state)
+}
+
+#[tauri::command]
+fn get_index_symbols(
+    state: tauri::State<'_, commands::AppState>,
+    alias: String,
+) -> Result<Vec<String>, String> {
+    commands::indices::get_index_symbols(&state, alias)
+}
+
+#[tauri::command]
+async fn refresh_indices(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, commands::AppState>,
+) -> Result<commands::indices::RefreshResult, String> {
+    Ok(commands::indices::refresh_indices(&app, &state).await)
+}
+```
+
+### B2: Register commands
+
+Add to `tauri::generate_handler![]`:
+
+```rust
+list_indices,
+get_index_symbols,
+refresh_indices,
+```
+
+### B3: Startup wiring in `setup` closure
+
+Inside the `setup` closure (after `AppState` is constructed and managed), add:
+
+```rust
+// ── Index Registry ────────────────────────────────────────────────────────
+let indices_resource_dir = app.path().resource_dir()
+    .expect("resource_dir unavailable")
+    .join("resources/indices");
+let indices_cache_dir = app.path().app_data_dir()
+    .expect("app_data_dir unavailable")
+    .join("indices");
+let _ = std::fs::create_dir_all(&indices_cache_dir);
+
+let index_registry = Arc::new(crate::indices::IndexRegistry::new());
+index_registry.load_from_dirs(&indices_cache_dir, &indices_resource_dir);
+
+// ── Symbol Map ────────────────────────────────────────────────────────────
+let app_data_dir = app.path().app_data_dir().expect("app_data_dir unavailable");
+let sym_cache_path = app_data_dir.join("sec_id_cache.csv");
+// Seed path (bundled with app)
+let sym_seed_path = app.path().resource_dir()
+    .expect("resource_dir unavailable")
+    .join("sample-data/sec_id.csv");
+
+let symbol_map = if sym_cache_path.exists() {
+    crate::broker::symbol_map::SymbolMap::load(&sym_cache_path)
+        .unwrap_or_else(|e| {
+            eprintln!("[startup] cache symbol map failed ({}), falling back to seed", e);
+            crate::broker::symbol_map::SymbolMap::load(&sym_seed_path)
+                .expect("seed sec_id.csv missing — add sample-data/sec_id.csv")
+        })
+} else {
+    crate::broker::symbol_map::SymbolMap::load(&sym_seed_path)
+        .expect("seed sec_id.csv missing — add sample-data/sec_id.csv")
+};
+
+// Build AppState (add index_registry and symbol_map to existing fields)
+let app_state = commands::AppState {
+    // ... existing fields (data, registry, plugins) ...
+    index_registry: Arc::clone(&index_registry),
+    symbol_map: Arc::new(parking_lot::RwLock::new(symbol_map)),
+};
+app.manage(app_state);
+
+// ── Background stale-check (90-day for indices, 7-day for symbol map) ────
+let bg_registry = Arc::clone(&index_registry);
+let bg_cache_dir = indices_cache_dir.clone();
+let bg_sym_cache = sym_cache_path.clone();
+let bg_sym_seed = sym_seed_path.clone();
+tauri::async_runtime::spawn(async move {
+    // Indices: stale if oldest cache file > 90 days
+    crate::indices::refresh_all_if_stale(
+        bg_registry,
+        bg_cache_dir,
+        std::time::Duration::from_secs(90 * 24 * 3600),
+    ).await;
+
+    // Symbol map: stale if cache file > 7 days
+    if crate::indices::refresh::is_stale(&bg_sym_cache, std::time::Duration::from_secs(7 * 24 * 3600)) {
+        match crate::broker::symbol_map::refresh_symbol_map(&bg_sym_cache).await {
+            Ok(_) => eprintln!("[startup] symbol map refreshed in background"),
+            Err(e) => eprintln!("[startup] background symbol map refresh failed: {}", e),
+        }
+    }
+});
+```
+
+**Note:** The exact field list for `AppState` construction must match what was established in Prompt 1 Section G. Do not invent new fields. `// ... existing fields ...` means copy whatever was already there.
+
+---
+
+## Section C — `src/types/tauri.ts` — frontend IPC wrappers
+
+Add to the existing `src/types/tauri.ts` file (do not remove existing wrappers):
+
+```typescript
+// ─── Index types ───────────────────────────────────────────────────────────
+
+export interface IndexInfo {
+  alias: string;        // e.g. "NIFTY_50"
+  displayName: string;  // e.g. "NIFTY 50"
+  symbolCount: number;
+  lastUpdated: string;  // ISO date or "never"
+}
+
+export interface RefreshResult {
+  refreshed: string[];
+  failed: [string, string][]; // [alias, error]
+  symbolMapUpdated: boolean;
+  symbolMapCount: number;
+}
+
+// ─── Index IPC wrappers ────────────────────────────────────────────────────
+
+/** List metadata for all 22 supported indices. */
+export async function listIndices(): Promise<IndexInfo[]> {
+  if (!isTauri()) return [];
+  return invoke<IndexInfo[]>('list_indices');
+}
+
+/** Get the constituent symbol list for a named index alias (e.g. "NIFTY_50"). */
+export async function getIndexSymbols(alias: string): Promise<string[]> {
+  if (!isTauri()) return [];
+  return invoke<string[]>('get_index_symbols', { alias });
+}
+
+/**
+ * Refresh all 22 indices from niftyindices.com and the Dhan scrip master.
+ * Long-running (may take 30–60s). Show a loading state in the UI.
+ */
+export async function refreshIndices(): Promise<RefreshResult> {
+  if (!isTauri()) {
+    return { refreshed: [], failed: [], symbolMapUpdated: false, symbolMapCount: 0 };
+  }
+  return invoke<RefreshResult>('refresh_indices');
+}
+```
+
+---
+
+## MD doc updates
+
+Update **`ARCHITECTURE.md`**:
+- Add `src/commands/indices.rs` to the Tauri IPC lookup table.
+- Add new command rows: `list_indices`, `get_index_symbols`, `refresh_indices`.
+
+Update **`BACKEND.md`**:
+- Add a "Tauri commands — indices" subsection listing the three new commands and their return types.
+- Document the startup wiring sequence: load registry → load symbol map → spawn background refresh.
+
+Update **`CLAUDE.md`**:
+- Add to startup sequence (near invariant 9): "After `scan_and_load`, the setup closure also loads `IndexRegistry` from `<app_data>/indices/` (falls back to bundled `resources/indices/`) and `SymbolMap` from `<app_data>/sec_id_cache.csv` (falls back to bundled `sample-data/sec_id.csv`). A background task checks both for staleness (90 days / 7 days) and refreshes silently."
+
+---

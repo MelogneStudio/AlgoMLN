@@ -2,8 +2,8 @@ use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
 
 use super::ast::{
-    ActionNode, CompareOp, ConditionNode, ExprNode, IndicatorCall, IndicatorKind, PriceField,
-    RuleNode, StrategyNode,
+    ActionNode, CompareOp, ConditionNode, ExprNode, IndexAlias, IndicatorCall, IndicatorKind,
+    PriceField, RuleNode, StrategyNode, TradeIn,
 };
 use super::lexer::{Token, TokenKind};
 
@@ -25,9 +25,11 @@ impl Parser {
     }
 
     pub fn parse(&mut self) -> Result<StrategyNode, ParseError> {
-        let mut rules = Vec::new();
+        self.skip_newlines();
+        let trade_in = self.parse_trade_in()?;
         self.skip_newlines();
 
+        let mut rules = Vec::new();
         while !self.is_at_end() {
             let mut rule = self.parse_rule()?;
             rule.id = format!("rule_{}", rules.len());
@@ -37,8 +39,73 @@ impl Parser {
 
         Ok(StrategyNode {
             name: "Untitled Strategy".to_string(),
+            trade_in,
             rules,
         })
+    }
+
+    /// Parse an optional `TRADE_IN <items...>` header. Returns `None` if the
+    /// keyword is absent (backwards compat with single-symbol strategies).
+    fn parse_trade_in(&mut self) -> Result<Option<TradeIn>, ParseError> {
+        if !self.matches_simple(TokenKind::TradeIn) {
+            return Ok(None);
+        }
+
+        // Collect one or more comma-separated identifier tokens on the same
+        // logical line. Identifiers here may contain underscores and digits
+        // (e.g. NIFTY_50, RELIANCE).
+        let mut items: Vec<String> = Vec::new();
+
+        loop {
+            match self.peek().kind.clone() {
+                TokenKind::Identifier(s) => {
+                    items.push(s.to_uppercase());
+                    self.advance();
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "expected a symbol or index alias after TRADE_IN".to_string(),
+                        line: self.peek().line,
+                        col: self.peek().col,
+                    });
+                }
+            }
+            if self.matches_simple(TokenKind::Comma) {
+                continue;
+            }
+            break;
+        }
+
+        if items.is_empty() {
+            return Err(ParseError {
+                message: "TRADE_IN requires at least one symbol or index alias".to_string(),
+                line: self.peek().line,
+                col: self.peek().col,
+            });
+        }
+
+        // If exactly one item and it matches a known IndexAlias → TradeIn::Index.
+        if items.len() == 1 {
+            if let Some(alias) = IndexAlias::from_dsl_str(&items[0]) {
+                return Ok(Some(TradeIn::Index(alias)));
+            }
+        }
+
+        // Multiple items: reject any that are index aliases (can't mix).
+        for item in &items {
+            if IndexAlias::from_dsl_str(item).is_some() {
+                return Err(ParseError {
+                    message: format!(
+                        "cannot mix index alias '{}' with explicit symbols in TRADE_IN — use one or the other",
+                        item
+                    ),
+                    line: self.peek().line,
+                    col: self.peek().col,
+                });
+            }
+        }
+
+        Ok(Some(TradeIn::Symbols(items)))
     }
 
     fn parse_rule(&mut self) -> Result<RuleNode, ParseError> {
@@ -319,10 +386,12 @@ fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {
 fn token_name(kind: &TokenKind) -> &'static str {
     match kind {
         TokenKind::When => "WHEN",
+        TokenKind::TradeIn => "TRADE_IN",
         TokenKind::Newline => "newline",
         TokenKind::LParen => "'('",
         TokenKind::RParen => "')'",
         TokenKind::Comma => "','",
+        TokenKind::Eof => "end of file",
         _ => "token",
     }
 }
@@ -551,5 +620,42 @@ BUY 10
         let result = Parser::new(tokens).parse();
         println!("{:#?}", result);
         assert!(result.is_err());
+    }
+
+    // ---------- TRADE_IN ----------
+
+    #[test]
+    fn parses_trade_in_symbols() {
+        let strategy = parse("TRADE_IN RELIANCE, INFY, TCS\nWHEN close > 100\nBUY 1");
+        match strategy.trade_in {
+            Some(TradeIn::Symbols(syms)) => {
+                assert_eq!(syms, vec!["RELIANCE", "INFY", "TCS"]);
+            }
+            other => panic!("expected TradeIn::Symbols, got {:?}", other),
+        }
+        assert_eq!(strategy.rules.len(), 1);
+    }
+
+    #[test]
+    fn parses_trade_in_index_alias() {
+        let strategy = parse("TRADE_IN NIFTY_BANK\nWHEN close > 100\nBUY 1");
+        match strategy.trade_in {
+            Some(TradeIn::Index(IndexAlias::NiftyBank)) => {}
+            other => panic!("expected TradeIn::Index(NiftyBank), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_mixed_trade_in() {
+        let tokens =
+            Lexer::tokenize("TRADE_IN NIFTY_BANK, RELIANCE\nWHEN close > 100\nBUY 1").unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.message.contains("cannot mix"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn omits_trade_in_when_keyword_absent() {
+        let strategy = parse("WHEN close > 100\nBUY 1");
+        assert!(strategy.trade_in.is_none());
     }
 }

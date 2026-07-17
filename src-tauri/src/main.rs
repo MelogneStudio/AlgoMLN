@@ -1,13 +1,14 @@
 use std::{env, fs, path::Path, sync::Arc};
 
 use algomln::{
-    broker::Timeframe,
+    broker::{symbol_map::SymbolMap, Timeframe},
     commands::{
         self,
         registry::{DeployedStrategy, StrategyMode, StrategyRegistry, StrategyStatus},
         state::AppState,
         strategy::{run_backtest_dsl, BacktestResultWire},
     },
+    indices::{refresh_all_if_stale, IndexRegistry, DEFAULT_STALENESS},
     models::{Candle, Quote},
     plugin::{
         api::{
@@ -306,12 +307,73 @@ fn main() {
                     .expect("Acrylic requires Windows 10 1803+");
             }
 
+            // ---------- Index registry ----------
+            //
+            // The bundled seed JSON lives under `src-tauri/resources/indices/`
+            // and is shipped with the app bundle via `tauri.conf.json`. The
+            // `resource_dir` resolver is provided by Tauri. The cache_dir is
+            // the user's app data — a background task may refresh the
+            // files there on startup if they're older than 24h.
+            let index_registry = Arc::new(IndexRegistry::new());
+            let resource_dir = app
+                .path()
+                .resource_dir()
+                .expect("could not resolve resource dir");
+            // Resources live at `<resource_dir>/resources/indices/*.json` when
+            // bundled (the `resources` prefix in tauri.conf.json is preserved).
+            let index_resource_dir = resource_dir.join("resources").join("indices");
+            let index_cache_dir = store_dir.join("indices");
+            let _ = std::fs::create_dir_all(&index_cache_dir);
+            index_registry.load_from_dirs(&index_cache_dir, &index_resource_dir);
+            eprintln!(
+                "[indices] loaded {} index constituent lists",
+                index_registry.list_info().len()
+            );
+
+            // Spawn a background refresh. Non-fatal: failures are logged to
+            // stderr and the app keeps running with the seed data.
+            let refresh_registry = index_registry.clone();
+            let refresh_cache_dir = index_cache_dir.clone();
+            tauri::async_runtime::spawn(async move {
+                let outcomes = refresh_all_if_stale(
+                    refresh_registry,
+                    refresh_cache_dir,
+                    DEFAULT_STALENESS,
+                )
+                .await;
+                let ok = outcomes.iter().filter(|o| o.success).count();
+                eprintln!("[indices] background refresh: {}/{} ok", ok, outcomes.len());
+            });
+
+            // ---------- Symbol map (NSE → Dhan SECURITY_ID) ----------
+            //
+            // The seed file is the existing `sample-data/sec_id.csv` shipped
+            // in the repo. On dev builds the path is the repo root; on
+            // packaged builds the file will need to be re-located or the
+            // Tauri side will fall back to an empty map (so the app still
+            // boots). Runtime hot-refresh from Dhan is a future prompt.
+            let symbol_map_seed = std::path::PathBuf::from("sample-data/sec_id.csv");
+            let symbol_map = if symbol_map_seed.exists() {
+                match SymbolMap::load(&symbol_map_seed) {
+                    Ok(map) => Arc::new(parking_lot::RwLock::new(map)),
+                    Err(e) => {
+                        eprintln!("[symbol_map] could not load seed: {e} — using empty map");
+                        Arc::new(parking_lot::RwLock::new(SymbolMap::empty()))
+                    }
+                }
+            } else {
+                eprintln!("[symbol_map] seed file not found — using empty map");
+                Arc::new(parking_lot::RwLock::new(SymbolMap::empty()))
+            };
+
             app.manage(AppState {
                 data,
                 strategies,
                 plugin_registry,
                 event_bus: event_bus_for_state,
                 ui_receiver,
+                index_registry,
+                symbol_map,
             });
             Ok(())
         })

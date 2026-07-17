@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ast::{
     ActionNode, ConditionNode, ExprNode, IndicatorCall, IndicatorKind, RuleNode, StrategyNode,
+    TradeIn,
 };
 
 pub struct AstValidator;
@@ -37,6 +38,10 @@ impl AstValidator {
             });
         }
 
+        if strategy.trade_in.is_some() {
+            validate_trade_in(strategy.trade_in.as_ref().unwrap(), &mut errors);
+        }
+
         errors
     }
 }
@@ -56,6 +61,52 @@ pub enum ValidationErrorKind {
     CrossWithLiteral,
     DuplicateRuleIds,
     InvalidTimeRange,
+    InvalidTradeIn,
+}
+
+fn validate_trade_in(trade_in: &TradeIn, errors: &mut Vec<ValidationError>) {
+    match trade_in {
+        TradeIn::Symbols(syms) => {
+            if syms.is_empty() {
+                errors.push(ValidationError {
+                    rule_id: String::new(),
+                    message: "TRADE_IN symbol list is empty".to_string(),
+                    kind: ValidationErrorKind::InvalidTradeIn,
+                });
+            }
+            if syms.len() > 500 {
+                errors.push(ValidationError {
+                    rule_id: String::new(),
+                    message:
+                        "TRADE_IN explicit symbol list exceeds 500 symbols; use an index alias instead"
+                            .to_string(),
+                    kind: ValidationErrorKind::InvalidTradeIn,
+                });
+            }
+            for sym in syms {
+                if sym.is_empty() {
+                    errors.push(ValidationError {
+                        rule_id: String::new(),
+                        message: "TRADE_IN contains an empty symbol".to_string(),
+                        kind: ValidationErrorKind::InvalidTradeIn,
+                    });
+                }
+                if sym.len() > 30 {
+                    errors.push(ValidationError {
+                        rule_id: String::new(),
+                        message: format!(
+                            "TRADE_IN symbol '{}' is too long (max 30 chars)",
+                            sym
+                        ),
+                        kind: ValidationErrorKind::InvalidTradeIn,
+                    });
+                }
+            }
+        }
+        TradeIn::Index(_) => {
+            // Valid — resolved at runtime from IndexRegistry.
+        }
+    }
 }
 
 fn validate_rule(rule: &RuleNode, errors: &mut Vec<ValidationError>) {
@@ -149,7 +200,7 @@ mod tests {
     use chrono::NaiveTime;
 
     use super::*;
-    use crate::strategy::dsl::ast::{CompareOp, PriceField};
+    use crate::strategy::dsl::ast::{CompareOp, IndexAlias, PriceField};
 
     fn rule(id: &str, condition: ConditionNode, action: ActionNode) -> RuleNode {
         RuleNode {
@@ -162,6 +213,7 @@ mod tests {
     fn strategy(rules: Vec<RuleNode>) -> StrategyNode {
         StrategyNode {
             name: "test".to_string(),
+            trade_in: None,
             rules,
         }
     }
@@ -313,6 +365,34 @@ mod tests {
     fn collects_all_errors_not_just_first() {
         let errors = AstValidator::validate(&strategy(vec![make_rsi_rule(0, 0)]));
         assert!(errors.len() >= 2);
+    }
+
+    #[test]
+    fn accepts_valid_index_alias() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: Some(TradeIn::Index(IndexAlias::NiftyBank)),
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        let errors = AstValidator::validate(&strat);
+        assert!(!errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::InvalidTradeIn)));
+    }
+
+    #[test]
+    fn rejects_over_500_symbols() {
+        let big_list: Vec<String> = (0..=500).map(|i| format!("SYM{}", i)).collect();
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: Some(TradeIn::Symbols(big_list)),
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        let errors = AstValidator::validate(&strat);
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::InvalidTradeIn)
+                && e.message.contains("exceeds 500")));
     }
 
     fn make_rsi_rule(period: usize, quantity: usize) -> RuleNode {

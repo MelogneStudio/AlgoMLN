@@ -11,6 +11,7 @@ pub enum TokenKind {
     Not,
     Between,
     InPosition,
+    TradeIn,
     Ema,
     Ma,
     Rsi,
@@ -40,6 +41,10 @@ pub enum TokenKind {
     Number(f64),
     Integer(usize),
     TimeStr(String),
+    /// Catch-all for non-keyword identifiers (NSE symbols, index alias
+    /// strings, future plugin-registered keywords). The string is the raw
+    /// text as it appeared in the source.
+    Identifier(String),
     LParen,
     RParen,
     Comma,
@@ -124,11 +129,14 @@ impl Lexer {
                             pos += 1;
                         }
                         let ident: String = chars[start..pos].iter().collect();
-                        let kind = keyword(&ident).ok_or_else(|| LexError {
-                            message: format!("unknown identifier '{}'", ident),
-                            line: line_no,
-                            col,
-                        })?;
+                        // Unknown identifiers are not an error — they become
+                        // an `Identifier(s)` token. The parser decides
+                        // whether the text is a valid symbol, index alias,
+                        // or a typo. This keeps `TRADE_IN RELIANCE, INFY`
+                        // and `NIFTY_50` lexable without hard-coding the
+                        // 22 index keywords.
+                        let kind = keyword(&ident)
+                            .unwrap_or_else(|| TokenKind::Identifier(ident.clone()));
                         tokens.push(token(kind, line_no, col));
                     }
                     _ => {
@@ -225,6 +233,7 @@ fn keyword(ident: &str) -> Option<TokenKind> {
         "not" => Some(TokenKind::Not),
         "between" => Some(TokenKind::Between),
         "in_position" => Some(TokenKind::InPosition),
+        "trade_in" => Some(TokenKind::TradeIn),
         "ema" => Some(TokenKind::Ema),
         "ma" => Some(TokenKind::Ma),
         "rsi" => Some(TokenKind::Rsi),
@@ -396,5 +405,33 @@ BUY 10
         assert!(tokens
             .iter()
             .any(|token| token.kind == TokenKind::CrossAbove));
+    }
+
+    #[test]
+    fn tokenizes_trade_in_keyword() {
+        let tokens = Lexer::tokenize("TRADE_IN RELIANCE, INFY").unwrap();
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::TradeIn));
+        // Symbols fall through to Identifier(String).
+        let idents: Vec<&str> = tokens
+            .iter()
+            .filter_map(|t| match &t.kind {
+                TokenKind::Identifier(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(idents, vec!["RELIANCE", "INFY"]);
+    }
+
+    #[test]
+    fn tokenizes_index_alias_as_identifier() {
+        // NIFTY_50 is not a lexer keyword — the parser resolves it via
+        // IndexAlias::from_dsl_str in parse_trade_in.
+        let tokens = Lexer::tokenize("TRADE_IN NIFTY_50").unwrap();
+        assert!(matches!(
+            tokens.iter().find(|t| matches!(t.kind, TokenKind::Identifier(_))),
+            Some(_)
+        ));
     }
 }

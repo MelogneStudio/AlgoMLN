@@ -55,6 +55,25 @@ The grammar is intentionally tiny — see `CLAUDE.md` "The `.algomln` DSL" for t
 
 `commands::strategy::validate_dsl` (in `src/commands/strategy.rs`) is the thin Tauri-facing wrapper that returns `Vec<String>` of human-readable errors with `"line {l} col {c}: {msg}"` formatting for lex/parse errors and plain messages for validation. The strategy registry has its own local copy of the same pipeline (`validate_dsl_local` in `src/commands/registry.rs`) to avoid creating a cyclic module dependency.
 
+### Index registry (multi-symbol strategies)
+
+`IndexRegistry` (`src/indices/registry.rs`) holds a `parking_lot::RwLock<HashMap<IndexAlias, IndexEntry>>` of NSE index constituent symbol lists. The 22 entries are populated once at startup from two sources, in order:
+
+1. **User cache** — `<app_data>/indices/*.json`. Updated by `refresh_index` after a successful fetch.
+2. **Bundled seed** — `src-tauri/resources/indices/*.json` (shipped in the app bundle via `tauri.conf.json`).
+
+For any alias that fails to load from both locations, the registry inserts an empty entry (`symbols: vec![], last_updated: "never"`) so the key always exists and the strategy engine can distinguish "loaded zero" from "not loaded."
+
+`refresh_all_if_stale` (`src/indices/refresh.rs`) is the background refresh. It checks the staleness of `nifty_50.json` as a proxy and, if older than `DEFAULT_STALENESS` (24h), iterates all 22 indices and fetches each CSV from `niftyindices.com/IndexConstituent/`. Each successful fetch is written to `<app_data>/indices/<stem>.json` and pushed into the registry via `IndexRegistry::update`. Failures are logged to stderr and the app keeps running with whatever is already loaded. The Tauri setup closure (`src-tauri/src/main.rs`) spawns `refresh_all_if_stale` once at startup.
+
+Per invariant #10 in `CLAUDE.md`, the registry is read-only after startup from the strategy engine's perspective. Constituents can change on quarterly rebalances; the deploy-time read guarantees the same strategy never re-evaluates with a different universe mid-run.
+
+### Symbol map (NSE → Dhan security ID)
+
+`SymbolMap` (`src/broker/symbol_map.rs`) is a `HashMap<String, u32>` mapping uppercase NSE equity symbols to Dhan `SECURITY_ID`s. The map is loaded once at startup from the bundled `sample-data/sec_id.csv` (a snapshot of the Dhan scrip master). Parsing filters to `EXCH_ID=NSE, SEGMENT=E` rows only; `SYMBOL_NAME` wins over `UNDERLYING_SYMBOL`; first-occurrence-wins for duplicates.
+
+The map is held in `AppState.symbol_map: Arc<parking_lot::RwLock<SymbolMap>>` so a future hot-refresh (`refresh_symbol_map`) can swap the map without restarting the app. The Dhan scrip master URL is `https://images.dhan.co/api-data/api-scrip-master-detailed.csv`; the refresh writes to `<app_data>/symbol_map.csv` via a temp file + atomic rename. Runtime wiring of `SymbolMap` into the engine is a follow-up prompt — for now the map is built and held in `AppState` so the IPC surface is in place.
+
 ---
 
 ## The runtime / evaluation loop

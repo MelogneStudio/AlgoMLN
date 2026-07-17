@@ -18,9 +18,14 @@ AlgoMLN/
 ├── src/                        Rust library crate (source of truth)
 │   ├── lib.rs                  module declarations
 │   ├── broker/                 BrokerClient trait + DhanClient impl
-│   │   └── dhan/               auth.rs / rest.rs / websocket.rs / models.rs
+│   │   ├── dhan/               auth.rs / rest.rs / websocket.rs / models.rs
+│   │   └── symbol_map.rs       NSE symbol → Dhan SECURITY_ID map (seed + refresh)
 │   ├── models/                 Candle, Tick, Quote, Order, Position, Portfolio
 │   ├── indicators/             Pure stateless fns: ema, ma, rsi, atr, vwap, bb, rel_vol
+│   ├── indices/                NSE index constituent registry (read-only after load)
+│   │   ├── mod.rs              module root
+│   │   ├── registry.rs         IndexRegistry (parking_lot RwLock, cache+resource dirs)
+│   │   └── refresh.rs          refresh_index, refresh_all_if_stale (niftyindices.com)
 │   ├── feed/                   WebSocket feed manager (subscriptions, tick fan-out)
 │   ├── data/                   Shared CSV loaders (load_nifty_candles, parse_market_row)
 │   ├── strategy/
@@ -64,8 +69,10 @@ AlgoMLN/
 │       └── behavioral_backtest.rs   CLI runner (uses commands::strategy::run_backtest_internal)
 │
 ├── src-tauri/                  Tauri v2 shell (re-exports the lib)
-│   ├── tauri.conf.json         app identifier, window settings
+│   ├── tauri.conf.json         app identifier, window settings, bundled resources
 │   ├── capabilities/           IPC permissions
+│   ├── resources/              bundled resources (seed index JSON, icons)
+│   │   └── indices/            seed NSE index constituent JSON (gitkeep; populated by `scripts/fetch_seed_indices.py`)
 │   └── src/main.rs             entrypoint: registers commands, opens registry, applies acrylic
 │
 ├── src/                        React frontend root (TypeScript, Vite, React 19)
@@ -218,6 +225,19 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | BrokerClient trait (data fetch) | `src/broker/mod.rs` |
 | Dhan auth / REST / WebSocket | `src/broker/dhan/{auth,rest,websocket,models}.rs` |
 | Timeframe enum + Dhan interval strings | `src/broker/mod.rs` |
+
+### Indices & symbol resolution (multi-symbol strategies)
+
+| Concern | File |
+|---|---|
+| `IndexAlias` enum (22 NSE indices) + `TradeIn` AST | `src/strategy/dsl/ast.rs` |
+| `TRADE_IN` keyword lex + parse | `src/strategy/dsl/{lexer,parser}.rs` |
+| `IndexRegistry` (read-only after load) | `src/indices/registry.rs` |
+| Index refresh from niftyindices.com | `src/indices/refresh.rs` |
+| Seed fetcher (Python, stdlib only) | `scripts/fetch_seed_indices.py` |
+| Bundled seed JSON | `src-tauri/resources/indices/*.json` |
+| NSE symbol → Dhan `SECURITY_ID` map | `src/broker/symbol_map.rs` |
+| Dhan scrip master CSV refresh | `src/broker/symbol_map.rs::refresh_symbol_map` |
 
 ### Tauri IPC
 

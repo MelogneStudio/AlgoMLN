@@ -1,0 +1,8 @@
+# Seed index constituent files live here.
+#
+# Populated by `python scripts/fetch_seed_indices.py` from the repo root
+# before the first build. Each file has the shape:
+#   { "alias": "NIFTY_50", "last_updated": "YYYY-MM-DD", "symbols": [...] }
+#
+# The empty seed is sufficient to keep the app booting; the Tauri host
+# spawns a background refresh on startup that will fill these in.
