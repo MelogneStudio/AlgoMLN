@@ -1,14 +1,14 @@
 use std::{env, fs, path::Path, sync::Arc};
 
 use algomln::{
-    broker::{symbol_map::SymbolMap, Timeframe},
+    broker::{symbol_map::{refresh_symbol_map, SymbolMap}, Timeframe},
     commands::{
         self,
         registry::{DeployedStrategy, StrategyMode, StrategyRegistry, StrategyStatus},
         state::AppState,
         strategy::{run_backtest_dsl, BacktestResultWire},
     },
-    indices::{refresh_all_if_stale, IndexRegistry, DEFAULT_STALENESS},
+    indices::{refresh_all_if_stale, IndexRegistry},
     models::{Candle, Quote},
     plugin::{
         api::{
@@ -129,6 +129,28 @@ async fn disable_plugin(state: State<'_, AppState>, id: String) -> Result<(), St
 #[tauri::command]
 async fn reload_plugins(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     commands::plugins::reload_plugins(&state).await
+}
+
+// ---------- Index IPC ----------
+#[tauri::command]
+fn list_indices(state: State<'_, AppState>) -> Vec<algomln::indices::IndexInfo> {
+    commands::indices::list_indices(&state)
+}
+
+#[tauri::command]
+fn get_index_symbols(
+    state: State<'_, AppState>,
+    alias: String,
+) -> Result<Vec<String>, String> {
+    commands::indices::get_index_symbols(&state, alias)
+}
+
+#[tauri::command]
+async fn refresh_indices(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<commands::indices::RefreshResult, String> {
+    Ok(commands::indices::refresh_indices(&app, &state).await)
 }
 
 fn main() {
@@ -332,13 +354,14 @@ fn main() {
 
             // Spawn a background refresh. Non-fatal: failures are logged to
             // stderr and the app keeps running with the seed data.
+            // 90-day staleness window per the multi-symbol trade spec.
             let refresh_registry = index_registry.clone();
             let refresh_cache_dir = index_cache_dir.clone();
             tauri::async_runtime::spawn(async move {
                 let outcomes = refresh_all_if_stale(
                     refresh_registry,
                     refresh_cache_dir,
-                    DEFAULT_STALENESS,
+                    std::time::Duration::from_secs(90 * 24 * 60 * 60),
                 )
                 .await;
                 let ok = outcomes.iter().filter(|o| o.success).count();
@@ -347,24 +370,75 @@ fn main() {
 
             // ---------- Symbol map (NSE → Dhan SECURITY_ID) ----------
             //
-            // The seed file is the existing `sample-data/sec_id.csv` shipped
-            // in the repo. On dev builds the path is the repo root; on
-            // packaged builds the file will need to be re-located or the
-            // Tauri side will fall back to an empty map (so the app still
-            // boots). Runtime hot-refresh from Dhan is a future prompt.
-            let symbol_map_seed = std::path::PathBuf::from("sample-data/sec_id.csv");
-            let symbol_map = if symbol_map_seed.exists() {
-                match SymbolMap::load(&symbol_map_seed) {
-                    Ok(map) => Arc::new(parking_lot::RwLock::new(map)),
-                    Err(e) => {
-                        eprintln!("[symbol_map] could not load seed: {e} — using empty map");
-                        Arc::new(parking_lot::RwLock::new(SymbolMap::empty()))
-                    }
-                }
+            // Prefer the user cache (`<app_data>/sec_id_cache.csv`); fall back
+            // to the bundled seed (`sample-data/sec_id.csv` in the repo root,
+            // `src-tauri/resources/sample-data/sec_id.csv` in the bundled
+            // resource dir). If neither resolves, fall back to an empty map
+            // so the app still boots.
+            let sym_cache_path = store_dir.join("sec_id_cache.csv");
+            let sym_seed_path = std::path::PathBuf::from("sample-data/sec_id.csv");
+            let sym_resource_seed = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|d| d.join("resources").join("sample-data").join("sec_id.csv"));
+
+            let symbol_map = if sym_cache_path.exists() {
+                SymbolMap::load(&sym_cache_path).unwrap_or_else(|e| {
+                    eprintln!(
+                        "[symbol_map] cache load failed ({e}); falling back to seed"
+                    );
+                    SymbolMap::load(&sym_seed_path)
+                        .or_else(|_| {
+                            sym_resource_seed
+                                .as_ref()
+                                .and_then(|p| SymbolMap::load(p).ok())
+                                .ok_or_else(|| {
+                                    "seed sec_id.csv missing — add sample-data/sec_id.csv"
+                                        .to_string()
+                                })
+                        })
+                        .unwrap_or_else(|e| {
+                            eprintln!("[symbol_map] {e} — using empty map");
+                            SymbolMap::empty()
+                        })
+                })
             } else {
-                eprintln!("[symbol_map] seed file not found — using empty map");
-                Arc::new(parking_lot::RwLock::new(SymbolMap::empty()))
+                SymbolMap::load(&sym_seed_path)
+                    .or_else(|_| {
+                        sym_resource_seed
+                            .as_ref()
+                            .and_then(|p| SymbolMap::load(p).ok())
+                            .ok_or_else(|| {
+                                "seed sec_id.csv missing — add sample-data/sec_id.csv"
+                                    .to_string()
+                            })
+                    })
+                    .unwrap_or_else(|e| {
+                        eprintln!("[symbol_map] {e} — using empty map");
+                        SymbolMap::empty()
+                    })
             };
+            let symbol_map = Arc::new(parking_lot::RwLock::new(symbol_map));
+
+            // Background 7-day staleness check for the symbol map.
+            let bg_sym_map = symbol_map.clone();
+            let bg_sym_cache = sym_cache_path.clone();
+            tauri::async_runtime::spawn(async move {
+                if !algomln::indices::is_stale(
+                    &bg_sym_cache,
+                    std::time::Duration::from_secs(7 * 24 * 60 * 60),
+                ) {
+                    return;
+                }
+                match refresh_symbol_map(&bg_sym_cache).await {
+                    Ok(new_map) => {
+                        eprintln!("[symbol_map] background refresh: {} symbols", new_map.len());
+                        *bg_sym_map.write() = new_map;
+                    }
+                    Err(e) => eprintln!("[symbol_map] background refresh failed: {e}"),
+                }
+            });
 
             app.manage(AppState {
                 data,
@@ -390,6 +464,9 @@ fn main() {
             enable_plugin,
             disable_plugin,
             reload_plugins,
+            list_indices,
+            get_index_symbols,
+            refresh_indices,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AlgoMLN");

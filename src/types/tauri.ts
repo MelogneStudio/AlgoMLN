@@ -53,3 +53,44 @@ export const disablePlugin = (id: string): Promise<void> =>
   invoke<void>('disable_plugin', { id });
 export const reloadPlugins = (): Promise<string[]> =>
   invoke<string[]>('reload_plugins', {});
+
+// ─── Index types ───────────────────────────────────────────────────────────
+
+export interface IndexInfo {
+  alias: string;        // e.g. "NIFTY_50"
+  displayName: string;  // e.g. "NIFTY 50"
+  symbolCount: number;
+  lastUpdated: string;  // ISO date or "never"
+}
+
+export interface RefreshResult {
+  refreshed: string[];
+  failed: [string, string][]; // [alias, error]
+  symbolMapUpdated: boolean;
+  symbolMapCount: number;
+}
+
+// ─── Index IPC wrappers ────────────────────────────────────────────────────
+
+/** List metadata for all 22 supported indices. */
+export async function listIndices(): Promise<IndexInfo[]> {
+  if (!isTauri()) return [];
+  return invoke<IndexInfo[]>('list_indices');
+}
+
+/** Get the constituent symbol list for a named index alias (e.g. "NIFTY_50"). */
+export async function getIndexSymbols(alias: string): Promise<string[]> {
+  if (!isTauri()) return [];
+  return invoke<string[]>('get_index_symbols', { alias });
+}
+
+/**
+ * Refresh all 22 indices from niftyindices.com and the Dhan scrip master.
+ * Long-running (may take 30–60s). Show a loading state in the UI.
+ */
+export async function refreshIndices(): Promise<RefreshResult> {
+  if (!isTauri()) {
+    return { refreshed: [], failed: [], symbolMapUpdated: false, symbolMapCount: 0 };
+  }
+  return invoke<RefreshResult>('refresh_indices');
+}

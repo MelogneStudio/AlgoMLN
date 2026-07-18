@@ -32,6 +32,9 @@ AlgoMLN/
 │   │   ├── dsl/                Lexer → Parser → AST → Validator
 │   │   ├── runtime/            StrategyEngine + EvalContext, CrossDetector, TriggerStateMap
 │   │   ├── execution/          ExecutionTarget trait; PaperBroker, order_builder
+│   │   ├── portfolio/          Multi-symbol PortfolioEngine (shared PaperBroker + per-symbol sub-engines)
+│   │   │   ├── mod.rs          submodule root
+│   │   │   └── engine.rs       PortfolioEngine + resolve_trade_in_symbols
 │   │   ├── logging/            StrategyLogger, LogEntry, LogEntryKind
 │   │   ├── analytics.rs        BacktestAnalyser → BacktestSummary
 │   │   └── tests/              Integration tests
@@ -61,6 +64,7 @@ AlgoMLN/
 │   │   └── mod.rs              Plugin trait, plugin module root
 │   ├── commands/               Tauri IPC command implementations
 │   │   ├── data.rs             broker + feed wrappers
+│   │   ├── indices.rs          index registry + symbol map IPC commands
 │   │   ├── strategy.rs         DSL helpers, backtest orchestrator, wire types
 │   │   ├── registry.rs         StrategyRegistry — JSON-persisted deploy/list/status
 │   │   ├── state.rs            AppState — the struct held by Tauri::manage
@@ -233,11 +237,14 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | `IndexAlias` enum (22 NSE indices) + `TradeIn` AST | `src/strategy/dsl/ast.rs` |
 | `TRADE_IN` keyword lex + parse | `src/strategy/dsl/{lexer,parser}.rs` |
 | `IndexRegistry` (read-only after load) | `src/indices/registry.rs` |
+| `resolve_trade_in_symbols` (`TradeIn` → `Vec<String>` via `IndexRegistry`) | `src/strategy/portfolio/engine.rs` |
+| Portfolio engine (multi-symbol paper/live) | `src/strategy/portfolio/engine.rs` |
 | Index refresh from niftyindices.com | `src/indices/refresh.rs` |
 | Seed fetcher (Python, stdlib only) | `scripts/fetch_seed_indices.py` |
 | Bundled seed JSON | `src-tauri/resources/indices/*.json` |
 | NSE symbol → Dhan `SECURITY_ID` map | `src/broker/symbol_map.rs` |
 | Dhan scrip master CSV refresh | `src/broker/symbol_map.rs::refresh_symbol_map` |
+| Tauri commands for indices + symbol map (list/get/refresh) | `src/commands/indices.rs` (`list_indices`, `get_index_symbols`, `refresh_indices`) |
 
 ### Tauri IPC
 
@@ -248,6 +255,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | Data commands (OHLCV, quote, ticks) | `src/commands/data.rs` |
 | Backtest orchestrator + wire types | `src/commands/strategy.rs` (`run_backtest_dsl`, `validate_dsl`, `BacktestResultWire`, `PaperTradeWire`) |
 | Strategy registry (deploy/list/set_status) | `src/commands/registry.rs` |
+| Index / symbol-map commands (list/get/refresh) | `src/commands/indices.rs` |
 | Registry persistence path | `%APPDATA%\com.algomln.app\strategies.json` on Windows (`app_data_dir` + `strategies.json`) |
 
 ### Wire types & IPC contract

@@ -1,4 +1,5 @@
 pub mod data;
+pub mod indices;
 pub mod plugins;
 pub mod registry;
 pub mod state;

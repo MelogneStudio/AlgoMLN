@@ -110,6 +110,19 @@ The `latest_indicator_value` helper is the single dispatch point from `Indicator
 
 `TriggerStateMap` (`src/strategy/runtime/trigger_state.rs`) is even simpler — a `BTreeMap<rule_id, bool>` that fires on a `false → true` transition. Both structures are independent per rule id.
 
+### Portfolio engine (multi-symbol paper / live)
+
+`PortfolioEngine` (`src/strategy/portfolio/engine.rs`) fans a single parsed `StrategyNode` out over a list of symbols and runs each symbol's rules in its own `StrategyEngine`, all sharing one `Arc<PaperBroker>`. Capital is shared across symbols; positions are tracked per symbol inside the broker's existing `HashMap<String, PaperPosition>`.
+
+- Constructors:
+  - `PortfolioEngine::new(&strategy, symbols, initial_cash, event_bus)` — explicit symbol list. The symbol list is uppercased and stored in insertion order for deterministic logging. Panics if `symbols` is empty.
+  - `PortfolioEngine::from_trade_in(&strategy, &trade_in, &index_registry, initial_cash, event_bus)` — resolves a `TradeIn::Symbols` or `TradeIn::Index` clause via `resolve_trade_in_symbols` and then calls `new`. Returns `Err` for `TradeIn::Index` when the alias has no symbols loaded (the user must refresh from Settings).
+- Dispatch: `on_tick(&mut self, symbol, candles)` finds the matching sub-engine (case-insensitive) and calls `on_candle`. Unknown symbols log a warning to stderr and return an empty log vec; the dispatch is single-threaded (invariant #11).
+- Broker access: `broker()` returns the shared `Arc<PaperBroker>` for position/PnL snapshots. A live paper run reads `get_state().positions` to render the per-symbol holdings.
+- `commands::strategy::resolve_trade_in_symbols` is a re-export of the same function so Prompt 3's Tauri commands can call it from the commands module without depending on `strategy::portfolio` directly.
+
+Backtests with a `TRADE_IN` clause return an error from `commands::strategy::run_backtest_dsl` — multi-symbol backtest is not implemented. The deployment path (`PortfolioEngine::from_trade_in`) is the only currently-supported multi-symbol route.
+
 ---
 
 ## Execution
@@ -173,6 +186,20 @@ The **registry** (`src/commands/registry.rs`) is intentionally minimal: it is a 
 `StrategyRegistry::open` reads the file (or creates an empty one) and builds an in-memory `HashMap<id, DeployedStrategyRecord>`. Deploys and status changes take the mutex, mutate, then write the full snapshot back to disk (small file, simple semantics). The on-disk record has `deployed_at` for sort order; the wire `DeployedStrategy` drops it and replaces the single `mode` with a `modes: [mode]` array to match the TS side.
 
 `StrategyMode::parse` and `StrategyStatus::parse` accept case-insensitive inputs and reject anything outside the known set, so the UI can't pass typos through.
+
+### Tauri commands — indices and symbol map
+
+`src/commands/indices.rs` exposes three Tauri commands backed by the shared `IndexRegistry` and `SymbolMap` in `AppState`:
+
+| Command | Args | Returns | Purpose |
+|---|---|---|---|
+| `list_indices` | — | `Vec<IndexInfo>` (alias, display name, count, last-updated) | Snapshot of all 22 indices for the Settings UI |
+| `get_index_symbols` | `alias: String` | `Vec<String>` | Constituent list for a named alias (e.g. `"NIFTY_50"`) |
+| `refresh_indices` | — | `RefreshResult` (refreshed, failed, symbol_map_updated, symbol_map_count) | Re-fetch all 22 indices from niftyindices.com and refresh the Dhan symbol map. Long-running (~30–60s); show a loading state in the UI. |
+
+`refresh_indices` writes per-index JSON to `<app_data>/indices/<stem>.json` and the Dhan scrip master CSV to `<app_data>/sec_id_cache.csv` (atomic temp+rename). On a successful symbol-map refresh it swaps the in-memory `Arc<RwLock<SymbolMap>>` so subsequent IPC calls see the new map without restarting the app.
+
+**Startup wiring** (in `src-tauri/src/main.rs::setup`): after the plugin shared infrastructure is built, the closure constructs `IndexRegistry`, calls `load_from_dirs(&cache_dir, &resource_dir)` (cache first, bundled seed second), and spawns a background task that calls `refresh_all_if_stale(...)` with a 90-day staleness window. The symbol map is loaded by trying `<app_data>/sec_id_cache.csv` first, then falling back to the bundled seed (`sample-data/sec_id.csv` in the repo root or `src-tauri/resources/sample-data/sec_id.csv` in the bundled resource dir). A second background task checks the cache with a 7-day staleness window and refreshes via `refresh_symbol_map(...)` when stale. Both background refreshes are non-fatal — failures are logged to stderr and the app keeps running with the seed data.
 
 ---
 

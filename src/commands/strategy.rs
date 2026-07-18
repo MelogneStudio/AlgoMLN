@@ -17,6 +17,13 @@ use crate::strategy::runtime::engine::StrategyEngineProfile;
 use crate::strategy::runtime::indicator_provider::IndicatorProviderProfile;
 use crate::strategy::runtime::{StrategyEngine, StrategyInstance, StrategyStatus};
 
+/// Re-export so callers (notably Prompt 3's Tauri commands) can invoke
+/// `crate::commands::strategy::resolve_trade_in_symbols(&TradeIn, &IndexRegistry)`.
+/// The implementation lives in `src/strategy/portfolio/engine.rs` next to
+/// its only consumer (`PortfolioEngine::from_trade_in`).
+pub use crate::strategy::portfolio::engine::resolve_trade_in_symbols;
+
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BacktestResult {
@@ -241,6 +248,11 @@ pub fn validate_dsl(dsl_source: &str) -> Vec<String> {
 /// `symbol` follows Dhan's `security_id|exchange_segment|instrument` form when
 /// a `|` is present; otherwise the broker's default parsing applies. The
 /// fallback CSV is always the bundled NIFTY 1-min sample regardless of symbol.
+///
+/// Multi-symbol strategies (any `TRADE_IN` clause) are rejected here —
+/// see `PortfolioEngine` (`src/strategy/portfolio/engine.rs`) for the
+/// multi-symbol paper/live execution path. Backtests over a universe of
+/// symbols are not implemented.
 pub async fn run_backtest_dsl(
     dsl_source: &str,
     symbol: &str,
@@ -268,6 +280,14 @@ pub async fn run_backtest_dsl(
             .collect::<Vec<_>>()
             .join("; ");
         return Err(format!("strategy validation failed: {messages}"));
+    }
+
+    if node.trade_in.is_some() {
+        return Err(
+            "Multi-symbol strategies (TRADE_IN) cannot be backtested yet. \
+             Deploy as paper trading to run across the full symbol universe."
+                .to_string(),
+        );
     }
 
     let (candles, used_fallback) = fetch_candles(symbol, data).await?;
