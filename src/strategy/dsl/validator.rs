@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use super::ast::{
-    ActionNode, ConditionNode, ExprNode, IndicatorCall, IndicatorKind, RuleNode, StrategyNode,
-    TradeIn,
+    ActionNode, ConditionNode, ExprNode, IndicatorCall, IndicatorKind, QuantitySpec, RuleNode,
+    StrategyNode, TradeIn,
 };
 
 pub struct AstValidator;
@@ -42,6 +42,9 @@ impl AstValidator {
             validate_trade_in(strategy.trade_in.as_ref().unwrap(), &mut errors);
         }
 
+        validate_percent_threshold(strategy.stop_loss, "STOP_LOSS", &mut errors);
+        validate_percent_threshold(strategy.take_profit, "TAKE_PROFIT", &mut errors);
+
         errors
     }
 }
@@ -62,6 +65,31 @@ pub enum ValidationErrorKind {
     DuplicateRuleIds,
     InvalidTimeRange,
     InvalidTradeIn,
+    InvalidStopLoss,
+    InvalidTakeProfit,
+}
+
+/// Validate an optional percentage threshold (STOP_LOSS / TAKE_PROFIT). Both
+/// must be in `(0.0, 100.0]` — zero means "disabled" (use `None`) and over 100
+/// is nonsensical. The two thresholds are validated independently; they don't
+/// need to sum to anything specific.
+fn validate_percent_threshold(value: Option<f64>, label: &str, errors: &mut Vec<ValidationError>) {
+    if let Some(pct) = value {
+        if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {
+            let kind = if label == "STOP_LOSS" {
+                ValidationErrorKind::InvalidStopLoss
+            } else {
+                ValidationErrorKind::InvalidTakeProfit
+            };
+            errors.push(ValidationError {
+                rule_id: String::new(),
+                message: format!(
+                    "{label} must be in (0, 100] (got {pct})"
+                ),
+                kind,
+            });
+        }
+    }
 }
 
 fn validate_trade_in(trade_in: &TradeIn, errors: &mut Vec<ValidationError>) {
@@ -94,10 +122,7 @@ fn validate_trade_in(trade_in: &TradeIn, errors: &mut Vec<ValidationError>) {
                 if sym.len() > 30 {
                     errors.push(ValidationError {
                         rule_id: String::new(),
-                        message: format!(
-                            "TRADE_IN symbol '{}' is too long (max 30 chars)",
-                            sym
-                        ),
+                        message: format!("TRADE_IN symbol '{}' is too long (max 30 chars)", sym),
                         kind: ValidationErrorKind::InvalidTradeIn,
                     });
                 }
@@ -169,16 +194,39 @@ fn validate_indicator(rule_id: &str, call: &IndicatorCall, errors: &mut Vec<Vali
 }
 
 fn validate_action(rule: &RuleNode, errors: &mut Vec<ValidationError>) {
-    match rule.action {
-        ActionNode::Buy { quantity } | ActionNode::Sell { quantity } if quantity == 0 => {
-            errors.push(ValidationError {
-                rule_id: rule.id.clone(),
-                message: "order quantity must be greater than zero".to_string(),
-                kind: ValidationErrorKind::InvalidQuantity,
-            });
+    let quantity = match &rule.action {
+        ActionNode::Buy { quantity } | ActionNode::Sell { quantity } => quantity,
+        ActionNode::SellAll => return,
+    };
+
+    match quantity {
+        QuantitySpec::Fixed(value) if *value == 0 => {
+            push_invalid_quantity(rule, errors, "order quantity must be greater than zero");
+        }
+        QuantitySpec::PercentCapital(value) if *value <= 0.0 || *value > 100.0 => {
+            push_invalid_quantity(
+                rule,
+                errors,
+                &format!("percent quantity must be between 0 and 100 (got {value})"),
+            );
+        }
+        QuantitySpec::ValueBased(value) if *value <= 0.0 => {
+            push_invalid_quantity(
+                rule,
+                errors,
+                &format!("WORTH quantity must be positive (got {value})"),
+            );
         }
         _ => {}
     }
+}
+
+fn push_invalid_quantity(rule: &RuleNode, errors: &mut Vec<ValidationError>, message: &str) {
+    errors.push(ValidationError {
+        rule_id: rule.id.clone(),
+        message: message.to_string(),
+        kind: ValidationErrorKind::InvalidQuantity,
+    });
 }
 
 fn indicator_name(kind: &IndicatorKind) -> &'static str {
@@ -214,6 +262,8 @@ mod tests {
         StrategyNode {
             name: "test".to_string(),
             trade_in: None,
+            stop_loss: None,
+            take_profit: None,
             rules,
         }
     }
@@ -244,7 +294,9 @@ mod tests {
                 op: CompareOp::Gt,
                 right: ExprNode::Literal(10.0),
             },
-            ActionNode::Buy { quantity: 1 },
+            ActionNode::Buy {
+                quantity: QuantitySpec::Fixed(1),
+            },
         )]));
         assert!(errors
             .iter()
@@ -271,7 +323,9 @@ mod tests {
                 op: CompareOp::Gt,
                 right: ExprNode::Literal(1.5),
             },
-            ActionNode::Buy { quantity: 1 },
+            ActionNode::Buy {
+                quantity: QuantitySpec::Fixed(1),
+            },
         )]));
         assert!(errors
             .iter()
@@ -283,7 +337,9 @@ mod tests {
         let errors = AstValidator::validate(&strategy(vec![rule(
             "rule_0",
             price_condition(),
-            ActionNode::Buy { quantity: 0 },
+            ActionNode::Buy {
+                quantity: QuantitySpec::Fixed(0),
+            },
         )]));
         assert!(errors
             .iter()
@@ -299,6 +355,32 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_percent_and_worth_quantities() {
+        let errors = AstValidator::validate(&strategy(vec![
+            rule(
+                "rule_0",
+                price_condition(),
+                ActionNode::Buy {
+                    quantity: QuantitySpec::PercentCapital(101.0),
+                },
+            ),
+            rule(
+                "rule_1",
+                price_condition(),
+                ActionNode::Buy {
+                    quantity: QuantitySpec::ValueBased(0.0),
+                },
+            ),
+        ]));
+        assert!(errors
+            .iter()
+            .any(|err| err.message == "percent quantity must be between 0 and 100 (got 101)"));
+        assert!(errors
+            .iter()
+            .any(|err| err.message == "WORTH quantity must be positive (got 0)"));
+    }
+
+    #[test]
     fn rejects_cross_with_literal() {
         let errors = AstValidator::validate(&strategy(vec![rule(
             "rule_0",
@@ -306,7 +388,9 @@ mod tests {
                 fast: ExprNode::Literal(30.0),
                 slow: ExprNode::PriceField(PriceField::Close),
             },
-            ActionNode::Buy { quantity: 1 },
+            ActionNode::Buy {
+                quantity: QuantitySpec::Fixed(1),
+            },
         )]));
         assert!(errors
             .iter()
@@ -324,7 +408,9 @@ mod tests {
                     period: 20,
                 }),
             },
-            ActionNode::Buy { quantity: 1 },
+            ActionNode::Buy {
+                quantity: QuantitySpec::Fixed(1),
+            },
         )]));
         assert!(errors
             .iter()
@@ -338,7 +424,9 @@ mod tests {
         let errors = AstValidator::validate(&strategy(vec![rule(
             "rule_0",
             ConditionNode::TimeWindow { start, end },
-            ActionNode::Buy { quantity: 1 },
+            ActionNode::Buy {
+                quantity: QuantitySpec::Fixed(1),
+            },
         )]));
         assert!(errors
             .iter()
@@ -348,14 +436,22 @@ mod tests {
     #[test]
     fn collects_all_errors() {
         let errors = AstValidator::validate(&strategy(vec![
-            rule("same", price_condition(), ActionNode::Buy { quantity: 0 }),
+            rule(
+                "same",
+                price_condition(),
+                ActionNode::Buy {
+                    quantity: QuantitySpec::Fixed(0),
+                },
+            ),
             rule(
                 "same",
                 ConditionNode::CrossBelow {
                     fast: ExprNode::Literal(1.0),
                     slow: ExprNode::Literal(2.0),
                 },
-                ActionNode::Sell { quantity: 0 },
+                ActionNode::Sell {
+                    quantity: QuantitySpec::Fixed(0),
+                },
             ),
         ]));
         assert!(errors.len() >= 4);
@@ -372,6 +468,8 @@ mod tests {
         let strat = StrategyNode {
             name: "test".to_string(),
             trade_in: Some(TradeIn::Index(IndexAlias::NiftyBank)),
+            stop_loss: None,
+            take_profit: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         let errors = AstValidator::validate(&strat);
@@ -386,6 +484,8 @@ mod tests {
         let strat = StrategyNode {
             name: "test".to_string(),
             trade_in: Some(TradeIn::Symbols(big_list)),
+            stop_loss: None,
+            take_profit: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         let errors = AstValidator::validate(&strat);
@@ -395,7 +495,109 @@ mod tests {
                 && e.message.contains("exceeds 500")));
     }
 
-    fn make_rsi_rule(period: usize, quantity: usize) -> RuleNode {
+    // ---------- STOP_LOSS / TAKE_PROFIT ----------
+
+    #[test]
+    fn accepts_valid_stop_loss() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: Some(2.0),
+            take_profit: None,
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        let errors = AstValidator::validate(&strat);
+        assert!(!errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::InvalidStopLoss)));
+    }
+
+    #[test]
+    fn accepts_valid_take_profit() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: None,
+            take_profit: Some(5.0),
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        let errors = AstValidator::validate(&strat);
+        assert!(!errors
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::InvalidTakeProfit)));
+    }
+
+    #[test]
+    fn accepts_stop_loss_at_100() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: Some(100.0),
+            take_profit: None,
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        assert!(!AstValidator::validate(&strat)
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::InvalidStopLoss)));
+    }
+
+    #[test]
+    fn rejects_zero_stop_loss() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: Some(0.0),
+            take_profit: None,
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        assert!(AstValidator::validate(&strat)
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::InvalidStopLoss)));
+    }
+
+    #[test]
+    fn rejects_over_100_stop_loss() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: Some(150.0),
+            take_profit: None,
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        assert!(AstValidator::validate(&strat)
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::InvalidStopLoss)));
+    }
+
+    #[test]
+    fn rejects_zero_take_profit() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: None,
+            take_profit: Some(0.0),
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        assert!(AstValidator::validate(&strat)
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::InvalidTakeProfit)));
+    }
+
+    #[test]
+    fn rejects_negative_stop_loss() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: Some(-1.0),
+            take_profit: None,
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        assert!(AstValidator::validate(&strat)
+            .iter()
+            .any(|e| matches!(e.kind, ValidationErrorKind::InvalidStopLoss)));
+    }
+
+    fn make_rsi_rule(period: usize, quantity: u64) -> RuleNode {
         rule(
             "rule_0",
             ConditionNode::Comparison {
@@ -406,7 +608,9 @@ mod tests {
                 op: CompareOp::Lt,
                 right: ExprNode::Literal(30.0),
             },
-            ActionNode::Buy { quantity },
+            ActionNode::Buy {
+                quantity: QuantitySpec::Fixed(quantity),
+            },
         )
     }
 

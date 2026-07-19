@@ -7,6 +7,7 @@ use crate::models::{Order, OrderResult, Position};
 pub trait ExecutionTarget: Send + Sync {
     async fn execute(&self, order: Order) -> Result<OrderResult, ExecutionError>;
     async fn get_positions(&self) -> Result<Vec<Position>, ExecutionError>;
+    fn available_cash(&self) -> f64;
     fn is_paper(&self) -> bool;
     fn name(&self) -> &str;
     /// Downcast hook so the engine can recover concrete broker state

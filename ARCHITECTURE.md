@@ -285,6 +285,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | Deployed strategies list | `src/screens/Strategies/StrategiesScreen.tsx` |
 | Plugin management (list/enable/disable/reload, DEMO_PLUGINS fallback) | `src/screens/Plugins/PluginsScreen.tsx` |
 | Settings (default capital, about) | `src/screens/Settings/SettingsScreen.tsx` |
+| Index Data card (Settings) | `src/screens/Settings/SettingsScreen.tsx` |
 | Plugin wire types (`PluginListEntry`, `PluginMeta`, `PluginStatus`, `Capability`) | `src/types/plugin.ts` |
 | Sidebar nav (Builder/Strategies/Plugins/Settings) | `src/components/Sidebar/Sidebar.tsx` |
 

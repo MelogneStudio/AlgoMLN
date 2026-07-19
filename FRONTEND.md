@@ -130,11 +130,13 @@ The "Deploy" button on the builder calls `deployStrategy(dsl, name, mode)`. Afte
 
 ### Settings (`src/screens/Settings/SettingsScreen.tsx`)
 
-UI scale (read-only — derived from screen fit), default backtest capital, and an about card. Default capital is persisted to localStorage under `algomln_default_capital` and loaded by `loadSavedCapital()` in `App.tsx`.
+The Settings screen is a grid of cards: **Connected Broker**, **Default Backtest Capital**, **Index Data**, and an **About** card. Default capital is persisted to localStorage under `algomln_default_capital` and loaded by `loadSavedCapital()` in `App.tsx`.
+
+The **Index Data** card calls `listIndices()` on mount to fetch metadata for all 22 supported NSE indices. Each row shows the index's display name, symbol count, and last-updated date. The **Refresh Now** button (a `Button` with `variant="ghost"`) calls `refreshIndices()` — a long-running IPC (~30–60s) that re-pulls all 22 index constituents from niftyindices.com and the Dhan scrip master. While the refresh is in flight the button is disabled and shows "Refreshing…"; on completion an inline message reports the success/failure count and the index list is reloaded. The status grid is scrollable (`max-height: 320px`) so 22 rows don't blow out the card height.
 
 ### Modals
 
-- `StrategyCoderScreen` — modal textarea editor. Tab inserts two spaces, Esc closes. Read-only mode disables editing. Errors are shown at the top.
+- `StrategyCoderScreen` — modal textarea editor. Tab inserts two spaces, Esc closes. Read-only mode disables editing. Errors are shown at the top. A `TRADE_IN` chip (small rounded badge) appears in the title row when the current source contains a `TRADE_IN` clause (detected via a case-insensitive regex on `^\s*TRADE_IN\s+(.+)$` — no full DSL parse on the frontend). A toolbar above the editor exposes a toggle that reveals a static comment block listing the 22 supported index aliases, the explicit-symbol syntax, and a note that multi-symbol strategies are paper/live only.
 - `StrategyUploaderScreen` — file picker for `.algomln` files. On select, it routes the source into the coder (so the user can review before saving).
 
 ---
@@ -158,6 +160,9 @@ All IPC wrappers live in `src/types/tauri.ts` and are thin `invoke<T>(name, args
 - `enablePlugin(id) -> void`
 - `disablePlugin(id) -> void`
 - `reloadPlugins() -> string[]` (per-plugin error messages, empty = clean)
+- `listIndices() -> IndexInfo[]` (Settings → Index Data card)
+- `refreshIndices() -> RefreshResult` (Settings → Refresh Now button; ~30–60s, writes both index JSON and symbol-map CSV)
+- `getIndexSymbols(alias) -> string[]` (used by PortfolioEngine on the Rust side; not yet consumed by the UI)
 - `isTauri()` — checks `'__TAURI_INTERNALS__' in window`.
 
 The naming convention is camelCase on the TS side because that's what Tauri's invoke expects for argument keys.

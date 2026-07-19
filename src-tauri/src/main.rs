@@ -153,6 +153,19 @@ async fn refresh_indices(
     Ok(commands::indices::refresh_indices(&app, &state).await)
 }
 
+// ---------- Search IPC ----------
+//
+// Fuzzy-search the symbol universe (equities + 22 NSE indices). The
+// scoring logic is pure and lives in `algomln::search`; this wrapper just
+// forwards to the async body in `commands::search`.
+#[tauri::command]
+async fn search_symbols(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<algomln::search::SymbolMatch>, String> {
+    commands::search::search_symbols_impl(&state, query).await
+}
+
 fn main() {
     load_dotenv();
 
@@ -467,6 +480,7 @@ fn main() {
             list_indices,
             get_index_symbols,
             refresh_indices,
+            search_symbols,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AlgoMLN");

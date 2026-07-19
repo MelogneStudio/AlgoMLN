@@ -50,11 +50,32 @@ pub enum LogEntryKind {
         from: StrategyStatus,
         to: StrategyStatus,
     },
+    /// Stop-loss threshold was breached for a held position. Logged before
+    /// the resulting `SELL ALL` order is submitted. `symbol` is the held
+    /// symbol, `loss_pct` is the unrealized loss against the entry price
+    /// (e.g. 2.5 means the position is 2.5% underwater), `price` is the
+    /// candle close that triggered the breach.
+    StopLossFired {
+        symbol: String,
+        loss_pct: f64,
+        price: f64,
+    },
+    /// Take-profit threshold was breached for a held position. Logged
+    /// before the resulting `SELL ALL` order is submitted. `gain_pct` is
+    /// the unrealized gain against the entry price (e.g. 5.0 means 5%
+    /// above entry). When both SL and TP would fire on the same candle,
+    /// the stop-loss fires first and take-profit is skipped.
+    TakeProfitFired {
+        symbol: String,
+        gain_pct: f64,
+        price: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub enum RuleSkipReason {
     NoPosition,
+    InsufficientCash,
 }
 
 #[derive(Debug, Clone, Serialize)]

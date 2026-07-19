@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-const DHAN_SCRIP_MASTER_URL: &str =
-    "https://images.dhan.co/api-data/api-scrip-master-detailed.csv";
+const DHAN_SCRIP_MASTER_URL: &str = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv";
 
 /// Maps NSE equity trading symbols to Dhan security IDs.
 /// Loaded once at startup; shared via Arc.
@@ -106,6 +105,12 @@ impl SymbolMap {
     /// Look up a security ID for a symbol. Case-insensitive.
     pub fn get(&self, symbol: &str) -> Option<u32> {
         self.map.get(&symbol.trim().to_uppercase()).copied()
+    }
+
+    /// Borrow the raw symbol → security_id map. Used by the
+    /// `search_symbols` IPC command to walk the entire universe.
+    pub fn inner(&self) -> &HashMap<String, u32> {
+        &self.map
     }
 
     /// Batch lookup. Returns (found: Vec<(symbol, security_id)>, missing: Vec<symbol>).

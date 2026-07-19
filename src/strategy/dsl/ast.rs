@@ -175,10 +175,28 @@ impl IndexAlias {
     pub fn all() -> &'static [IndexAlias] {
         use IndexAlias::*;
         &[
-            Nifty50, NiftyNext50, Nifty100, Nifty200, Nifty500, NiftyMidcap50, NiftyMidcap100,
-            NiftyMidcap150, NiftySmallcap50, NiftySmallcap100, NiftySmallcap250, NiftyBank,
-            NiftyIt, NiftyPharma, NiftyAuto, NiftyFmcg, NiftyMetal, NiftyRealty, NiftyEnergy,
-            NiftyInfra, NiftyPsuBank, NiftyFinancialServices,
+            Nifty50,
+            NiftyNext50,
+            Nifty100,
+            Nifty200,
+            Nifty500,
+            NiftyMidcap50,
+            NiftyMidcap100,
+            NiftyMidcap150,
+            NiftySmallcap50,
+            NiftySmallcap100,
+            NiftySmallcap250,
+            NiftyBank,
+            NiftyIt,
+            NiftyPharma,
+            NiftyAuto,
+            NiftyFmcg,
+            NiftyMetal,
+            NiftyRealty,
+            NiftyEnergy,
+            NiftyInfra,
+            NiftyPsuBank,
+            NiftyFinancialServices,
         ]
     }
 }
@@ -200,6 +218,15 @@ pub struct StrategyNode {
     /// `None` for the existing single-symbol flow. The engine reads this once
     /// at deploy time to fan the ruleset out over a symbol universe.
     pub trade_in: Option<TradeIn>,
+    /// Optional stop-loss percentage (e.g. `2.0` for 2%). When set, the engine
+    /// closes any open long position whose unrealized loss against the entry
+    /// price exceeds this threshold on every candle. Deliberately bypasses
+    /// `TriggerStateMap` because it must fire every candle while underwater,
+    /// not on a `false → true` edge.
+    pub stop_loss: Option<f64>,
+    /// Optional take-profit percentage (e.g. `5.0` for 5%). Mirrors
+    /// `stop_loss` for the gain side.
+    pub take_profit: Option<f64>,
     pub rules: Vec<RuleNode>,
 }
 
@@ -289,9 +316,19 @@ pub enum CompareOp {
     Neq,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum QuantitySpec {
+    /// BUY 10 / SELL 10
+    Fixed(u64),
+    /// BUY 10% - percentage of current available cash
+    PercentCapital(f64),
+    /// BUY 5000 WORTH - fixed rupee value
+    ValueBased(f64),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ActionNode {
-    Buy { quantity: usize },
-    Sell { quantity: usize },
+    Buy { quantity: QuantitySpec },
+    Sell { quantity: QuantitySpec },
     SellAll,
 }

@@ -94,3 +94,25 @@ export async function refreshIndices(): Promise<RefreshResult> {
   }
   return invoke<RefreshResult>('refresh_indices');
 }
+
+// ─── Search ───────────────────────────────────────────────────────────────
+
+export type SymbolKind = 'equity' | 'index';
+
+export interface SymbolMatch {
+  symbol: string;
+  displayName: string;
+  kind: SymbolKind;
+  securityId: number | null;
+}
+
+/**
+ * Fuzzy-search the symbol universe (equities + 22 NSE indices). Returns
+ * up to 5 ranked hits — exact match, prefix, substring, subsequence,
+ * then trigram Jaccard. The browser fallback returns `[]` so the UI is
+ * still demoable under `npm run dev`.
+ */
+export async function searchSymbols(query: string): Promise<SymbolMatch[]> {
+  if (!isTauri()) return [];
+  return invoke<SymbolMatch[]>('search_symbols', { query });
+}

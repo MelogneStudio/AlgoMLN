@@ -6,6 +6,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::strategy::dsl::ast::IndexAlias;
 
+/// One NSE index loaded into the registry. `display_name` is the
+/// human-readable label (e.g. "NIFTY 50") used by both the Settings UI and
+/// the fuzzy-search result list; `alias` is the machine key.
+#[derive(Debug, Clone)]
+pub struct IndexEntry {
+    pub alias: IndexAlias,
+    pub display_name: String,
+    pub symbols: Vec<String>,
+    pub last_updated: String,
+}
+
 /// On-disk JSON format for a cached index constituent list.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IndexCacheFile {
@@ -24,9 +35,11 @@ pub struct IndexInfo {
     pub last_updated: String, // ISO date or "never"
 }
 
-struct IndexEntry {
-    symbols: Vec<String>,
-    last_updated: String,
+/// Single source of truth for the human-readable label of an
+/// `IndexAlias`. Reused by `IndexRegistry` (load and update paths) and by
+/// `list_indices` so we never inline the mapping twice.
+pub fn alias_display_name(alias: &IndexAlias) -> &'static str {
+    alias.display_name()
 }
 
 /// Read-only-after-load registry of NSE index constituent lists.
@@ -58,14 +71,16 @@ impl IndexRegistry {
             let cache_path = cache_dir.join(&filename);
             let resource_path = resource_dir.join(&filename);
 
-            let loaded = Self::try_load_file(&cache_path)
-                .or_else(|| Self::try_load_file(&resource_path));
+            let loaded =
+                Self::try_load_file(&cache_path).or_else(|| Self::try_load_file(&resource_path));
 
             match loaded {
                 Some(file) => {
                     data.insert(
                         alias.clone(),
                         IndexEntry {
+                            alias: alias.clone(),
+                            display_name: alias_display_name(&alias).to_string(),
                             symbols: file.symbols,
                             last_updated: file.last_updated,
                         },
@@ -82,6 +97,8 @@ impl IndexRegistry {
                     data.insert(
                         alias.clone(),
                         IndexEntry {
+                            alias: alias.clone(),
+                            display_name: alias_display_name(&alias).to_string(),
                             symbols: vec![],
                             last_updated: "never".to_string(),
                         },
@@ -108,12 +125,27 @@ impl IndexRegistry {
     /// Update an alias entry after a successful refresh.
     pub fn update(&self, alias: IndexAlias, symbols: Vec<String>, last_updated: String) {
         self.data.write().insert(
-            alias,
+            alias.clone(),
             IndexEntry {
+                alias: alias.clone(),
+                display_name: alias_display_name(&alias).to_string(),
                 symbols,
                 last_updated,
             },
         );
+    }
+
+    /// Snapshot every entry into an owned `Vec`. Use this from async
+    /// contexts (e.g. the `search_symbols` command body) so the read
+    /// guard can be dropped before any `.await` point. Iteration order
+    /// matches `IndexAlias::all()` so search results are stable across
+    /// calls (the underlying `HashMap` has nondeterministic order).
+    pub fn collect_entries(&self) -> Vec<IndexEntry> {
+        let data = self.data.read();
+        IndexAlias::all()
+            .iter()
+            .filter_map(|alias| data.get(alias).cloned())
+            .collect()
     }
 
     /// List info for all 22 indices (for IPC / UI display).
@@ -125,7 +157,7 @@ impl IndexRegistry {
                 let entry = data.get(alias);
                 IndexInfo {
                     alias: alias.dsl_keyword().to_string(),
-                    display_name: alias.display_name().to_string(),
+                    display_name: alias_display_name(alias).to_string(),
                     symbol_count: entry.map(|e| e.symbols.len()).unwrap_or(0),
                     last_updated: entry
                         .map(|e| e.last_updated.clone())

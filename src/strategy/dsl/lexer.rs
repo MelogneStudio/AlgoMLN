@@ -12,6 +12,8 @@ pub enum TokenKind {
     Between,
     InPosition,
     TradeIn,
+    StopLoss,
+    TakeProfit,
     Ema,
     Ma,
     Rsi,
@@ -40,6 +42,8 @@ pub enum TokenKind {
     Neq,
     Number(f64),
     Integer(usize),
+    Percent,
+    Worth,
     TimeStr(String),
     /// Catch-all for non-keyword identifiers (NSE symbols, index alias
     /// strings, future plugin-registered keywords). The string is the raw
@@ -121,6 +125,10 @@ impl Lexer {
                             })?;
                         tokens.push(token(kind, line_no, col));
                         pos = next_pos;
+                        if pos < chars.len() && chars[pos] == '%' {
+                            tokens.push(token(TokenKind::Percent, line_no, pos + 1));
+                            pos += 1;
+                        }
                     }
                     _ if is_ident_start(ch) => {
                         let start = pos;
@@ -135,8 +143,8 @@ impl Lexer {
                         // or a typo. This keeps `TRADE_IN RELIANCE, INFY`
                         // and `NIFTY_50` lexable without hard-coding the
                         // 22 index keywords.
-                        let kind = keyword(&ident)
-                            .unwrap_or_else(|| TokenKind::Identifier(ident.clone()));
+                        let kind =
+                            keyword(&ident).unwrap_or_else(|| TokenKind::Identifier(ident.clone()));
                         tokens.push(token(kind, line_no, col));
                     }
                     _ => {
@@ -228,12 +236,15 @@ fn keyword(ident: &str) -> Option<TokenKind> {
         "buy" => Some(TokenKind::Buy),
         "sell" => Some(TokenKind::Sell),
         "all" => Some(TokenKind::All),
+        "worth" => Some(TokenKind::Worth),
         "and" => Some(TokenKind::And),
         "or" => Some(TokenKind::Or),
         "not" => Some(TokenKind::Not),
         "between" => Some(TokenKind::Between),
         "in_position" => Some(TokenKind::InPosition),
         "trade_in" => Some(TokenKind::TradeIn),
+        "stop_loss" => Some(TokenKind::StopLoss),
+        "take_profit" => Some(TokenKind::TakeProfit),
         "ema" => Some(TokenKind::Ema),
         "ma" => Some(TokenKind::Ma),
         "rsi" => Some(TokenKind::Rsi),
@@ -249,9 +260,9 @@ fn keyword(ident: &str) -> Option<TokenKind> {
         "low" => Some(TokenKind::Low),
         "volume" => Some(TokenKind::Volume),
         "prev_close" => Some(TokenKind::PrevClose),
-        "prev_open"  => Some(TokenKind::PrevOpen),
-        "prev_high"  => Some(TokenKind::PrevHigh),
-        "prev_low"   => Some(TokenKind::PrevLow),
+        "prev_open" => Some(TokenKind::PrevOpen),
+        "prev_high" => Some(TokenKind::PrevHigh),
+        "prev_low" => Some(TokenKind::PrevLow),
         "cross_above" => Some(TokenKind::CrossAbove),
         "cross_below" => Some(TokenKind::CrossBelow),
         _ => None,
@@ -319,6 +330,15 @@ BUY 10
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn tokenizes_percent_and_worth_quantities() {
+        let tokens =
+            Lexer::tokenize("WHEN close > 100\nBUY 10%\nWHEN close < 90\nBUY 5000 WORTH").unwrap();
+        let kinds: Vec<_> = tokens.into_iter().map(|token| token.kind).collect();
+        assert!(kinds.contains(&TokenKind::Percent));
+        assert!(kinds.contains(&TokenKind::Worth));
     }
 
     #[test]
@@ -410,9 +430,7 @@ BUY 10
     #[test]
     fn tokenizes_trade_in_keyword() {
         let tokens = Lexer::tokenize("TRADE_IN RELIANCE, INFY").unwrap();
-        assert!(tokens
-            .iter()
-            .any(|token| token.kind == TokenKind::TradeIn));
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::TradeIn));
         // Symbols fall through to Identifier(String).
         let idents: Vec<&str> = tokens
             .iter()
@@ -430,8 +448,26 @@ BUY 10
         // IndexAlias::from_dsl_str in parse_trade_in.
         let tokens = Lexer::tokenize("TRADE_IN NIFTY_50").unwrap();
         assert!(matches!(
-            tokens.iter().find(|t| matches!(t.kind, TokenKind::Identifier(_))),
+            tokens
+                .iter()
+                .find(|t| matches!(t.kind, TokenKind::Identifier(_))),
             Some(_)
         ));
+    }
+
+    #[test]
+    fn tokenizes_stop_loss_keyword() {
+        let tokens = Lexer::tokenize("STOP_LOSS 2%").unwrap();
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::StopLoss));
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::Percent));
+    }
+
+    #[test]
+    fn tokenizes_take_profit_keyword() {
+        let tokens = Lexer::tokenize("TAKE_PROFIT 5%").unwrap();
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::TakeProfit));
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::Percent));
     }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { Button } from '../../components/Button/Button';
 import styles from './StrategyCoderScreen.module.css';
@@ -12,6 +12,22 @@ interface StrategyCoderScreenProps {
   error?: string | null;
 }
 
+const TRADE_IN_HINT = `# TRADE_IN syntax (optional — place before first WHEN):
+#
+#   TRADE_IN NIFTY_50          — all 50 large-cap constituents
+#   TRADE_IN NIFTY_BANK        — banking sector
+#   TRADE_IN RELIANCE, INFY    — explicit symbol list
+#
+# Supported indices:
+#   NIFTY_50  NIFTY_NEXT_50  NIFTY_100  NIFTY_200  NIFTY_500
+#   NIFTY_MIDCAP_50  NIFTY_MIDCAP_100  NIFTY_MIDCAP_150
+#   NIFTY_SMALLCAP_50  NIFTY_SMALLCAP_100  NIFTY_SMALLCAP_250
+#   NIFTY_BANK  NIFTY_IT  NIFTY_PHARMA  NIFTY_AUTO  NIFTY_FMCG
+#   NIFTY_METAL  NIFTY_REALTY  NIFTY_ENERGY  NIFTY_INFRA
+#   NIFTY_PSU_BANK  NIFTY_FINANCIAL_SERVICES
+#
+# Multi-symbol strategies: paper/live only (backtest not yet supported).`;
+
 export function StrategyCoderScreen({
   open,
   initialSource,
@@ -22,12 +38,19 @@ export function StrategyCoderScreen({
 }: StrategyCoderScreenProps) {
   const [source, setSource] = useState(initialSource);
   const [error, setError] = useState<string | null>(externalError);
+  const [showHint, setShowHint] = useState(false);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const tradeInLabel = useMemo(() => {
+    const m = source.match(/^\s*TRADE_IN\s+(.+)$/im);
+    return m ? m[1].trim() : null;
+  }, [source]);
 
   useEffect(() => {
     if (open) {
       setSource(initialSource);
       setError(externalError);
+      setShowHint(false);
     }
   }, [open, initialSource, externalError]);
 
@@ -67,7 +90,29 @@ export function StrategyCoderScreen({
   return (
     <div className={styles.overlay} role="dialog" aria-modal="true">
       <div className={styles.card}>
-        <h2 className={styles.title}>Code your strategy</h2>
+        <div className={styles.titleRow}>
+          <h2 className={styles.title}>Code your strategy</h2>
+          {tradeInLabel && (
+            <span className={styles.tradeInChip}>TRADE_IN: {tradeInLabel}</span>
+          )}
+        </div>
+
+        <div className={styles.toolbar}>
+          <button
+            type="button"
+            className={styles.hintToggle}
+            onClick={() => setShowHint((v) => !v)}
+            aria-expanded={showHint}
+          >
+            {showHint ? 'Hide TRADE_IN reference' : 'Show TRADE_IN reference'}
+          </button>
+        </div>
+
+        {showHint && (
+          <pre className={styles.hintBlock} aria-label="TRADE_IN syntax reference">
+            {TRADE_IN_HINT}
+          </pre>
+        )}
 
         <div className={styles.editorWrap}>
           <div className={styles.fileTab}>

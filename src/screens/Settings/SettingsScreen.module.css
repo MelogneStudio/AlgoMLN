@@ -131,3 +131,76 @@
   color: var(--text-muted);
   margin: 0;
 }
+
+/* Index Data card */
+.indexHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.indexGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 10px 14px;
+  background: var(--rule-inner-bg);
+  border: 1px solid var(--border-rule);
+  border-radius: var(--radius-option);
+}
+
+.indexRow {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 4px;
+  border-bottom: 1px solid rgba(119, 119, 119, 0.18);
+  font-family: var(--font-cascadia);
+  font-size: 16px;
+  color: var(--text-muted);
+}
+
+.indexRow:last-child {
+  border-bottom: none;
+}
+
+.indexName {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.indexMeta {
+  color: var(--text-muted);
+}
+
+.indexUpdated {
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.indexEmpty {
+  font-family: var(--font-sansation);
+  font-size: 15px;
+  color: var(--text-dim);
+  margin: 0;
+  padding: 8px 4px;
+}
+
+.indexMsgOk {
+  font-family: var(--font-sansation);
+  font-size: 14px;
+  color: var(--text-green);
+  margin: 0;
+}
+
+.indexMsgError {
+  font-family: var(--font-sansation);
+  font-size: 14px;
+  color: #e05252;
+  margin: 0;
+}

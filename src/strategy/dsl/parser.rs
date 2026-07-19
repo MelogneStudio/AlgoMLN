@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ast::{
     ActionNode, CompareOp, ConditionNode, ExprNode, IndexAlias, IndicatorCall, IndicatorKind,
-    PriceField, RuleNode, StrategyNode, TradeIn,
+    PriceField, QuantitySpec, RuleNode, StrategyNode, TradeIn,
 };
 use super::lexer::{Token, TokenKind};
 
@@ -29,19 +29,93 @@ impl Parser {
         let trade_in = self.parse_trade_in()?;
         self.skip_newlines();
 
+        let mut stop_loss: Option<f64> = None;
+        let mut take_profit: Option<f64> = None;
         let mut rules = Vec::new();
         while !self.is_at_end() {
-            let mut rule = self.parse_rule()?;
-            rule.id = format!("rule_{}", rules.len());
-            rules.push(rule);
+            match self.peek().kind.clone() {
+                TokenKind::StopLoss => {
+                    if stop_loss.is_some() {
+                        return Err(ParseError {
+                            message: "duplicate STOP_LOSS declaration".to_string(),
+                            line: self.peek().line,
+                            col: self.peek().col,
+                        });
+                    }
+                    stop_loss = Some(self.parse_stop_loss()?);
+                }
+                TokenKind::TakeProfit => {
+                    if take_profit.is_some() {
+                        return Err(ParseError {
+                            message: "duplicate TAKE_PROFIT declaration".to_string(),
+                            line: self.peek().line,
+                            col: self.peek().col,
+                        });
+                    }
+                    take_profit = Some(self.parse_take_profit()?);
+                }
+                _ => {
+                    let mut rule = self.parse_rule()?;
+                    rule.id = format!("rule_{}", rules.len());
+                    rules.push(rule);
+                }
+            }
             self.skip_newlines();
         }
 
         Ok(StrategyNode {
             name: "Untitled Strategy".to_string(),
             trade_in,
+            stop_loss,
+            take_profit,
             rules,
         })
+    }
+
+    /// Parse a `STOP_LOSS <number> %` declaration. Returns the percentage as
+    /// a float (2% → 2.0). The `%` token is required.
+    fn parse_stop_loss(&mut self) -> Result<f64, ParseError> {
+        self.expect_simple(TokenKind::StopLoss)?;
+        self.skip_newlines();
+        let value = self.parse_percent_number()?;
+        self.skip_newlines();
+        Ok(value)
+    }
+
+    /// Parse a `TAKE_PROFIT <number> %` declaration. Returns the percentage
+    /// as a float (5% → 5.0). The `%` token is required.
+    fn parse_take_profit(&mut self) -> Result<f64, ParseError> {
+        self.expect_simple(TokenKind::TakeProfit)?;
+        self.skip_newlines();
+        let value = self.parse_percent_number()?;
+        self.skip_newlines();
+        Ok(value)
+    }
+
+    /// Parse a `<number> %` pair (used by SL/TP declarations). The `%` is
+    /// required so the user can't accidentally write `STOP_LOSS 2` (which
+    /// would be ambiguous between rupees and percent).
+    fn parse_percent_number(&mut self) -> Result<f64, ParseError> {
+        let token = self.advance().clone();
+        let value = match token.kind {
+            TokenKind::Number(v) => v,
+            TokenKind::Integer(v) => v as f64,
+            _ => {
+                return Err(ParseError {
+                    message: "expected a percentage value (e.g. 2%)".to_string(),
+                    line: token.line,
+                    col: token.col,
+                });
+            }
+        };
+        if !self.matches_simple(TokenKind::Percent) {
+            return Err(ParseError {
+                message: "expected '%' after the percentage value".to_string(),
+                line: self.peek().line,
+                col: self.peek().col,
+            });
+        }
+        Ok(value)
     }
 
     /// Parse an optional `TRADE_IN <items...>` header. Returns `None` if the
@@ -299,10 +373,27 @@ impl Parser {
         }
     }
 
-    fn parse_quantity(&mut self) -> Result<usize, ParseError> {
+    fn parse_quantity(&mut self) -> Result<QuantitySpec, ParseError> {
         match self.advance().kind.clone() {
-            TokenKind::Integer(value) => Ok(value),
-            _ => self.error_previous("expected integer quantity"),
+            TokenKind::Integer(value) => {
+                if self.matches_simple(TokenKind::Percent) {
+                    Ok(QuantitySpec::PercentCapital(value as f64))
+                } else if self.matches_simple(TokenKind::Worth) {
+                    Ok(QuantitySpec::ValueBased(value as f64))
+                } else {
+                    Ok(QuantitySpec::Fixed(value as u64))
+                }
+            }
+            TokenKind::Number(value) => {
+                if self.matches_simple(TokenKind::Percent) {
+                    Ok(QuantitySpec::PercentCapital(value))
+                } else if self.matches_simple(TokenKind::Worth) {
+                    Ok(QuantitySpec::ValueBased(value))
+                } else {
+                    self.error_previous("float quantity requires % or WORTH")
+                }
+            }
+            _ => self.error_previous("expected quantity"),
         }
     }
 
@@ -387,6 +478,7 @@ fn token_name(kind: &TokenKind) -> &'static str {
     match kind {
         TokenKind::When => "WHEN",
         TokenKind::TradeIn => "TRADE_IN",
+        TokenKind::Percent => "'%'",
         TokenKind::Newline => "newline",
         TokenKind::LParen => "'('",
         TokenKind::RParen => "')'",
@@ -443,7 +535,9 @@ BUY 10
         assert_eq!(strategy.rules[0].id, "rule_0");
         assert!(matches!(
             strategy.rules[0].action,
-            ActionNode::Buy { quantity: 5 }
+            ActionNode::Buy {
+                quantity: QuantitySpec::Fixed(5)
+            }
         ));
     }
 
@@ -521,6 +615,30 @@ BUY 10
     fn parses_sell_all_distinctly() {
         let strategy = parse("WHEN close > 10\nSELL ALL");
         assert!(matches!(strategy.rules[0].action, ActionNode::SellAll));
+    }
+
+    #[test]
+    fn parses_percent_and_worth_quantities() {
+        let strategy = parse("WHEN close > 100\nBUY 10%\nWHEN close < 90\nBUY 5000 WORTH");
+        assert!(matches!(
+            strategy.rules[0].action,
+            ActionNode::Buy {
+                quantity: QuantitySpec::PercentCapital(10.0)
+            }
+        ));
+        assert!(matches!(
+            strategy.rules[1].action,
+            ActionNode::Buy {
+                quantity: QuantitySpec::ValueBased(5000.0)
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_float_quantity_without_sizing_suffix() {
+        let tokens = Lexer::tokenize("WHEN close > 100\nBUY 1.5").unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert_eq!(err.message, "float quantity requires % or WORTH");
     }
 
     #[test]
@@ -657,5 +775,73 @@ BUY 10
     fn omits_trade_in_when_keyword_absent() {
         let strategy = parse("WHEN close > 100\nBUY 1");
         assert!(strategy.trade_in.is_none());
+    }
+
+    // ---------- STOP_LOSS / TAKE_PROFIT ----------
+
+    #[test]
+    fn parses_stop_loss_before_rules() {
+        let strategy = parse("STOP_LOSS 2%\nWHEN close > 100\nBUY 1");
+        assert_eq!(strategy.stop_loss, Some(2.0));
+        assert_eq!(strategy.take_profit, None);
+        assert_eq!(strategy.rules.len(), 1);
+    }
+
+    #[test]
+    fn parses_take_profit_before_rules() {
+        let strategy = parse("TAKE_PROFIT 5%\nWHEN close > 100\nBUY 1");
+        assert_eq!(strategy.stop_loss, None);
+        assert_eq!(strategy.take_profit, Some(5.0));
+    }
+
+    #[test]
+    fn parses_both_declarations() {
+        let strategy = parse("STOP_LOSS 2%\nTAKE_PROFIT 5%\nWHEN close > 100\nBUY 1");
+        assert_eq!(strategy.stop_loss, Some(2.0));
+        assert_eq!(strategy.take_profit, Some(5.0));
+    }
+
+    #[test]
+    fn parses_declarations_interleaved_with_rules() {
+        let strategy = parse(
+            "WHEN close > 100\nBUY 1\nSTOP_LOSS 2%\nWHEN close < 50\nSELL ALL\nTAKE_PROFIT 5%",
+        );
+        assert_eq!(strategy.stop_loss, Some(2.0));
+        assert_eq!(strategy.take_profit, Some(5.0));
+        assert_eq!(strategy.rules.len(), 2);
+    }
+
+    #[test]
+    fn parses_float_percent_value() {
+        let strategy = parse("STOP_LOSS 2.5%\nWHEN close > 100\nBUY 1");
+        assert_eq!(strategy.stop_loss, Some(2.5));
+    }
+
+    #[test]
+    fn rejects_duplicate_stop_loss() {
+        let tokens = Lexer::tokenize("STOP_LOSS 2%\nSTOP_LOSS 5%\nBUY 1").unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.message.contains("duplicate STOP_LOSS"));
+    }
+
+    #[test]
+    fn rejects_duplicate_take_profit() {
+        let tokens = Lexer::tokenize("TAKE_PROFIT 5%\nTAKE_PROFIT 8%\nBUY 1").unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.message.contains("duplicate TAKE_PROFIT"));
+    }
+
+    #[test]
+    fn rejects_stop_loss_without_percent() {
+        let tokens = Lexer::tokenize("STOP_LOSS 2\nWHEN close > 100\nBUY 1").unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.message.contains("expected '%'"));
+    }
+
+    #[test]
+    fn strategy_without_declarations_has_none() {
+        let strategy = parse("WHEN close > 100\nBUY 1");
+        assert_eq!(strategy.stop_loss, None);
+        assert_eq!(strategy.take_profit, None);
     }
 }

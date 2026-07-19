@@ -135,7 +135,7 @@ impl StrategyEngine {
                             strategy_id: self.instance.id.clone(),
                         });
                     }
-                    self.submit_action(rule, action, &ctx).await;
+                    self.submit_action(&rule.id, action, &ctx).await;
                 }
                 Ok(None) => {
                     self.logger.log(
@@ -164,6 +164,16 @@ impl StrategyEngine {
 
         for rule in &rules {
             self.update_cross_state(rule, &ctx);
+        }
+
+        // After the rule loop and the cross-state update pass, run the
+        // stop-loss / take-profit pass on the current open position. This
+        // deliberately runs after the rule loop so a rule that fires on the
+        // same candle (closing or opening a position) is reflected in the
+        // position we evaluate here. It also runs after the cross-update
+        // pass for symmetry with the other post-rule bookkeeping.
+        if self.instance.strategy.stop_loss.is_some() || self.instance.strategy.take_profit.is_some() {
+            self.run_stop_loss_take_profit_pass(&ctx).await;
         }
 
         if let Some(bus) = &self.event_bus {
@@ -200,35 +210,49 @@ impl StrategyEngine {
         Ok(should_fire.then(|| rule.action.clone()))
     }
 
-    async fn submit_action(&mut self, rule: &RuleNode, action: ActionNode, ctx: &EvalContext<'_>) {
+    async fn submit_action(
+        &mut self,
+        source_id: &str,
+        action: ActionNode,
+        ctx: &EvalContext<'_>,
+    ) {
         let current_position = self.current_paper_position().await;
+        let available_cash = self.instance.execution_target.available_cash();
         let order = match build_order(
             &action,
             &self.instance.symbol,
             ctx.current.close,
+            available_cash,
             current_position.as_ref(),
-            &rule.id,
+            source_id,
         ) {
             Ok(order) => order,
             Err(error) => {
                 match error {
                     OrderBuildError::NoPosition => self.logger.log(
                         LogEntryKind::RuleSkipped {
-                            rule_id: rule.id.clone(),
+                            rule_id: source_id.to_string(),
                             reason: RuleSkipReason::NoPosition,
+                        },
+                        ctx.current.timestamp,
+                    ),
+                    OrderBuildError::InsufficientCash => self.logger.log(
+                        LogEntryKind::RuleSkipped {
+                            rule_id: source_id.to_string(),
+                            reason: RuleSkipReason::InsufficientCash,
                         },
                         ctx.current.timestamp,
                     ),
                     OrderBuildError::ZeroQuantity => self.logger.log(
                         LogEntryKind::OrderFailed {
-                            rule_id: rule.id.clone(),
+                            rule_id: source_id.to_string(),
                             error: "zero quantity - validator missed this".to_string(),
                         },
                         ctx.current.timestamp,
                     ),
                     OrderBuildError::QuantityTooLarge => self.logger.log(
                         LogEntryKind::OrderFailed {
-                            rule_id: rule.id.clone(),
+                            rule_id: source_id.to_string(),
                             error: "quantity too large".to_string(),
                         },
                         ctx.current.timestamp,
@@ -240,7 +264,7 @@ impl StrategyEngine {
 
         self.logger.log(
             LogEntryKind::OrderSubmitted {
-                rule_id: rule.id.clone(),
+                rule_id: source_id.to_string(),
                 order: order.clone(),
             },
             ctx.current.timestamp,
@@ -255,7 +279,7 @@ impl StrategyEngine {
             Ok(result) => {
                 self.logger.log(
                     LogEntryKind::OrderExecuted {
-                        rule_id: rule.id.clone(),
+                        rule_id: source_id.to_string(),
                         result: result.clone(),
                     },
                     ctx.current.timestamp,
@@ -268,11 +292,90 @@ impl StrategyEngine {
             }
             Err(error) => self.logger.log(
                 LogEntryKind::OrderFailed {
-                    rule_id: rule.id.clone(),
+                    rule_id: source_id.to_string(),
                     error: error.message,
                 },
                 ctx.current.timestamp,
             ),
+        }
+    }
+
+    /// Run the strategy-level stop-loss / take-profit pass on the current
+    /// candle. For each open position (`quantity > 0`) on the engine's
+    /// symbol, compute the unrealized loss/gain against the entry price and,
+    /// if either threshold is breached, submit a `SELL ALL` order through the
+    /// normal order path. If both thresholds would fire on the same candle
+    /// (e.g. a gap candle), stop-loss fires first and take-profit is
+    /// skipped — the position is already closed by the SL pass.
+    ///
+    /// This deliberately bypasses `TriggerStateMap` and fires every candle
+    /// while the position is underwater or in profit; it is the strategy's
+    /// safety net, not an edge-triggered rule.
+    async fn run_stop_loss_take_profit_pass(&mut self, ctx: &EvalContext<'_>) {
+        let stop_loss = self.instance.strategy.stop_loss;
+        let take_profit = self.instance.strategy.take_profit;
+
+        // Snapshot the open position once. After the SL pass, the position
+        // may be closed — TP must not refire against a position that no
+        // longer exists.
+        let position = match self.current_paper_position().await {
+            Some(pos) if pos.quantity > 0 => pos,
+            _ => return,
+        };
+
+        // Sanity check: the position is in this engine's symbol. In
+        // single-symbol backtests / paper runs this is always true; the
+        // PortfolioEngine routes per-symbol so each sub-engine sees only
+        // its own position.
+        if position.symbol != self.instance.symbol {
+            return;
+        }
+
+        // Need a positive entry price to compute a percentage.
+        if position.avg_entry_price <= 0.0 {
+            return;
+        }
+
+        let current_close = ctx.current.close;
+        if current_close <= 0.0 {
+            return;
+        }
+
+        let entry = position.avg_entry_price;
+        let loss_pct = (entry - current_close) / entry * 100.0;
+        let gain_pct = (current_close - entry) / entry * 100.0;
+
+        // Stop loss first — if it fires, the position closes and take
+        // profit is skipped.
+        if let Some(threshold) = stop_loss {
+            if loss_pct >= threshold {
+                self.logger.log(
+                    LogEntryKind::StopLossFired {
+                        symbol: self.instance.symbol.clone(),
+                        loss_pct,
+                        price: current_close,
+                    },
+                    ctx.current.timestamp,
+                );
+                self.submit_action("stop_loss", ActionNode::SellAll, ctx)
+                    .await;
+                return;
+            }
+        }
+
+        if let Some(threshold) = take_profit {
+            if gain_pct >= threshold {
+                self.logger.log(
+                    LogEntryKind::TakeProfitFired {
+                        symbol: self.instance.symbol.clone(),
+                        gain_pct,
+                        price: current_close,
+                    },
+                    ctx.current.timestamp,
+                );
+                self.submit_action("take_profit", ActionNode::SellAll, ctx)
+                    .await;
+            }
         }
     }
 
@@ -599,5 +702,262 @@ mod tests {
                 } if error.contains("InsufficientHistory")
             )
         }));
+    }
+
+    // ---------- STOP_LOSS / TAKE_PROFIT ----------
+
+    #[tokio::test]
+    async fn stop_loss_fires_when_loss_breaches_threshold() {
+        // Stop loss 2%: open at 100, drop to 97 → 3% loss → SL fires.
+        let mut engine = make_engine("STOP_LOSS 2%\nWHEN close > 0\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(100.0), candle(100.0), candle(97.0)];
+
+        // Candle 1: BUY fires (close > 0, fresh trigger).
+        let logs1 = engine.on_candle(&candles[..1]).await;
+        assert!(logs1
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. })));
+
+        // Candle 2: no rule fire (trigger state held), no SL (not underwater).
+        let logs2 = engine.on_candle(&candles[..2]).await;
+        assert!(!logs2
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::StopLossFired { .. })));
+
+        // Candle 3: 3% loss > 2% threshold → SL fires, position closes.
+        let logs3 = engine.on_candle(&candles[..3]).await;
+        assert!(logs3
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::StopLossFired { .. })));
+        assert!(logs3
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. })));
+
+        // Position should now be closed.
+        let state = engine
+            .instance
+            .execution_target
+            .as_any()
+            .downcast_ref::<crate::strategy::execution::PaperBroker>()
+            .unwrap()
+            .get_state();
+        assert!(state.positions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_loss_does_not_fire_when_loss_under_threshold() {
+        // Stop loss 5%: open at 100, drop to 97 → 3% loss < 5% threshold.
+        let mut engine = make_engine("STOP_LOSS 5%\nWHEN close > 0\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(100.0), candle(100.0), candle(97.0)];
+
+        engine.on_candle(&candles[..1]).await;
+        engine.on_candle(&candles[..2]).await;
+        let logs3 = engine.on_candle(&candles[..3]).await;
+
+        assert!(!logs3
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::StopLossFired { .. })));
+    }
+
+    #[tokio::test]
+    async fn take_profit_fires_when_gain_breaches_threshold() {
+        // Take profit 5%: open at 100, rise to 106 → 6% gain → TP fires.
+        let mut engine = make_engine("TAKE_PROFIT 5%\nWHEN close > 0\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(100.0), candle(100.0), candle(106.0)];
+
+        engine.on_candle(&candles[..1]).await;
+        engine.on_candle(&candles[..2]).await;
+        let logs3 = engine.on_candle(&candles[..3]).await;
+
+        assert!(logs3
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::TakeProfitFired { .. })));
+        assert!(logs3
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. })));
+    }
+
+    #[tokio::test]
+    async fn take_profit_does_not_fire_when_gain_under_threshold() {
+        // Take profit 10%: open at 100, rise to 105 → 5% gain < 10%.
+        let mut engine = make_engine("TAKE_PROFIT 10%\nWHEN close > 0\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(100.0), candle(100.0), candle(105.0)];
+
+        engine.on_candle(&candles[..1]).await;
+        engine.on_candle(&candles[..2]).await;
+        let logs3 = engine.on_candle(&candles[..3]).await;
+
+        assert!(!logs3
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::TakeProfitFired { .. })));
+    }
+
+    #[tokio::test]
+    async fn stop_loss_takes_priority_over_take_profit_on_gap() {
+        // 2% SL / 5% TP. Open at 100, gap-candle drops to 95 (5% loss) AND
+        // would have been a 5% gain if measured the other way — but here
+        // close < entry so only SL can fire. The position is closed, and
+        // take-profit must NOT fire because the position is gone.
+        let mut engine = make_engine(
+            "STOP_LOSS 2%\nTAKE_PROFIT 5%\nWHEN close > 0\nBUY 1",
+            100_000.0,
+        );
+        let candles: Vec<Candle> = vec![candle(100.0), candle(95.0)];
+
+        engine.on_candle(&candles[..1]).await;
+        let logs2 = engine.on_candle(&candles[..2]).await;
+
+        assert!(logs2
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::StopLossFired { .. })));
+        assert!(!logs2
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::TakeProfitFired { .. })));
+    }
+
+    #[tokio::test]
+    async fn sl_tp_pass_does_nothing_when_no_position() {
+        // 2% SL / 5% TP. A dummy rule (which never fires) is needed so the
+        // validator accepts the strategy — the engine itself doesn't care
+        // about rules, but the validator rejects empty rulesets. Then we
+        // assert no SL/TP fires because the rule never opens a position.
+        let mut engine = make_engine(
+            "STOP_LOSS 2%\nTAKE_PROFIT 5%\nWHEN close > 9999\nBUY 1",
+            100_000.0,
+        );
+        let candles: Vec<Candle> = vec![candle(100.0), candle(50.0), candle(200.0)];
+
+        let logs = engine.on_candle(&candles[..1]).await;
+        assert!(!logs
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::StopLossFired { .. })));
+        assert!(!logs
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::TakeProfitFired { .. })));
+    }
+
+    #[tokio::test]
+    async fn strategy_without_sl_tp_does_not_fire_them() {
+        // No SL/TP declarations. Position drops hard, no SL/TP logs.
+        let mut engine = make_engine("WHEN close > 0\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(100.0), candle(1.0)];
+
+        engine.on_candle(&candles[..1]).await;
+        let logs2 = engine.on_candle(&candles[..2]).await;
+
+        assert!(!logs2
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::StopLossFired { .. })));
+        assert!(!logs2
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::TakeProfitFired { .. })));
+    }
+
+    #[tokio::test]
+    async fn stop_loss_event_carries_loss_pct_and_price() {
+        // Verify the log payload: open at 100, close at 96 → 4% loss.
+        let mut engine = make_engine("STOP_LOSS 2%\nWHEN close > 0\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(100.0), candle(96.0)];
+
+        engine.on_candle(&candles[..1]).await;
+        let logs2 = engine.on_candle(&candles[..2]).await;
+
+        let sl = logs2
+            .iter()
+            .find_map(|e| match &e.kind {
+                LogEntryKind::StopLossFired {
+                    symbol,
+                    loss_pct,
+                    price,
+                } => Some((symbol.clone(), *loss_pct, *price)),
+                _ => None,
+            })
+            .expect("expected StopLossFired log entry");
+        assert_eq!(sl.0, "TEST");
+        assert!((sl.1 - 4.0).abs() < 1e-9, "loss_pct was {}", sl.1);
+        assert!((sl.2 - 96.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn take_profit_event_carries_gain_pct_and_price() {
+        // Open at 100, close at 108 → 8% gain.
+        let mut engine = make_engine("TAKE_PROFIT 5%\nWHEN close > 0\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(100.0), candle(108.0)];
+
+        engine.on_candle(&candles[..1]).await;
+        let logs2 = engine.on_candle(&candles[..2]).await;
+
+        let tp = logs2
+            .iter()
+            .find_map(|e| match &e.kind {
+                LogEntryKind::TakeProfitFired {
+                    symbol,
+                    gain_pct,
+                    price,
+                } => Some((symbol.clone(), *gain_pct, *price)),
+                _ => None,
+            })
+            .expect("expected TakeProfitFired log entry");
+        assert_eq!(tp.0, "TEST");
+        assert!((tp.1 - 8.0).abs() < 1e-9, "gain_pct was {}", tp.1);
+        assert!((tp.2 - 108.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn sl_tp_is_deterministic() {
+        // Same source + same candles must produce the same SL/TP log
+        // ordering. Backtest determinism invariant.
+        let source = "STOP_LOSS 2%\nTAKE_PROFIT 5%\nWHEN close > 0\nBUY 1";
+        let candles: Vec<Candle> = (90..=110).map(|c| candle(c as f64)).collect();
+
+        let mut e1 = make_engine(source, 100_000.0);
+        let mut e2 = make_engine(source, 100_000.0);
+
+        let mut all1 = Vec::new();
+        let mut all2 = Vec::new();
+        for index in 1..=candles.len() {
+            all1.extend(e1.on_candle(&candles[..index]).await);
+            all2.extend(e2.on_candle(&candles[..index]).await);
+        }
+
+        let kind = |e: &LogEntry| match &e.kind {
+            LogEntryKind::OrderExecuted { .. } => "exec".to_string(),
+            LogEntryKind::StopLossFired { .. } => "sl".to_string(),
+            LogEntryKind::TakeProfitFired { .. } => "tp".to_string(),
+            LogEntryKind::RuleFired { .. } => "fired".to_string(),
+            LogEntryKind::OrderSubmitted { .. } => "submit".to_string(),
+            _ => "other".to_string(),
+        };
+        let seq1: Vec<String> = all1.iter().map(kind).collect();
+        let seq2: Vec<String> = all2.iter().map(kind).collect();
+        assert_eq!(seq1, seq2);
+    }
+
+    #[tokio::test]
+    async fn stop_loss_fires_every_candle_while_underwater() {
+        // SL is NOT edge-triggered. It must fire every candle the position
+        // is underwater, not just on the transition candle. We expect one
+        // SL fire per candle the position is open and underwater.
+        let mut engine = make_engine("STOP_LOSS 2%\nWHEN close > 0\nBUY 1", 100_000.0);
+        // Open at 100, then stay at 97 (3% loss) for three more candles.
+        let candles: Vec<Candle> = vec![
+            candle(100.0),
+            candle(97.0),
+            candle(97.0),
+            candle(97.0),
+        ];
+
+        let _ = engine.on_candle(&candles[..1]).await;
+        let mut total_sl = 0;
+        for index in 2..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_sl += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::StopLossFired { .. }))
+                .count();
+        }
+        // Position closes on candle 2's SL; candles 3 and 4 have no
+        // position, so no SL fires.
+        assert_eq!(total_sl, 1);
     }
 }

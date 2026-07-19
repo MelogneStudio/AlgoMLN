@@ -140,6 +140,10 @@ impl ExecutionTarget for PaperBroker {
             .collect())
     }
 
+    fn available_cash(&self) -> f64 {
+        self.state.lock().expect("paper broker mutex poisoned").cash
+    }
+
     fn is_paper(&self) -> bool {
         true
     }
