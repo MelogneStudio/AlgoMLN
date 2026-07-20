@@ -33,7 +33,7 @@ Phase 7 (Live Trading) — pending
 ```
 
 Run `cargo test --workspace` for the current test count
-Current count: `161 passing | 1 ignored | 0 failed`.
+Current count: `220 passing | 1 ignored | 0 failed`.
 
 ### ✅ Phase 1 — Data Layer
 - Broker abstraction trait (`BrokerClient`)

@@ -109,7 +109,7 @@ AlgoMLN/
 | Lexer (tokens, keywords, errors) | `src/strategy/dsl/lexer.rs` |
 | Parser (token stream → AST) | `src/strategy/dsl/parser.rs` |
 | AST types (`StrategyNode`, `RuleNode`, `ConditionNode`, `ExprNode`, `IndicatorKind`, `PriceField`, `CompareOp`, `ActionNode`) | `src/strategy/dsl/ast.rs` |
-| Semantic validation (period > 0, qty > 0, duplicate rule IDs, time range, etc.) | `src/strategy/dsl/validator.rs` |
+| Semantic validation (period > 0, qty > 0, duplicate rule IDs, time range, SL/TP in (0, 100], etc.) | `src/strategy/dsl/validator.rs` |
 | DSL → `BuilderStrategy` round-trip (frontend only) | `src/hooks/useDslSync.ts` (`strategyToDsl`, `parseDslToStrategy`) |
 | Grammar spec | `CLAUDE.md` "The `.algomln` DSL" (this codebase keeps grammar in the index; mirror any grammar changes there) |
 

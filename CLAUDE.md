@@ -79,6 +79,8 @@ Don't break these — they are non-obvious properties the codebase is built arou
 
 **11. PortfolioEngine sub-engines are never accessed concurrently.** `PortfolioEngine::on_tick` takes `&mut self` and is called from a single tokio task; the underlying `StrategyEngine` instances share a single `Arc<PaperBroker>`. `PaperBroker` is internally `Mutex`-guarded so the shared broker is `Send`, but the per-sub-engine state (cross detector, trigger map, indicator window) is `!Sync`. Adding parallel `on_tick` calls would require `Mutex<StrategyEngine>` per sub-engine and a careful determinism audit — do not add it without a full review.
 
+**12. SL/TP is a safety net, not a rule.** `STOP_LOSS` and `TAKE_PROFIT` are strategy-level declarations on `StrategyNode` (not `RuleNode`s) that bypass `TriggerStateMap` deliberately. They fire every candle the position is underwater or in profit, not just on a `false → true` transition. The pass runs *after* the rule loop and the cross-state update so a rule that closes the position on the same candle is reflected. Stop-loss wins on a gap candle that would trigger both — the position is already closed by the time take-profit would check. (`src/strategy/runtime/engine.rs::run_stop_loss_take_profit_pass`, `src/strategy/dsl/parser.rs` for declarations, `src/strategy/dsl/validator.rs` for the `(0, 100]` range check.)
+
 ## Test Layout
 
 - Per-module unit tests live alongside source as `#[cfg(test)] mod tests` blocks.

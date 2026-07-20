@@ -45,13 +45,13 @@ Source text goes through three stages. The whole pipeline is shared between the 
 
 **Lexer** (`src/strategy/dsl/lexer.rs`). Pure character-to-token conversion. Token kinds include keywords (`WHEN`, `BUY`, `SELL`, `AND`, `OR`, `NOT`, `CROSS_ABOVE`, …), indicator names, price fields, comparison operators, and number/integer literals. Errors carry `line` and `col` so the UI can highlight them.
 
-**Parser** (`src/strategy/dsl/parser.rs`). Recursive-descent parser that consumes the token stream and produces a `StrategyNode { name, rules: Vec<RuleNode> }`. Each `RuleNode` has a unique `id` (assigned as `rule_{N}` during parsing) so log entries and trigger state can be keyed by rule.
+**Parser** (`src/strategy/dsl/parser.rs`). Recursive-descent parser that consumes the token stream and produces a `StrategyNode { name, trade_in, stop_loss, take_profit, rules: Vec<RuleNode> }`. Each `RuleNode` has a unique `id` (assigned as `rule_{N}` during parsing) so log entries and trigger state can be keyed by rule. The optional `STOP_LOSS <pct>%` and `TAKE_PROFIT <pct>%` declarations can appear anywhere in the source (before, after, or between rules); duplicate declarations of the same field are a parse error.
 
 The grammar is intentionally tiny — see `CLAUDE.md` "The `.algomln` DSL" for the full EBNF. `position_expr` and `time_window` parse into the AST but the runtime evaluates them as `NotYetImplemented`; the parser was extended ahead of the runtime.
 
 **AST** (`src/strategy/dsl/ast.rs`). All enums and structs are `Serialize + Deserialize` so they round-trip cleanly through the IPC boundary if needed. `ConditionNode` is a flat enum (`Comparison`, `CrossAbove`, `CrossBelow`, `And`, `Or`, `Not`, `InPosition`, `TimeWindow`) — the parser only builds the first three and a couple more, but the AST is the source of truth for what the runtime understands.
 
-**Validator** (`src/strategy/dsl/validator.rs`). Rejects empty strategies, zero quantities, non-positive indicator periods, duplicate rule IDs, invalid time ranges, and crossovers that mix an indicator with a literal (since a literal can't change). Validation runs after parsing for both `validate_dsl` and the backtest orchestrator, so the engine can assume a well-formed AST.
+**Validator** (`src/strategy/dsl/validator.rs`). Rejects empty strategies, zero quantities, non-positive indicator periods, duplicate rule IDs, invalid time ranges, crossovers that mix an indicator with a literal (since a literal can't change), and STOP_LOSS / TAKE_PROFIT values outside `(0.0, 100.0]`. Validation runs after parsing for both `validate_dsl` and the backtest orchestrator, so the engine can assume a well-formed AST.
 
 `commands::strategy::validate_dsl` (in `src/commands/strategy.rs`) is the thin Tauri-facing wrapper that returns `Vec<String>` of human-readable errors with `"line {l} col {c}: {msg}"` formatting for lex/parse errors and plain messages for validation. The strategy registry has its own local copy of the same pipeline (`validate_dsl_local` in `src/commands/registry.rs`) to avoid creating a cyclic module dependency.
 
@@ -88,8 +88,17 @@ The structure of `on_candle` is the single most important thing to understand in
    - `TriggerStateMap::should_fire(rule_id, condition_result)` returns true only on a `false → true` transition. Bare `WHEN x > y` would otherwise fire every candle.
    - If fired, the engine logs the condition evaluation, the rule fire, the order submission, the execution result (or skip/failure).
 3. **Second pass — update crossover state.** After *all* rules are evaluated for this cycle, walk the rules again and call `CrossDetector::update(rule_id, fast, slow)`. Doing this *after* the rule loop guarantees that within a single cycle, every rule sees the same `prev` state — there is no ordering hazard where the first rule's cross-detector update affects the second rule's evaluation. This is invariant #2 in `CLAUDE.md`.
-4. **Advance the indicator window.** `BoundedWindowProvider::advance` pushes the current candle into the rolling 500-candle window and drops the oldest if the cap is hit.
-5. **Drain the logger** and return the entries to the caller. The CLI and Tauri both append these to the final `BacktestResult.logs`.
+4. **Stop-loss / take-profit pass** (only when either is declared on the strategy). Calls `execution_target.get_positions()` to snapshot the open position, computes unrealized loss/gain against the entry price from `Position::average_price`, and submits a synthetic `SELL ALL` through the normal order path if either threshold is breached. Stop-loss fires first; take-profit is skipped on a gap candle that would have triggered both because the position is already closed. See `run_stop_loss_take_profit_pass` in `engine.rs`.
+5. **Advance the indicator window.** `BoundedWindowProvider::advance` pushes the current candle into the rolling 500-candle window and drops the oldest if the cap is hit.
+6. **Drain the logger** and return the entries to the caller. The CLI and Tauri both append these to the final `BacktestResult.logs`.
+
+### Stop loss / take profit
+
+`STOP_LOSS <pct>%` and `TAKE_PROFIT <pct>%` are strategy-level declarations (not rules) that can appear anywhere in the source — before, after, or between rules. Both are optional and validated independently to be in `(0.0, 100.0]`. They are stored on `StrategyNode` as `Option<f64>` and parsed/validated by the existing DSL pipeline.
+
+The SL/TP pass deliberately bypasses `TriggerStateMap` (it's a safety net, not an edge-triggered rule): every candle the position is open and underwater or in profit, the pass fires and submits a `SELL ALL` order. The two `LogEntryKind` variants `StopLossFired { symbol, loss_pct, price }` and `TakeProfitFired { symbol, gain_pct, price }` are logged before the order is submitted; the order itself logs through the standard `OrderSubmitted` / `OrderExecuted` path with `rule_id = "stop_loss"` or `"take_profit"`. If both thresholds would fire on the same candle, stop-loss wins and the take-profit pass is skipped.
+
+The pass runs after the rule loop and the cross-state update so any rule-driven position change on the same candle is reflected in the SL/TP check. `Position::average_price` already carries the entry price — no new field was needed on the wire.
 
 The engine is profiled (`StrategyEngineProfile`): it counts `on_candle` calls, broker `execute` calls, and broker `get_positions` calls, and accumulates elapsed time. The backtest orchestrator packages these into `EngineProfileReport` and `IndicatorProfileReport` and ships them to the UI for the "Throughput" panel in the CLI summary.
 
@@ -227,7 +236,7 @@ The bundled `sample-data/nifty_1min.csv` is the offline fallback when Dhan is un
 
 ## Logging
 
-`src/strategy/logging/log.rs` defines `LogEntry { id, timestamp, strategy_id, candle_timestamp, kind }` and a `LogEntryKind` enum covering: condition evaluated (with prev state and indicator snapshots), rule fired, order submitted, order executed, rule skipped (with `RuleSkipReason`), order failed, eval error, status changed.
+`src/strategy/logging/log.rs` defines `LogEntry { id, timestamp, strategy_id, candle_timestamp, kind }` and a `LogEntryKind` enum covering: condition evaluated (with prev state and indicator snapshots), rule fired, order submitted, order executed, rule skipped (with `RuleSkipReason`), order failed, eval error, status changed, stop-loss fired (`StopLossFired { symbol, loss_pct, price }`), and take-profit fired (`TakeProfitFired { symbol, gain_pct, price }`).
 
 `StrategyLogger` is per-engine (one per `StrategyInstance.id`). `on_candle` calls `drain_entries()` at the end of the cycle and the engine returns the drained vector; the backtest orchestrator appends it to `BacktestResult.logs`. There is no async log shipper — entries are in-memory until the orchestrator decides what to do with them.
 
