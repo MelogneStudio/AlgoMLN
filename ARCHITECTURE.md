@@ -108,7 +108,7 @@ AlgoMLN/
 |---|---|
 | Lexer (tokens, keywords, errors) | `src/strategy/dsl/lexer.rs` |
 | Parser (token stream → AST) | `src/strategy/dsl/parser.rs` |
-| AST types (`StrategyNode`, `RuleNode`, `ConditionNode`, `ExprNode`, `IndicatorKind`, `PriceField`, `CompareOp`, `ActionNode`) | `src/strategy/dsl/ast.rs` |
+| AST types (`StrategyNode`, `RuleNode`, `ConditionNode`, `ExprNode`, `IndicatorKind`, `PriceField`, `CompareOp`, `ActionNode`, `RiskConfig`) | `src/strategy/dsl/ast.rs` |
 | Semantic validation (period > 0, qty > 0, duplicate rule IDs, time range, SL/TP in (0, 100], etc.) | `src/strategy/dsl/validator.rs` |
 | DSL → `BuilderStrategy` round-trip (frontend only) | `src/hooks/useDslSync.ts` (`strategyToDsl`, `parseDslToStrategy`) |
 | Grammar spec | `CLAUDE.md` "The `.algomln` DSL" (this codebase keeps grammar in the index; mirror any grammar changes there) |
@@ -123,6 +123,7 @@ AlgoMLN/
 | Crossover detection | `src/strategy/runtime/cross.rs` (`CrossDetector`) |
 | Bounded indicator window (perf) | `src/strategy/runtime/incremental_provider.rs` (`BoundedWindowProvider`) |
 | Full-recompute indicator provider (test/benchmark) | `src/strategy/runtime/indicator_provider.rs` (`FullRecomputeProvider`) |
+| Risk control enforcement (`MAX_ORDERS` / `MAX_POSITIONS` / `MAX_DAILY_LOSS`) | `src/strategy/runtime/engine.rs` (`StrategyEngine::check_risk_breach`, `risk_state`, `broker_initial_cash`) |
 | Backtest analytics (win rate, drawdown, etc.) | `src/strategy/analytics.rs` (`BacktestAnalyser`, `BacktestSummary`) |
 | Engine log entries | `src/strategy/logging/log.rs` |
 
@@ -223,7 +224,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 
 | Concern | File |
 |---|---|
-| `ExecutionTarget` trait | `src/strategy/execution/target.rs` |
+| `ExecutionTarget` trait + `realized_loss` (used by `RISK MAX_DAILY_LOSS`) | `src/strategy/execution/target.rs` |
 | Paper broker (in-memory cash + positions) | `src/strategy/execution/paper.rs` |
 | `ActionNode` → `Order` builder | `src/strategy/execution/order_builder.rs` |
 | BrokerClient trait (data fetch) | `src/broker/mod.rs` |

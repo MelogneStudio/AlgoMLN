@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ast::{
     ActionNode, CompareOp, ConditionNode, ExprNode, IndexAlias, IndicatorCall, IndicatorKind,
-    PriceField, QuantitySpec, RuleNode, StrategyNode, TradeIn,
+    PriceField, QuantitySpec, RiskConfig, RuleNode, StrategyNode, TradeIn,
 };
 use super::lexer::{Token, TokenKind};
 
@@ -31,6 +31,7 @@ impl Parser {
 
         let mut stop_loss: Option<f64> = None;
         let mut take_profit: Option<f64> = None;
+        let mut risk: Option<RiskConfig> = None;
         let mut rules = Vec::new();
         while !self.is_at_end() {
             match self.peek().kind.clone() {
@@ -54,6 +55,41 @@ impl Parser {
                     }
                     take_profit = Some(self.parse_take_profit()?);
                 }
+                TokenKind::Risk => {
+                    let parsed = self.parse_risk_declaration()?;
+                    let config = risk.get_or_insert_with(RiskConfig::default);
+                    if parsed.max_daily_loss_pct.is_some() {
+                        if config.max_daily_loss_pct.is_some() {
+                            return Err(ParseError {
+                                message: "duplicate RISK MAX_DAILY_LOSS declaration"
+                                    .to_string(),
+                                line: self.peek().line,
+                                col: self.peek().col,
+                            });
+                        }
+                        config.max_daily_loss_pct = parsed.max_daily_loss_pct;
+                    }
+                    if parsed.max_open_positions.is_some() {
+                        if config.max_open_positions.is_some() {
+                            return Err(ParseError {
+                                message: "duplicate RISK MAX_POSITIONS declaration".to_string(),
+                                line: self.peek().line,
+                                col: self.peek().col,
+                            });
+                        }
+                        config.max_open_positions = parsed.max_open_positions;
+                    }
+                    if parsed.max_orders.is_some() {
+                        if config.max_orders.is_some() {
+                            return Err(ParseError {
+                                message: "duplicate RISK MAX_ORDERS declaration".to_string(),
+                                line: self.peek().line,
+                                col: self.peek().col,
+                            });
+                        }
+                        config.max_orders = parsed.max_orders;
+                    }
+                }
                 _ => {
                     let mut rule = self.parse_rule()?;
                     rule.id = format!("rule_{}", rules.len());
@@ -68,6 +104,7 @@ impl Parser {
             trade_in,
             stop_loss,
             take_profit,
+            risk,
             rules,
         })
     }
@@ -90,6 +127,78 @@ impl Parser {
         let value = self.parse_percent_number()?;
         self.skip_newlines();
         Ok(value)
+    }
+
+    /// Parse a `RISK <sub-keyword> <value>` declaration. Returns a
+    /// single-field `RiskConfig` carrying whichever sub-keyword appeared
+    /// (the caller merges it into the existing `Option<RiskConfig>` and
+    /// rejects duplicates for the same field).
+    fn parse_risk_declaration(&mut self) -> Result<RiskConfig, ParseError> {
+        self.expect_simple(TokenKind::Risk)?;
+        self.skip_newlines();
+        match self.peek().kind.clone() {
+            TokenKind::MaxDailyLoss => {
+                self.advance();
+                self.skip_newlines();
+                let value = self.parse_percent_number()?;
+                self.skip_newlines();
+                Ok(RiskConfig {
+                    max_daily_loss_pct: Some(value),
+                    max_open_positions: None,
+                    max_orders: None,
+                })
+            }
+            TokenKind::MaxPositions => {
+                self.advance();
+                self.skip_newlines();
+                let value = self.parse_positive_integer_u32()?;
+                self.skip_newlines();
+                Ok(RiskConfig {
+                    max_daily_loss_pct: None,
+                    max_open_positions: Some(value),
+                    max_orders: None,
+                })
+            }
+            TokenKind::MaxOrders => {
+                self.advance();
+                self.skip_newlines();
+                let value = self.parse_positive_integer_u32()?;
+                self.skip_newlines();
+                Ok(RiskConfig {
+                    max_daily_loss_pct: None,
+                    max_open_positions: None,
+                    max_orders: Some(value),
+                })
+            }
+            _ => self.error_here(
+                "expected MAX_DAILY_LOSS, MAX_POSITIONS, or MAX_ORDERS after RISK",
+            ),
+        }
+    }
+
+    /// Parse a positive integer (>= 1) as a `u32`. Used by
+    /// `RISK MAX_POSITIONS` and `RISK MAX_ORDERS` — the validator also
+    /// enforces the `>= 1` bound, so this parser is intentionally
+    /// permissive on zero and lets validation catch it.
+    fn parse_positive_integer_u32(&mut self) -> Result<u32, ParseError> {
+        let token = self.advance().clone();
+        match token.kind {
+            TokenKind::Integer(value) => {
+                if value > u32::MAX as usize {
+                    return Err(ParseError {
+                        message: format!("integer overflows u32: {}", value),
+                        line: token.line,
+                        col: token.col,
+                    });
+                }
+                Ok(value as u32)
+            }
+            _ => Err(ParseError {
+                message: "expected a positive integer".to_string(),
+                line: token.line,
+                col: token.col,
+            }),
+        }
     }
 
     /// Parse a `<number> %` pair (used by SL/TP declarations). The `%` is
@@ -843,5 +952,124 @@ BUY 10
         let strategy = parse("WHEN close > 100\nBUY 1");
         assert_eq!(strategy.stop_loss, None);
         assert_eq!(strategy.take_profit, None);
+    }
+
+    // ---------- RISK ----------
+
+    #[test]
+    fn parses_risk_max_daily_loss() {
+        let strategy = parse("RISK MAX_DAILY_LOSS 5%\nWHEN close > 100\nBUY 1");
+        let risk = strategy.risk.expect("expected risk config");
+        assert_eq!(risk.max_daily_loss_pct, Some(5.0));
+        assert_eq!(risk.max_open_positions, None);
+        assert_eq!(risk.max_orders, None);
+    }
+
+    #[test]
+    fn parses_risk_max_positions() {
+        let strategy = parse("RISK MAX_POSITIONS 3\nWHEN close > 100\nBUY 1");
+        let risk = strategy.risk.expect("expected risk config");
+        assert_eq!(risk.max_open_positions, Some(3));
+        assert_eq!(risk.max_daily_loss_pct, None);
+        assert_eq!(risk.max_orders, None);
+    }
+
+    #[test]
+    fn parses_risk_max_orders() {
+        let strategy = parse("RISK MAX_ORDERS 20\nWHEN close > 100\nBUY 1");
+        let risk = strategy.risk.expect("expected risk config");
+        assert_eq!(risk.max_orders, Some(20));
+        assert_eq!(risk.max_daily_loss_pct, None);
+        assert_eq!(risk.max_open_positions, None);
+    }
+
+    #[test]
+    fn parses_all_three_risk_declarations() {
+        let strategy = parse(
+            "RISK MAX_DAILY_LOSS 5%\nRISK MAX_POSITIONS 3\nRISK MAX_ORDERS 20\nWHEN close > 100\nBUY 1",
+        );
+        let risk = strategy.risk.expect("expected risk config");
+        assert_eq!(risk.max_daily_loss_pct, Some(5.0));
+        assert_eq!(risk.max_open_positions, Some(3));
+        assert_eq!(risk.max_orders, Some(20));
+    }
+
+    #[test]
+    fn parses_risk_declarations_interleaved_with_rules() {
+        let strategy = parse(
+            "RISK MAX_ORDERS 5\nWHEN close > 100\nBUY 1\nRISK MAX_DAILY_LOSS 2%",
+        );
+        let risk = strategy.risk.expect("expected risk config");
+        assert_eq!(risk.max_daily_loss_pct, Some(2.0));
+        assert_eq!(risk.max_orders, Some(5));
+        assert_eq!(strategy.rules.len(), 1);
+    }
+
+    #[test]
+    fn rejects_duplicate_max_daily_loss() {
+        let tokens = Lexer::tokenize(
+            "RISK MAX_DAILY_LOSS 5%\nRISK MAX_DAILY_LOSS 3%\nWHEN close > 100\nBUY 1",
+        )
+        .unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(
+            err.message.contains("duplicate RISK MAX_DAILY_LOSS"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_max_positions() {
+        let tokens = Lexer::tokenize(
+            "RISK MAX_POSITIONS 3\nRISK MAX_POSITIONS 5\nWHEN close > 100\nBUY 1",
+        )
+        .unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(
+            err.message.contains("duplicate RISK MAX_POSITIONS"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_max_orders() {
+        let tokens = Lexer::tokenize(
+            "RISK MAX_ORDERS 20\nRISK MAX_ORDERS 50\nWHEN close > 100\nBUY 1",
+        )
+        .unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(
+            err.message.contains("duplicate RISK MAX_ORDERS"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn rejects_risk_without_sub_keyword() {
+        let tokens = Lexer::tokenize("RISK\nWHEN close > 100\nBUY 1").unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(
+            err.message.contains("MAX_DAILY_LOSS")
+                || err.message.contains("MAX_POSITIONS")
+                || err.message.contains("MAX_ORDERS"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn rejects_risk_max_daily_loss_without_percent() {
+        let tokens = Lexer::tokenize("RISK MAX_DAILY_LOSS 5\nWHEN close > 100\nBUY 1").unwrap();
+        let err = Parser::new(tokens).parse().unwrap_err();
+        assert!(err.message.contains("expected '%'"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn strategy_without_risk_has_none() {
+        let strategy = parse("WHEN close > 100\nBUY 1");
+        assert!(strategy.risk.is_none());
     }
 }

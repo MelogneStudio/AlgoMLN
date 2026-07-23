@@ -100,6 +100,16 @@ The SL/TP pass deliberately bypasses `TriggerStateMap` (it's a safety net, not a
 
 The pass runs after the rule loop and the cross-state update so any rule-driven position change on the same candle is reflected in the SL/TP check. `Position::average_price` already carries the entry price — no new field was needed on the wire.
 
+### Risk controls
+
+`RISK MAX_ORDERS <int>`, `RISK MAX_POSITIONS <int>`, and `RISK MAX_DAILY_LOSS <pct>%` are strategy-level declarations (same pattern as `STOP_LOSS` / `TAKE_PROFIT`) parsed into `StrategyNode.risk: Option<RiskConfig>`. All three are optional; any combination is valid. The declarations can appear anywhere alongside rules and SL/TP, and each sub-keyword is a separate `RISK` line — duplicate declarations for the same field are a parse error.
+
+- `MAX_DAILY_LOSS` must be in `(0.0, 100.0]`; `MAX_POSITIONS` and `MAX_ORDERS` must be `>= 1`. Validation lives in `validator.rs` alongside the SL/TP threshold check.
+- The engine stores the per-run counter in `StrategyEngine::risk_state: Option<RiskState>` (allocated only when at least one declaration is present). `check_risk_breach` runs at the top of `submit_action` and logs `LogEntryKind::RiskBreach { rule_id, reason }` if any limit is breached; the order is not built or submitted.
+- `MAX_ORDERS` counts orders that `execution_target.execute` accepted. Failed orders (insufficient cash / position) do not consume the cap.
+- `MAX_POSITIONS` only blocks `BUY` actions — sells (including SL/TP `SELL ALL`s) are never blocked by it. The count comes from `execution_target.get_positions()` and includes only positions with `quantity > 0`.
+- `MAX_DAILY_LOSS` is session-scoped: the engine sums the negative `PaperTrade.pnl` values via `ExecutionTarget::realized_loss()` and computes `loss_pct = realized / initial_cash * 100.0`. In a backtest there is no real clock, so "daily" spans the whole run. When breached, all subsequent orders (buys and sells) are blocked.
+
 The engine is profiled (`StrategyEngineProfile`): it counts `on_candle` calls, broker `execute` calls, and broker `get_positions` calls, and accumulates elapsed time. The backtest orchestrator packages these into `EngineProfileReport` and `IndicatorProfileReport` and ships them to the UI for the "Throughput" panel in the CLI summary.
 
 ### Indicator provider
@@ -143,6 +153,10 @@ Backtests with a `TRADE_IN` clause return an error from `commands::strategy::run
 pub trait ExecutionTarget: Send + Sync {
     async fn execute(&self, order: Order) -> Result<OrderResult, ExecutionError>;
     async fn get_positions(&self) -> Result<Vec<Position>, ExecutionError>;
+    /// Sum of negative realized `PaperTrade.pnl` values, returned as a
+    /// positive number. Used by the engine's `RISK MAX_DAILY_LOSS` check.
+    fn realized_loss(&self) -> f64;
+    fn available_cash(&self) -> f64;
     fn is_paper(&self) -> bool;
     fn name(&self) -> &str;
 }

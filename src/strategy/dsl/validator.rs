@@ -45,7 +45,46 @@ impl AstValidator {
         validate_percent_threshold(strategy.stop_loss, "STOP_LOSS", &mut errors);
         validate_percent_threshold(strategy.take_profit, "TAKE_PROFIT", &mut errors);
 
+        if let Some(risk) = &strategy.risk {
+            validate_risk(risk, &mut errors);
+        }
+
         errors
+    }
+}
+
+/// Validate a `RiskConfig`. `max_daily_loss_pct` must be in `(0.0, 100.0]`
+/// (zero means "disabled" — use `None` instead). `max_open_positions` and
+/// `max_orders` must be `>= 1` (zero would mean "never trade").
+fn validate_risk(risk: &super::ast::RiskConfig, errors: &mut Vec<ValidationError>) {
+    if let Some(pct) = risk.max_daily_loss_pct {
+        if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {
+            errors.push(ValidationError {
+                rule_id: String::new(),
+                message: format!(
+                    "RISK MAX_DAILY_LOSS must be in (0, 100] (got {pct})"
+                ),
+                kind: ValidationErrorKind::InvalidMaxDailyLoss,
+            });
+        }
+    }
+    if let Some(positions) = risk.max_open_positions {
+        if positions == 0 {
+            errors.push(ValidationError {
+                rule_id: String::new(),
+                message: "RISK MAX_POSITIONS must be >= 1".to_string(),
+                kind: ValidationErrorKind::InvalidMaxPositions,
+            });
+        }
+    }
+    if let Some(orders) = risk.max_orders {
+        if orders == 0 {
+            errors.push(ValidationError {
+                rule_id: String::new(),
+                message: "RISK MAX_ORDERS must be >= 1".to_string(),
+                kind: ValidationErrorKind::InvalidMaxOrders,
+            });
+        }
     }
 }
 
@@ -67,6 +106,9 @@ pub enum ValidationErrorKind {
     InvalidTradeIn,
     InvalidStopLoss,
     InvalidTakeProfit,
+    InvalidMaxDailyLoss,
+    InvalidMaxPositions,
+    InvalidMaxOrders,
 }
 
 /// Validate an optional percentage threshold (STOP_LOSS / TAKE_PROFIT). Both
@@ -264,6 +306,7 @@ mod tests {
             trade_in: None,
             stop_loss: None,
             take_profit: None,
+            risk: None,
             rules,
         }
     }
@@ -470,6 +513,7 @@ mod tests {
             trade_in: Some(TradeIn::Index(IndexAlias::NiftyBank)),
             stop_loss: None,
             take_profit: None,
+            risk: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         let errors = AstValidator::validate(&strat);
@@ -486,6 +530,7 @@ mod tests {
             trade_in: Some(TradeIn::Symbols(big_list)),
             stop_loss: None,
             take_profit: None,
+            risk: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         let errors = AstValidator::validate(&strat);
@@ -504,6 +549,7 @@ mod tests {
             trade_in: None,
             stop_loss: Some(2.0),
             take_profit: None,
+            risk: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         let errors = AstValidator::validate(&strat);
@@ -519,6 +565,7 @@ mod tests {
             trade_in: None,
             stop_loss: None,
             take_profit: Some(5.0),
+            risk: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         let errors = AstValidator::validate(&strat);
@@ -534,6 +581,7 @@ mod tests {
             trade_in: None,
             stop_loss: Some(100.0),
             take_profit: None,
+            risk: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         assert!(!AstValidator::validate(&strat)
@@ -548,6 +596,7 @@ mod tests {
             trade_in: None,
             stop_loss: Some(0.0),
             take_profit: None,
+            risk: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         assert!(AstValidator::validate(&strat)
@@ -562,6 +611,7 @@ mod tests {
             trade_in: None,
             stop_loss: Some(150.0),
             take_profit: None,
+            risk: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         assert!(AstValidator::validate(&strat)
@@ -576,6 +626,7 @@ mod tests {
             trade_in: None,
             stop_loss: None,
             take_profit: Some(0.0),
+            risk: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         assert!(AstValidator::validate(&strat)
@@ -590,11 +641,111 @@ mod tests {
             trade_in: None,
             stop_loss: Some(-1.0),
             take_profit: None,
+            risk: None,
             rules: vec![make_rsi_rule(14, 5)],
         };
         assert!(AstValidator::validate(&strat)
             .iter()
             .any(|e| matches!(e.kind, ValidationErrorKind::InvalidStopLoss)));
+    }
+
+    // ---------- RISK ----------
+
+    #[test]
+    fn accepts_valid_risk_config() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: None,
+            take_profit: None,
+            risk: Some(crate::strategy::dsl::ast::RiskConfig {
+                max_daily_loss_pct: Some(5.0),
+                max_open_positions: Some(3),
+                max_orders: Some(20),
+            }),
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        let errors = AstValidator::validate(&strat);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn accepts_empty_risk_config() {
+        let strat = StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: None,
+            take_profit: None,
+            risk: Some(crate::strategy::dsl::ast::RiskConfig::default()),
+            rules: vec![make_rsi_rule(14, 5)],
+        };
+        assert!(!errors_have_risk_errors(&AstValidator::validate(&strat)));
+    }
+
+    #[test]
+    fn accepts_max_daily_loss_at_100() {
+        let strat = make_risk_strategy(Some(100.0), None, None);
+        assert!(!errors_have_risk_errors(&AstValidator::validate(&strat)));
+    }
+
+    #[test]
+    fn rejects_zero_max_daily_loss() {
+        let strat = make_risk_strategy(Some(0.0), None, None);
+        assert!(errors_have_risk_errors(&AstValidator::validate(&strat)));
+    }
+
+    #[test]
+    fn rejects_negative_max_daily_loss() {
+        let strat = make_risk_strategy(Some(-1.0), None, None);
+        assert!(errors_have_risk_errors(&AstValidator::validate(&strat)));
+    }
+
+    #[test]
+    fn rejects_over_100_max_daily_loss() {
+        let strat = make_risk_strategy(Some(150.0), None, None);
+        assert!(errors_have_risk_errors(&AstValidator::validate(&strat)));
+    }
+
+    #[test]
+    fn rejects_zero_max_positions() {
+        let strat = make_risk_strategy(None, Some(0), None);
+        assert!(errors_have_risk_errors(&AstValidator::validate(&strat)));
+    }
+
+    #[test]
+    fn rejects_zero_max_orders() {
+        let strat = make_risk_strategy(None, None, Some(0));
+        assert!(errors_have_risk_errors(&AstValidator::validate(&strat)));
+    }
+
+    fn make_risk_strategy(
+        max_loss: Option<f64>,
+        max_pos: Option<u32>,
+        max_ord: Option<u32>,
+    ) -> StrategyNode {
+        StrategyNode {
+            name: "test".to_string(),
+            trade_in: None,
+            stop_loss: None,
+            take_profit: None,
+            risk: Some(crate::strategy::dsl::ast::RiskConfig {
+                max_daily_loss_pct: max_loss,
+                max_open_positions: max_pos,
+                max_orders: max_ord,
+            }),
+            rules: vec![make_rsi_rule(14, 5)],
+        }
+    }
+
+    fn errors_have_risk_errors(errors: &[ValidationError]) -> bool {
+        errors.iter().any(|e| {
+            matches!(
+                e.kind,
+                ValidationErrorKind::InvalidMaxDailyLoss
+                    | ValidationErrorKind::InvalidMaxPositions
+                    | ValidationErrorKind::InvalidMaxOrders
+            )
+        })
     }
 
     fn make_rsi_rule(period: usize, quantity: u64) -> RuleNode {

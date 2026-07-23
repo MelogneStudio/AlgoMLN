@@ -89,6 +89,20 @@ impl PaperBroker {
         }
     }
 
+    /// Sum of negative `PaperTrade.pnl` values, returned as a positive number.
+    /// Used by the engine's `RISK MAX_DAILY_LOSS` check; a positive return
+    /// value means the broker has realized that much loss on the session.
+    pub fn realized_loss(&self) -> f64 {
+        let state = self.state.lock().expect("paper broker mutex poisoned");
+        state
+            .trade_history
+            .iter()
+            .filter_map(|trade| trade.pnl)
+            .filter(|pnl| *pnl < 0.0)
+            .map(|pnl| -pnl)
+            .sum()
+    }
+
     pub fn reset(&self) {
         let mut state = self.state.lock().expect("paper broker mutex poisoned");
         state.cash = state.initial_cash;
@@ -138,6 +152,10 @@ impl ExecutionTarget for PaperBroker {
                 unrealized_pnl: position.unrealized_pnl,
             })
             .collect())
+    }
+
+    fn realized_loss(&self) -> f64 {
+        self.realized_loss()
     }
 
     fn available_cash(&self) -> f64 {

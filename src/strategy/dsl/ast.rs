@@ -227,7 +227,34 @@ pub struct StrategyNode {
     /// Optional take-profit percentage (e.g. `5.0` for 5%). Mirrors
     /// `stop_loss` for the gain side.
     pub take_profit: Option<f64>,
+    /// Optional risk controls (max orders, max open positions, max daily loss).
+    /// All three limits are checked before any order is submitted by
+    /// `StrategyEngine::submit_action`.
+    pub risk: Option<RiskConfig>,
     pub rules: Vec<RuleNode>,
+}
+
+/// Strategy-level risk controls. All fields are optional and any combination
+/// is valid. The engine enforces these before submitting any order (including
+/// synthetic SL/TP orders) by logging a `RiskBreach` entry and skipping the
+/// order. See `StrategyEngine` for the run-time state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RiskConfig {
+    /// `RISK MAX_DAILY_LOSS <pct>%`. The engine sums the negative
+    /// `PaperTrade.pnl` values (realized loss only) and skips all further
+    /// orders when the cumulative loss as a percentage of `initial_cash`
+    /// exceeds this threshold. In a backtest context "daily" is session-
+    /// scoped — there is no real clock, so the threshold is enforced
+    /// cumulatively across the whole run.
+    pub max_daily_loss_pct: Option<f64>,
+    /// `RISK MAX_POSITIONS <int>`. The engine counts the broker's open
+    /// positions with `quantity > 0` and skips BUY orders when the count is
+    /// already at or above the limit. Sells are not affected.
+    pub max_open_positions: Option<u32>,
+    /// `RISK MAX_ORDERS <int>`. The engine counts orders it has successfully
+    /// submitted during the run and skips when the count reaches the limit.
+    /// Counts every order — both rule-triggered and SL/TP synthetic.
+    pub max_orders: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

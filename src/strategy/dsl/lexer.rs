@@ -14,6 +14,10 @@ pub enum TokenKind {
     TradeIn,
     StopLoss,
     TakeProfit,
+    Risk,
+    MaxDailyLoss,
+    MaxPositions,
+    MaxOrders,
     Ema,
     Ma,
     Rsi,
@@ -245,6 +249,10 @@ fn keyword(ident: &str) -> Option<TokenKind> {
         "trade_in" => Some(TokenKind::TradeIn),
         "stop_loss" => Some(TokenKind::StopLoss),
         "take_profit" => Some(TokenKind::TakeProfit),
+        "risk" => Some(TokenKind::Risk),
+        "max_daily_loss" => Some(TokenKind::MaxDailyLoss),
+        "max_positions" => Some(TokenKind::MaxPositions),
+        "max_orders" => Some(TokenKind::MaxOrders),
         "ema" => Some(TokenKind::Ema),
         "ma" => Some(TokenKind::Ma),
         "rsi" => Some(TokenKind::Rsi),
@@ -469,5 +477,30 @@ BUY 10
             .iter()
             .any(|token| token.kind == TokenKind::TakeProfit));
         assert!(tokens.iter().any(|token| token.kind == TokenKind::Percent));
+    }
+
+    #[test]
+    fn tokenizes_risk_keyword() {
+        let tokens = Lexer::tokenize("RISK MAX_DAILY_LOSS 5%").unwrap();
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::Risk));
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::MaxDailyLoss));
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::Percent));
+    }
+
+    #[test]
+    fn tokenizes_risk_sub_keywords() {
+        let tokens = Lexer::tokenize(
+            "RISK MAX_POSITIONS 3\nRISK MAX_ORDERS 20",
+        )
+        .unwrap();
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::Risk));
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::MaxPositions));
+        assert!(tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::MaxOrders));
     }
 }

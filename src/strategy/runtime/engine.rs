@@ -7,13 +7,15 @@ use crate::broker::Timeframe;
 use crate::models::{Candle, Position};
 use crate::plugin::api::events::{EventBus, EventKind};
 use crate::strategy::dsl::{
-    ActionNode, CompareOp, ConditionNode, ExprNode, IndicatorKind, PriceField, RuleNode,
+    ActionNode, CompareOp, ConditionNode, ExprNode, IndicatorKind, PriceField, RiskConfig, RuleNode,
     StrategyNode,
 };
 use crate::strategy::execution::{
     build_order, ExecutionTarget, OrderBuildError, PaperPosition, PaperTrade,
 };
-use crate::strategy::logging::{LogEntry, LogEntryKind, RuleSkipReason, StrategyLogger};
+use crate::strategy::logging::{
+    LogEntry, LogEntryKind, RiskBreachReason, RuleSkipReason, StrategyLogger,
+};
 
 use super::context::EvalContext;
 use super::cross::CrossDetector;
@@ -65,6 +67,29 @@ pub struct StrategyEngine {
     /// `None` for backtest paths (determinism) and live/paper paths until the
     /// stage-9 wiring lands. See `src-tauri/src/main.rs` for the live hook.
     pub event_bus: Option<Arc<EventBus>>,
+    /// Per-run risk-control state. Initialized from
+    /// `instance.strategy.risk`; only allocated when at least one risk
+    /// declaration is present (so strategies without `RISK` pay nothing).
+    risk_state: Option<RiskState>,
+}
+
+/// Tracks the limits declared via `RISK MAX_ORDERS` and the cumulative
+/// realized loss. `daily_realized_loss` is session-scoped (in a backtest
+/// "session" = the whole run; in a live paper run = the lifetime of the
+/// strategy instance).
+#[derive(Debug, Clone)]
+struct RiskState {
+    session_orders: u32,
+    daily_realized_loss: f64,
+}
+
+impl RiskState {
+    fn new() -> Self {
+        Self {
+            session_orders: 0,
+            daily_realized_loss: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -80,6 +105,11 @@ pub struct StrategyEngineProfile {
 impl StrategyEngine {
     pub fn new(instance: StrategyInstance) -> Self {
         let logger = StrategyLogger::new(instance.id.clone());
+        let risk_state = if instance.strategy.risk.is_some() {
+            Some(RiskState::new())
+        } else {
+            None
+        };
         Self {
             instance,
             cross_detector: CrossDetector::new(),
@@ -88,6 +118,7 @@ impl StrategyEngine {
             logger,
             profile: StrategyEngineProfile::default(),
             event_bus: None,
+            risk_state,
         }
     }
 
@@ -216,6 +247,22 @@ impl StrategyEngine {
         action: ActionNode,
         ctx: &EvalContext<'_>,
     ) {
+        // Run risk-control checks before building the order. If any limit is
+        // breached we log a `RiskBreach` entry and return without
+        // touching the broker. Order is evaluated after the position
+        // snapshot below — we need positions to count open ones for
+        // MAX_POSITIONS, and the realized-loss number for MAX_DAILY_LOSS.
+        if let Some(breach) = self.check_risk_breach(&action, ctx).await {
+            self.logger.log(
+                LogEntryKind::RiskBreach {
+                    rule_id: source_id.to_string(),
+                    reason: breach,
+                },
+                ctx.current.timestamp,
+            );
+            return;
+        }
+
         let current_position = self.current_paper_position().await;
         let available_cash = self.instance.execution_target.available_cash();
         let order = match build_order(
@@ -277,6 +324,12 @@ impl StrategyEngine {
 
         match execution_result {
             Ok(result) => {
+                // Increment the session order counter only on a
+                // successful submit — failed orders (insufficient funds,
+                // insufficient position) do not count toward MAX_ORDERS.
+                if let Some(state) = self.risk_state.as_mut() {
+                    state.session_orders += 1;
+                }
                 self.logger.log(
                     LogEntryKind::OrderExecuted {
                         rule_id: source_id.to_string(),
@@ -297,6 +350,97 @@ impl StrategyEngine {
                 },
                 ctx.current.timestamp,
             ),
+        }
+    }
+
+    /// Check the strategy's `RISK` declarations against current state and
+    /// return the first `RiskBreachReason` that fires, or `None` if the
+    /// order may proceed. Order:
+    ///   1. `MAX_ORDERS` — count is in `risk_state.session_orders`, so no
+    ///      broker call is needed.
+    ///   2. `MAX_POSITIONS` — counts open positions (`quantity > 0`) on the
+    ///      broker. Applies only to BUY actions; sells are never blocked by
+    ///      this check.
+    ///   3. `MAX_DAILY_LOSS` — uses `execution_target.realized_loss()` and
+    ///      `available_cash()` to compute the cumulative loss as a
+    ///      percentage of `initial_cash`. In a backtest there's no clock, so
+    ///      "daily" is session-scoped (cumulative). When breached, all
+    ///      subsequent orders — both buys and sells — are blocked.
+    async fn check_risk_breach(
+        &mut self,
+        action: &ActionNode,
+        _ctx: &EvalContext<'_>,
+    ) -> Option<RiskBreachReason> {
+        let risk: &RiskConfig = self.instance.strategy.risk.as_ref()?;
+
+        if let Some(limit) = risk.max_orders {
+            let session_orders = self
+                .risk_state
+                .as_ref()
+                .expect("risk_state must be Some when strategy.risk is Some")
+                .session_orders;
+            if session_orders >= limit {
+                return Some(RiskBreachReason::MaxOrdersReached);
+            }
+        }
+
+        if matches!(action, ActionNode::Buy { .. }) {
+            if let Some(limit) = risk.max_open_positions {
+                let started = std::time::Instant::now();
+                self.profile.broker_get_positions_calls += 1;
+                let positions = self
+                    .instance
+                    .execution_target
+                    .get_positions()
+                    .await
+                    .ok()
+                    .unwrap_or_default();
+                self.profile.broker_get_positions_time += started.elapsed();
+                let open_count = positions
+                    .iter()
+                    .filter(|position| position.quantity > 0)
+                    .count() as u32;
+                if open_count >= limit {
+                    return Some(RiskBreachReason::MaxPositionsReached);
+                }
+            }
+        }
+
+        if let Some(limit_pct) = risk.max_daily_loss_pct {
+            let initial = self.broker_initial_cash();
+            if initial > 0.0 {
+                let realized = self.instance.execution_target.realized_loss();
+                let loss_pct = realized / initial * 100.0;
+                if loss_pct >= limit_pct {
+                    // Refresh the cached session loss so subsequent
+                    // breaches within the same candle don't redundantly
+                    // recompute from the broker.
+                    if let Some(state) = self.risk_state.as_mut() {
+                        state.daily_realized_loss = realized;
+                    }
+                    return Some(RiskBreachReason::MaxDailyLossReached);
+                }
+                if let Some(state) = self.risk_state.as_mut() {
+                    state.daily_realized_loss = realized;
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Read `initial_cash` from the broker's public state, if it's a
+    /// `PaperBroker`. Returns 0.0 for any other `ExecutionTarget` so the
+    /// loss-percentage check degrades to "never breached" rather than
+    /// dividing by zero or panicking.
+    fn broker_initial_cash(&self) -> f64 {
+        let any = self.instance.execution_target.as_any();
+        if let Some(paper) =
+            any.downcast_ref::<crate::strategy::execution::PaperBroker>()
+        {
+            paper.get_state().initial_cash
+        } else {
+            0.0
         }
     }
 
@@ -959,5 +1103,301 @@ mod tests {
         // Position closes on candle 2's SL; candles 3 and 4 have no
         // position, so no SL fires.
         assert_eq!(total_sl, 1);
+    }
+
+    // ---------- RISK ----------
+
+    #[tokio::test]
+    async fn risk_max_orders_blocks_after_limit() {
+        // MAX_ORDERS 2: first two candles fire (close rises above 100, then
+        // stays above 100 → trigger holds → re-fires after drop). With the
+        // rule re-armed only after close drops below 105, the third
+        // qualifying candle must be skipped.
+        let mut engine =
+            make_engine("RISK MAX_ORDERS 2\nWHEN close > 100\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![
+            candle(100.0),
+            candle(110.0),
+            candle(50.0),
+            candle(110.0),
+            candle(50.0),
+            candle(110.0),
+        ];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        LogEntryKind::RiskBreach {
+                            reason: RiskBreachReason::MaxOrdersReached,
+                            ..
+                        }
+                    )
+                })
+                .count();
+        }
+        assert_eq!(total_orders, 2);
+        assert_eq!(total_breaches, 1);
+    }
+
+    #[tokio::test]
+    async fn risk_max_orders_does_not_count_failed_orders() {
+        // MAX_ORDERS 1: alternating up/down so the rule re-fires every
+        // other candle. The first up-candle's BUY fails (insufficient
+        // cash: 1 share @ 200 = 200 > 100 cash), so it does NOT count
+        // toward the limit. The next up-candle's BUY succeeds (price
+        // 80) and is the first counted order; the third up-candle is
+        // blocked.
+        let mut engine =
+            make_engine("RISK MAX_ORDERS 1\nWHEN close > 50\nBUY 1", 100.0);
+        let candles: Vec<Candle> = vec![
+            candle(40.0),  // close <= 50: rule doesn't fire
+            candle(200.0), // fires BUY → fails (cost 200 > cash 100)
+            candle(40.0),  // close <= 50: rule doesn't fire, trigger resets
+            candle(80.0),  // fires BUY → succeeds (count = 1)
+            candle(40.0),  // close <= 50: rule doesn't fire, trigger resets
+            candle(80.0),  // limit reached → blocked
+        ];
+
+        let mut total_orders = 0;
+        let mut total_failures = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_failures += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderFailed { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        LogEntryKind::RiskBreach {
+                            reason: RiskBreachReason::MaxOrdersReached,
+                            ..
+                        }
+                    )
+                })
+                .count();
+        }
+        assert_eq!(total_orders, 1);
+        assert_eq!(total_failures, 1);
+        assert_eq!(total_breaches, 1);
+    }
+
+    #[tokio::test]
+    async fn risk_max_positions_blocks_buys_when_at_limit() {
+        // MAX_POSITIONS 1 + alternating up/down so the rule re-fires.
+        // The first up-candle's BUY opens a position. The next up-candle
+        // (after a reset) must be blocked because the first position is
+        // still open.
+        let mut engine = make_engine(
+            "RISK MAX_POSITIONS 1\nWHEN close > 100\nBUY 1",
+            100_000.0,
+        );
+        let candles: Vec<Candle> = vec![
+            candle(50.0),  // rule doesn't fire
+            candle(150.0), // fires BUY → succeeds
+            candle(50.0),  // rule doesn't fire, trigger resets
+            candle(150.0), // blocked: 1 position already open
+        ];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        LogEntryKind::RiskBreach {
+                            reason: RiskBreachReason::MaxPositionsReached,
+                            ..
+                        }
+                    )
+                })
+                .count();
+        }
+        assert_eq!(total_orders, 1, "only the first BUY should execute");
+        assert_eq!(total_breaches, 1);
+    }
+
+    #[tokio::test]
+    async fn risk_max_positions_does_not_block_sells() {
+        // MAX_POSITIONS 1: open a position, then a TP-like rule fires a
+        // SELL ALL on the second candle. MAX_POSITIONS must not block the
+        // sell even though there is an open position.
+        let mut engine = make_engine(
+            "RISK MAX_POSITIONS 1\nWHEN close > 100\nBUY 1\nWHEN close > 105\nSELL ALL",
+            100_000.0,
+        );
+        let candles: Vec<Candle> = vec![
+            candle(50.0),  // rules don't fire
+            candle(110.0), // close > 100 → BUY, close > 105 → SELL ALL
+        ];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::RiskBreach { .. }))
+                .count();
+        }
+        // 1 BUY + 1 SELL = 2 successful orders; no breaches (sells aren't
+        // checked, and the BUY happens before MAX_POSITIONS would have a
+        // chance to compare to itself).
+        assert_eq!(total_orders, 2);
+        assert_eq!(total_breaches, 0);
+    }
+
+    #[tokio::test]
+    async fn risk_max_daily_loss_blocks_after_threshold() {
+        // MAX_DAILY_LOSS 1% with initial_cash 1000 (so 1% = 10 realized
+        // loss). BUY fires on `close > 100`, SELL on `close < 50`.
+        // Open at 200, drop to 40, SELL ALL — realized loss = 160 (160/1000
+        // = 16% > 1%). Next buy cycle (after the trigger re-arms) is
+        // blocked by the threshold.
+        let mut engine = make_engine(
+            "RISK MAX_DAILY_LOSS 1%\nWHEN close > 100\nBUY 1\nWHEN close < 50\nSELL ALL",
+            1000.0,
+        );
+        let candles: Vec<Candle> = vec![
+            candle(80.0),  // no rule fires
+            candle(200.0), // close>100 → BUY 1 @ 200 (cost 200, OK)
+            candle(40.0),  // close<50 → SELL ALL @ 40 (loss = 160)
+            candle(200.0), // close>100 → BUY blocked (16% loss > 1%)
+        ];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        LogEntryKind::RiskBreach {
+                            reason: RiskBreachReason::MaxDailyLossReached,
+                            ..
+                        }
+                    )
+                })
+                .count();
+        }
+        assert_eq!(total_orders, 2, "two orders: BUY + SELL");
+        assert!(total_breaches >= 1, "expected at least one breach");
+    }
+
+    #[tokio::test]
+    async fn risk_breach_does_not_increment_session_orders() {
+        // MAX_ORDERS 1 with alternating up/down. The first up-candle's
+        // BUY succeeds (count = 1). The second up-candle's BUY is
+        // blocked; the breach must NOT count toward the limit.
+        let mut engine =
+            make_engine("RISK MAX_ORDERS 1\nWHEN close > 100\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![
+            candle(50.0),  // rule doesn't fire
+            candle(150.0), // fires BUY → succeeds (count = 1)
+            candle(50.0),  // rule doesn't fire, trigger resets
+            candle(150.0), // limit reached → blocked (breach)
+        ];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::RiskBreach { .. }))
+                .count();
+        }
+        assert_eq!(total_orders, 1);
+        assert_eq!(total_breaches, 1);
+    }
+
+    #[tokio::test]
+    async fn strategy_without_risk_does_not_log_breaches() {
+        // No RISK declarations: even with the rule firing every candle, no
+        // RiskBreach entries are emitted and every order executes.
+        let mut engine = make_engine("WHEN close > 0\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(10.0), candle(20.0), candle(30.0)];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::RiskBreach { .. }))
+                .count();
+        }
+        assert!(total_orders > 0);
+        assert_eq!(total_breaches, 0);
+    }
+
+    #[tokio::test]
+    async fn risk_is_deterministic() {
+        // Same source + same candles = same RiskBreach log sequence.
+        // Backtest determinism invariant must hold with risk controls on.
+        let source = "RISK MAX_ORDERS 2\nWHEN close > 0\nBUY 1";
+        let candles: Vec<Candle> = (1..=10).map(|c| candle(c as f64)).collect();
+
+        let mut e1 = make_engine(source, 100_000.0);
+        let mut e2 = make_engine(source, 100_000.0);
+
+        let mut all1 = Vec::new();
+        let mut all2 = Vec::new();
+        for index in 1..=candles.len() {
+            all1.extend(e1.on_candle(&candles[..index]).await);
+            all2.extend(e2.on_candle(&candles[..index]).await);
+        }
+
+        let kind = |e: &LogEntry| match &e.kind {
+            LogEntryKind::OrderExecuted { .. } => "exec".to_string(),
+            LogEntryKind::OrderSubmitted { .. } => "submit".to_string(),
+            LogEntryKind::RiskBreach { reason, .. } => format!("breach:{reason:?}"),
+            _ => "other".to_string(),
+        };
+        let seq1: Vec<String> = all1.iter().map(kind).collect();
+        let seq2: Vec<String> = all2.iter().map(kind).collect();
+        assert_eq!(seq1, seq2);
     }
 }

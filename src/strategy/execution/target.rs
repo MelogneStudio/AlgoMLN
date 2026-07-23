@@ -7,6 +7,11 @@ use crate::models::{Order, OrderResult, Position};
 pub trait ExecutionTarget: Send + Sync {
     async fn execute(&self, order: Order) -> Result<OrderResult, ExecutionError>;
     async fn get_positions(&self) -> Result<Vec<Position>, ExecutionError>;
+    /// Sum of negative realized `PaperTrade.pnl` values, i.e. the total
+    /// realized loss as a positive number. Returns 0.0 if no loss has been
+    /// realized (or if the broker is net positive on the session). Used by
+    /// the engine's `RISK MAX_DAILY_LOSS` check.
+    fn realized_loss(&self) -> f64;
     fn available_cash(&self) -> f64;
     fn is_paper(&self) -> bool;
     fn name(&self) -> &str;

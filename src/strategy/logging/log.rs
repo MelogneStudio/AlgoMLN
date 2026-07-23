@@ -70,12 +70,31 @@ pub enum LogEntryKind {
         gain_pct: f64,
         price: f64,
     },
+    /// A risk-control declaration on the strategy (e.g. `RISK MAX_ORDERS`)
+    /// blocked this order. Logged instead of submitting the order; the
+    /// engine does not surface an error to the backtest orchestrator.
+    RiskBreach {
+        rule_id: String,
+        reason: RiskBreachReason,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub enum RuleSkipReason {
     NoPosition,
     InsufficientCash,
+}
+
+/// Why a risk-control check blocked an order. The variants mirror the three
+/// `RISK` declarations: `RISK MAX_ORDERS`, `RISK MAX_POSITIONS`, and
+/// `RISK MAX_DAILY_LOSS`. `MaxDailyLossReached` is a hard stop — once the
+/// cumulative realized loss crosses the threshold, every subsequent order
+/// is skipped regardless of side.
+#[derive(Debug, Clone, Serialize)]
+pub enum RiskBreachReason {
+    MaxOrdersReached,
+    MaxPositionsReached,
+    MaxDailyLossReached,
 }
 
 #[derive(Debug, Clone, Serialize)]
