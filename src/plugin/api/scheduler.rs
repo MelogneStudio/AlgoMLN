@@ -47,7 +47,9 @@ impl SchedulerApi for CronScheduler {
                     continue;
                 }
                 let sleep_until = tokio::time::Instant::now()
-                    + (next - now).to_std().unwrap_or(std::time::Duration::from_secs(0));
+                    + (next - now)
+                        .to_std()
+                        .unwrap_or(std::time::Duration::from_secs(0));
                 tokio::select! {
                     _ = tokio::time::sleep_until(sleep_until) => {
                         task();

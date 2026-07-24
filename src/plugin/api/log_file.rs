@@ -86,10 +86,8 @@ pub struct RateLimiter {
 impl Default for RateLimiter {
     fn default() -> Self {
         Self::new(
-            /* burst_capacity */ 10,
-            /* burst_per_sec */ 10.0,
-            /* sustained_max */ 100,
-            /* sustained_window_secs */ 60,
+            /* burst_capacity */ 10, /* burst_per_sec */ 10.0,
+            /* sustained_max */ 100, /* sustained_window_secs */ 60,
         )
     }
 }
@@ -208,10 +206,7 @@ impl RollingLog {
     /// Open (or create) the rolling log at `path`. The parent
     /// directory must already exist.
     pub fn open(path: PathBuf) -> std::io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
             path,
@@ -236,7 +231,10 @@ impl RollingLog {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "log file closed"))?;
         file.write_all(line.as_bytes())?;
         file.flush()?;
-        let new_size = file.metadata().map(|m| m.len()).unwrap_or(current + line_len);
+        let new_size = file
+            .metadata()
+            .map(|m| m.len())
+            .unwrap_or(current + line_len);
         *self.size.lock().unwrap() = new_size;
         Ok(())
     }
@@ -343,10 +341,7 @@ impl RateLimitedFileLog {
             // We can't do much — the spec is "logs 5MB rolling", not
             // "logs must not fail". Surface to stderr so a tail -f
             // still sees something rather than silently disappearing.
-            eprintln!(
-                "[plugin:{}] log write failed: {err}",
-                self.plugin_id
-            );
+            eprintln!("[plugin:{}] log write failed: {err}", self.plugin_id);
         }
         // Periodic dropped-message summary. We do this on every
         // admit (cheap) but `take_summary` only returns a value
@@ -408,7 +403,11 @@ impl SharedPluginLogRegistry {
     /// Get or create a log for the given plugin id. The closure runs
     /// only on the create path; if a log already exists for this id
     /// the existing `Arc` is returned.
-    pub fn get_or_create<F>(&self, plugin_id: PluginId, make: F) -> std::io::Result<std::sync::Arc<RateLimitedFileLog>>
+    pub fn get_or_create<F>(
+        &self,
+        plugin_id: PluginId,
+        make: F,
+    ) -> std::io::Result<std::sync::Arc<RateLimitedFileLog>>
     where
         F: FnOnce() -> std::io::Result<RateLimitedFileLog>,
     {
@@ -532,7 +531,10 @@ mod tests {
         let log = RollingLog::open(path.clone()).unwrap();
         log.write_line("second\n").unwrap();
         let mut contents = String::new();
-        File::open(&path).unwrap().read_to_string(&mut contents).unwrap();
+        File::open(&path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
         assert_eq!(contents, "first\nsecond\n");
     }
 

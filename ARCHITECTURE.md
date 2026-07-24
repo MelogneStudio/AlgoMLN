@@ -31,7 +31,7 @@ AlgoMLN/
 │   ├── strategy/
 │   │   ├── dsl/                Lexer → Parser → AST → Validator
 │   │   ├── runtime/            StrategyEngine + EvalContext, CrossDetector, TriggerStateMap
-│   │   ├── execution/          ExecutionTarget trait; PaperBroker, order_builder
+│   │   ├── execution/          ExecutionTarget trait; PaperBroker, DhanBroker, order_builder
 │   │   ├── portfolio/          Multi-symbol PortfolioEngine (shared PaperBroker + per-symbol sub-engines)
 │   │   │   ├── mod.rs          submodule root
 │   │   │   └── engine.rs       PortfolioEngine + resolve_trade_in_symbols
@@ -226,9 +226,10 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 |---|---|
 | `ExecutionTarget` trait + `realized_loss` (used by `RISK MAX_DAILY_LOSS`) | `src/strategy/execution/target.rs` |
 | Paper broker (in-memory cash + positions) | `src/strategy/execution/paper.rs` |
+| Dhan live broker (`ExecutionTarget` backed by REST orders/positions) | `src/strategy/execution/dhan.rs` |
 | `ActionNode` → `Order` builder | `src/strategy/execution/order_builder.rs` |
 | BrokerClient trait (data fetch) | `src/broker/mod.rs` |
-| Dhan auth / REST / WebSocket | `src/broker/dhan/{auth,rest,websocket,models}.rs` |
+| Dhan auth / REST orders, positions, market data / WebSocket | `src/broker/dhan/{auth,rest,websocket,models}.rs` |
 | Timeframe enum + Dhan interval strings | `src/broker/mod.rs` |
 
 ### Indices & symbol resolution (multi-symbol strategies)
@@ -311,7 +312,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 ## "Where to Add…" Recipes
 
 - **New indicator?** Pure `fn name(candles: &[Candle], period: usize) -> Vec<f64>` in `src/indicators/`, register in `src/indicators/mod.rs`, add AST variant in `src/strategy/dsl/ast.rs`, add a parser token in `lexer.rs`, add an evaluator branch in the engine.
-- **New broker?** Implement `BrokerClient` in `src/broker/` and `ExecutionTarget` in `src/strategy/execution/`. The engine needs no changes.
+- **New broker?** Implement `BrokerClient` in `src/broker/` and `ExecutionTarget` in `src/strategy/execution/`. Follow `DhanBroker` for a live REST-backed target and `PaperBroker` for in-memory simulation. The engine needs no changes.
 - **New DSL keyword?** Lexer → parser → AST → validator → engine evaluator (five files in `src/strategy/dsl/` + `src/strategy/runtime/`). Mirror `cross_above` / `cross_below` as the closest reference.
 - **New Tauri command?** Implement the body as a plain `async fn` in `src/commands/` (pick `data.rs` / `strategy.rs` / `registry.rs` / `plugins.rs` / or add a new file), then add a thin `#[tauri::command]` wrapper in `src-tauri/src/main.rs` that delegates, and add the wrapper to `invoke_handler!`. `AppState` is defined in `src/commands/state.rs` and re-exported as `commands::AppState` so command bodies can use it without depending on the binary crate.
 - **New shared CSV loader?** Add to `src/data/csv.rs`; both the CLI and `commands::strategy::run_backtest_dsl` use it.

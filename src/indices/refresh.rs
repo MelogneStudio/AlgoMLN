@@ -44,7 +44,10 @@ pub async fn refresh_index(
             match serde_json::to_string_pretty(&cache_file) {
                 Ok(json) => {
                     if let Err(e) = std::fs::write(&out_path, json) {
-                        eprintln!("[refresh_index] could not write cache for {}: {}", alias_str, e);
+                        eprintln!(
+                            "[refresh_index] could not write cache for {}: {}",
+                            alias_str, e
+                        );
                     }
                 }
                 Err(e) => eprintln!("[refresh_index] could not serialise {}: {}", alias_str, e),

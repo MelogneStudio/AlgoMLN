@@ -38,7 +38,11 @@ pub struct PluginRegistry {
     plugins: Arc<RwLock<HashMap<PluginId, PluginEntry>>>,
     plugins_dir: PathBuf,
     host_factory: Arc<
-        dyn Fn(PluginId, Vec<crate::plugin::types::Capability>, PluginPermissions) -> Arc<PluginHost>
+        dyn Fn(
+                PluginId,
+                Vec<crate::plugin::types::Capability>,
+                PluginPermissions,
+            ) -> Arc<PluginHost>
             + Send
             + Sync,
     >,
@@ -74,9 +78,7 @@ impl PluginRegistry {
             Err(err) => {
                 results.push((
                     self.plugins_dir.display().to_string(),
-                    Err(PluginError::LoadFailed(format!(
-                        "read plugins_dir: {err}"
-                    ))),
+                    Err(PluginError::LoadFailed(format!("read plugins_dir: {err}"))),
                 ));
                 return results;
             }
@@ -87,10 +89,7 @@ impl PluginRegistry {
             if !path.is_dir() {
                 continue;
             }
-            let dir_name = entry
-                .file_name()
-                .to_string_lossy()
-                .to_string();
+            let dir_name = entry.file_name().to_string_lossy().to_string();
 
             let plugin_result = PluginLoader::load_from_dir(Path::new(&path));
             let mut plugin = match plugin_result {
@@ -114,8 +113,7 @@ impl PluginRegistry {
             };
 
             let id = plugin.meta().id.clone();
-            let caps: Vec<crate::plugin::types::Capability> =
-                plugin.capabilities().to_vec();
+            let caps: Vec<crate::plugin::types::Capability> = plugin.capabilities().to_vec();
             let permissions = manifest.permissions.clone();
             let host = (self.host_factory)(id.clone(), caps.clone(), permissions.clone());
 
@@ -291,7 +289,11 @@ impl Plugin for EmptyPlugin {
         static META: PluginMeta = PluginMeta {
             id: PluginId(String::new()),
             name: String::new(),
-            version: PluginVersion { major: 0, minor: 0, patch: 0 },
+            version: PluginVersion {
+                major: 0,
+                minor: 0,
+                patch: 0,
+            },
             description: String::new(),
             author: String::new(),
         };

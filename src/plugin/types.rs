@@ -63,10 +63,20 @@ impl TryFrom<&str> for PluginVersion {
         if parts.len() != 3 {
             return Err(format!("invalid version string: {value}"));
         }
-        let major = parts[0].parse::<u32>().map_err(|e| format!("invalid major: {e}"))?;
-        let minor = parts[1].parse::<u32>().map_err(|e| format!("invalid minor: {e}"))?;
-        let patch = parts[2].parse::<u32>().map_err(|e| format!("invalid patch: {e}"))?;
-        Ok(Self { major, minor, patch })
+        let major = parts[0]
+            .parse::<u32>()
+            .map_err(|e| format!("invalid major: {e}"))?;
+        let minor = parts[1]
+            .parse::<u32>()
+            .map_err(|e| format!("invalid minor: {e}"))?;
+        let patch = parts[2]
+            .parse::<u32>()
+            .map_err(|e| format!("invalid patch: {e}"))?;
+        Ok(Self {
+            major,
+            minor,
+            patch,
+        })
     }
 }
 
@@ -146,7 +156,10 @@ pub enum PluginError {
     ManifestParse(String),
     LoadFailed(String),
     ApiError(String),
-    PermissionDenied { capability: String, plugin_id: String },
+    PermissionDenied {
+        capability: String,
+        plugin_id: String,
+    },
     Timeout(String),
     NotFound(String),
 }
@@ -157,7 +170,10 @@ impl fmt::Display for PluginError {
             PluginError::ManifestParse(m) => write!(f, "manifest parse error: {m}"),
             PluginError::LoadFailed(m) => write!(f, "load failed: {m}"),
             PluginError::ApiError(m) => write!(f, "api error: {m}"),
-            PluginError::PermissionDenied { capability, plugin_id } => {
+            PluginError::PermissionDenied {
+                capability,
+                plugin_id,
+            } => {
                 write!(
                     f,
                     "permission denied for capability {capability} in plugin {plugin_id}"

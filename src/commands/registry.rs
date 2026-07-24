@@ -22,7 +22,9 @@ impl StrategyMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "paper" => Ok(Self::Paper),
             "live" => Ok(Self::Live),
-            other => Err(format!("unknown mode '{other}' — expected 'paper' or 'live'")),
+            other => Err(format!(
+                "unknown mode '{other}' — expected 'paper' or 'live'"
+            )),
         }
     }
 }
@@ -132,11 +134,7 @@ impl StrategyRegistry {
                 Vec::new()
             } else {
                 let parsed: RegistryFile = serde_json::from_str(&raw).map_err(|error| {
-                    format!(
-                        "failed to parse {}: {}",
-                        store_path.display(),
-                        error
-                    )
+                    format!("failed to parse {}: {}", store_path.display(), error)
                 })?;
                 parsed.strategies
             }
@@ -235,13 +233,8 @@ impl StrategyRegistry {
         };
         let serialized = serde_json::to_string_pretty(&file)
             .map_err(|error| format!("failed to serialize registry: {error}"))?;
-        std::fs::write(&self.store_path, serialized).map_err(|error| {
-            format!(
-                "failed to write {}: {}",
-                self.store_path.display(),
-                error
-            )
-        })?;
+        std::fs::write(&self.store_path, serialized)
+            .map_err(|error| format!("failed to write {}: {}", self.store_path.display(), error))?;
         Ok(())
     }
 }
@@ -286,7 +279,11 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("algomln-registry-test-{}-{}", name, std::process::id()));
+        dir.push(format!(
+            "algomln-registry-test-{}-{}",
+            name,
+            std::process::id()
+        ));
         // Use a deterministic suffix so concurrent tests don't collide.
         dir
     }
@@ -298,7 +295,10 @@ mod tests {
 
         let registry = StrategyRegistry::open(path.clone()).unwrap();
         let dsl = "WHEN rsi(14) < 30\nBUY 1";
-        let id = registry.deploy("Test", dsl, StrategyMode::Paper).await.unwrap();
+        let id = registry
+            .deploy("Test", dsl, StrategyMode::Paper)
+            .await
+            .unwrap();
 
         let listed = registry.list().await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -307,7 +307,10 @@ mod tests {
         assert_eq!(listed[0].modes, vec![StrategyMode::Paper]);
         assert_eq!(listed[0].status, StrategyStatus::Paused);
 
-        registry.set_status(&id, StrategyStatus::Running).await.unwrap();
+        registry
+            .set_status(&id, StrategyStatus::Running)
+            .await
+            .unwrap();
         let listed = registry.list().await.unwrap();
         assert_eq!(listed[0].status, StrategyStatus::Running);
 
@@ -361,8 +364,14 @@ mod tests {
 
     #[test]
     fn strategy_status_parses_lowercase() {
-        assert_eq!(StrategyStatus::parse("running").unwrap(), StrategyStatus::Running);
-        assert_eq!(StrategyStatus::parse("Paused").unwrap(), StrategyStatus::Paused);
+        assert_eq!(
+            StrategyStatus::parse("running").unwrap(),
+            StrategyStatus::Running
+        );
+        assert_eq!(
+            StrategyStatus::parse("Paused").unwrap(),
+            StrategyStatus::Paused
+        );
         assert!(StrategyStatus::parse("stopped").is_err());
     }
 }

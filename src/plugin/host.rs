@@ -64,9 +64,7 @@ impl PluginHost {
         Ok(&self.storage)
     }
 
-    pub fn event_bus_guarded(
-        &self,
-    ) -> PluginResult<&Arc<crate::plugin::api::events::EventBus>> {
+    pub fn event_bus_guarded(&self) -> PluginResult<&Arc<crate::plugin::api::events::EventBus>> {
         self.require_capability(&Capability::Events)?;
         Ok(&self.event_bus)
     }

@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::commands::registry::StrategyMode;
 use crate::models::Candle;
+use crate::plugin::api::events::EventBus;
+use crate::strategy::execution::paper::PaperBroker;
+use crate::strategy::logging::log::LogEntry;
 use crate::strategy::{
     dsl::ast::{StrategyNode, TradeIn},
     runtime::engine::{StrategyEngine, StrategyInstance, StrategyStatus},
 };
-use crate::strategy::execution::paper::PaperBroker;
-use crate::strategy::logging::log::LogEntry;
-use crate::plugin::api::events::EventBus;
-use crate::commands::registry::StrategyMode;
 
 /// Resolves a `TradeIn` clause to a concrete list of NSE symbols using the
 /// shared `IndexRegistry`. Returns `Err` for the `Index` variant if the alias
@@ -68,7 +68,10 @@ impl PortfolioEngine {
         initial_cash: f64,
         event_bus: Option<Arc<EventBus>>,
     ) -> Self {
-        assert!(!symbols.is_empty(), "PortfolioEngine: symbols must be non-empty");
+        assert!(
+            !symbols.is_empty(),
+            "PortfolioEngine: symbols must be non-empty"
+        );
 
         // The shared broker doesn't know about any single symbol — its inner
         // `positions: HashMap<String, PaperPosition>` is keyed by whatever
@@ -91,7 +94,8 @@ impl PortfolioEngine {
                 symbol: sym_upper.clone(),
                 timeframe: crate::broker::Timeframe::M5,
                 status: StrategyStatus::Running,
-                execution_target: Arc::clone(&broker) as Arc<dyn crate::strategy::execution::target::ExecutionTarget>,
+                execution_target: Arc::clone(&broker)
+                    as Arc<dyn crate::strategy::execution::target::ExecutionTarget>,
             };
 
             let mut engine = StrategyEngine::new(instance);
@@ -100,7 +104,11 @@ impl PortfolioEngine {
             symbol_order.push(sym_upper);
         }
 
-        Self { sub_engines, broker, symbol_order }
+        Self {
+            sub_engines,
+            broker,
+            symbol_order,
+        }
     }
 
     /// Convenience constructor that resolves a `TradeIn` clause into a symbol
@@ -133,12 +141,18 @@ impl PortfolioEngine {
     }
 
     /// Symbols this engine is tracking, in stable insertion order.
-    pub fn symbols(&self) -> &[String] { &self.symbol_order }
+    pub fn symbols(&self) -> &[String] {
+        &self.symbol_order
+    }
 
     /// Direct access to the shared broker for position/PnL snapshots.
-    pub fn broker(&self) -> &Arc<PaperBroker> { &self.broker }
+    pub fn broker(&self) -> &Arc<PaperBroker> {
+        &self.broker
+    }
 
-    pub fn symbol_count(&self) -> usize { self.sub_engines.len() }
+    pub fn symbol_count(&self) -> usize {
+        self.sub_engines.len()
+    }
 
     /// Direct access to a sub-engine (e.g. for status flips). The caller MUST
     /// not call `on_candle` on the sub-engine while `PortfolioEngine::on_tick`
@@ -174,10 +188,10 @@ impl PortfolioEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::dsl::{AstValidator, Lexer, Parser};
-    use crate::strategy::logging::log::LogEntryKind;
     use crate::indices::IndexRegistry;
     use crate::strategy::dsl::ast::IndexAlias;
+    use crate::strategy::dsl::{AstValidator, Lexer, Parser};
+    use crate::strategy::logging::log::LogEntryKind;
 
     fn parse(source: &str) -> StrategyNode {
         let tokens = Lexer::tokenize(source).expect("lex");
@@ -260,12 +274,7 @@ mod tests {
     #[tokio::test]
     async fn on_tick_for_unknown_symbol_returns_empty() {
         let strategy = parse("WHEN close > 0\nBUY 1");
-        let mut engine = PortfolioEngine::new(
-            &strategy,
-            vec!["RELIANCE".into()],
-            100_000.0,
-            None,
-        );
+        let mut engine = PortfolioEngine::new(&strategy, vec!["RELIANCE".into()], 100_000.0, None);
         let logs = engine.on_tick("UNKNOWN", &[candle(1.0)]).await;
         assert!(logs.is_empty());
     }
@@ -273,12 +282,8 @@ mod tests {
     #[tokio::test]
     async fn sub_engines_share_broker_cash() {
         let strategy = parse("WHEN close > 0\nBUY 1");
-        let mut engine = PortfolioEngine::new(
-            &strategy,
-            vec!["AAA".into(), "BBB".into()],
-            10_000.0,
-            None,
-        );
+        let mut engine =
+            PortfolioEngine::new(&strategy, vec!["AAA".into(), "BBB".into()], 10_000.0, None);
 
         // Drive each sub-engine through one candle. `close > 0` fires the rule
         // once per sub-engine (trigger state prevents re-fire).

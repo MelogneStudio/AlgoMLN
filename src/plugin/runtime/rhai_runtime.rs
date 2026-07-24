@@ -17,14 +17,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rhai::{Array, AST, Dynamic, Engine, EvalAltResult, FnPtr, Map, Scope};
+use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, Map, Scope, AST};
 
 use crate::models::Candle;
 use crate::plugin::api::indicator_registry::SharedIndicatorRegistry;
 use crate::plugin::host::PluginHost;
-use crate::plugin::types::{
-    Capability, NotificationKind, PluginError, PluginMeta, PluginResult,
-};
+use crate::plugin::types::{Capability, NotificationKind, PluginError, PluginMeta, PluginResult};
 
 use super::super::Plugin;
 
@@ -266,8 +264,7 @@ fn register_host_functions(
                     Err(_) => return false,
                 };
                 // Try the spec-shaped path first (plugin-id-attributed).
-                if let Some(shared) = registry.as_any().downcast_ref::<SharedIndicatorRegistry>()
-                {
+                if let Some(shared) = registry.as_any().downcast_ref::<SharedIndicatorRegistry>() {
                     let engine_for_call = engine_clone.clone();
                     let ast_for_call = ast_clone.clone();
                     let func_for_call = func.clone();

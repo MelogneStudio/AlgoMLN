@@ -61,8 +61,7 @@ impl Parser {
                     if parsed.max_daily_loss_pct.is_some() {
                         if config.max_daily_loss_pct.is_some() {
                             return Err(ParseError {
-                                message: "duplicate RISK MAX_DAILY_LOSS declaration"
-                                    .to_string(),
+                                message: "duplicate RISK MAX_DAILY_LOSS declaration".to_string(),
                                 line: self.peek().line,
                                 col: self.peek().col,
                             });
@@ -170,9 +169,9 @@ impl Parser {
                     max_orders: Some(value),
                 })
             }
-            _ => self.error_here(
-                "expected MAX_DAILY_LOSS, MAX_POSITIONS, or MAX_ORDERS after RISK",
-            ),
+            _ => {
+                self.error_here("expected MAX_DAILY_LOSS, MAX_POSITIONS, or MAX_ORDERS after RISK")
+            }
         }
     }
 
@@ -996,9 +995,7 @@ BUY 10
 
     #[test]
     fn parses_risk_declarations_interleaved_with_rules() {
-        let strategy = parse(
-            "RISK MAX_ORDERS 5\nWHEN close > 100\nBUY 1\nRISK MAX_DAILY_LOSS 2%",
-        );
+        let strategy = parse("RISK MAX_ORDERS 5\nWHEN close > 100\nBUY 1\nRISK MAX_DAILY_LOSS 2%");
         let risk = strategy.risk.expect("expected risk config");
         assert_eq!(risk.max_daily_loss_pct, Some(2.0));
         assert_eq!(risk.max_orders, Some(5));
@@ -1021,10 +1018,9 @@ BUY 10
 
     #[test]
     fn rejects_duplicate_max_positions() {
-        let tokens = Lexer::tokenize(
-            "RISK MAX_POSITIONS 3\nRISK MAX_POSITIONS 5\nWHEN close > 100\nBUY 1",
-        )
-        .unwrap();
+        let tokens =
+            Lexer::tokenize("RISK MAX_POSITIONS 3\nRISK MAX_POSITIONS 5\nWHEN close > 100\nBUY 1")
+                .unwrap();
         let err = Parser::new(tokens).parse().unwrap_err();
         assert!(
             err.message.contains("duplicate RISK MAX_POSITIONS"),
@@ -1035,10 +1031,9 @@ BUY 10
 
     #[test]
     fn rejects_duplicate_max_orders() {
-        let tokens = Lexer::tokenize(
-            "RISK MAX_ORDERS 20\nRISK MAX_ORDERS 50\nWHEN close > 100\nBUY 1",
-        )
-        .unwrap();
+        let tokens =
+            Lexer::tokenize("RISK MAX_ORDERS 20\nRISK MAX_ORDERS 50\nWHEN close > 100\nBUY 1")
+                .unwrap();
         let err = Parser::new(tokens).parse().unwrap_err();
         assert!(
             err.message.contains("duplicate RISK MAX_ORDERS"),

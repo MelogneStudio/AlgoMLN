@@ -72,7 +72,7 @@ Per invariant #10 in `CLAUDE.md`, the registry is read-only after startup from t
 
 `SymbolMap` (`src/broker/symbol_map.rs`) is a `HashMap<String, u32>` mapping uppercase NSE equity symbols to Dhan `SECURITY_ID`s. The map is loaded once at startup from the bundled `sample-data/sec_id.csv` (a snapshot of the Dhan scrip master). Parsing filters to `EXCH_ID=NSE, SEGMENT=E` rows only; `SYMBOL_NAME` wins over `UNDERLYING_SYMBOL`; first-occurrence-wins for duplicates.
 
-The map is held in `AppState.symbol_map: Arc<parking_lot::RwLock<SymbolMap>>` so a future hot-refresh (`refresh_symbol_map`) can swap the map without restarting the app. The Dhan scrip master URL is `https://images.dhan.co/api-data/api-scrip-master-detailed.csv`; the refresh writes to `<app_data>/symbol_map.csv` via a temp file + atomic rename. Runtime wiring of `SymbolMap` into the engine is a follow-up prompt — for now the map is built and held in `AppState` so the IPC surface is in place.
+The map is held in `AppState.symbol_map: Arc<parking_lot::RwLock<SymbolMap>>` and the same `Arc` is threaded into `DataState`'s `DhanClient`, so live order placement resolves strategy symbols through the hot-refreshable map. The Dhan scrip master URL is `https://images.dhan.co/api-data/api-scrip-master-detailed.csv`; refresh writes to `<app_data>/sec_id_cache.csv` via a temp file + atomic rename.
 
 ---
 
@@ -159,12 +159,17 @@ pub trait ExecutionTarget: Send + Sync {
     fn available_cash(&self) -> f64;
     fn is_paper(&self) -> bool;
     fn name(&self) -> &str;
+    fn as_any(&self) -> &dyn Any;
 }
 ```
 
-The engine never imports a concrete broker type — it only knows the trait. Backtests construct an `Arc<PaperBroker>`, live trading will construct an `Arc<DhanBroker>`, and the same engine code drives both.
+The engine never imports a concrete broker type for order routing — it only knows the trait. Backtests construct an `Arc<PaperBroker>`, live trading can construct an `Arc<DhanBroker>`, and the same engine code drives both.
 
 **`PaperBroker`** (`src/strategy/execution/paper.rs`). A `Mutex<PaperBrokerInner>` wrapping `cash: f64`, `initial_cash: f64`, `positions: HashMap<String, PaperPosition>`, and `trade_history: Vec<PaperTrade>`. Buys deduct cash and update a weighted average entry price; sells realize P&L against that average. Pushing `update_unrealized(symbol, current_price)` is the CLI's job once per candle (see `run_backtest_internal`) so the position's `unrealized_pnl` stays fresh.
+
+**`DhanBroker`** (`src/strategy/execution/dhan.rs`). A live `ExecutionTarget` around `Arc<DhanClient>`. `execute` posts to Dhan `/orders`, `get_positions` reads `/positions`, `available_cash` returns `f64::MAX` because this Dhan API surface does not expose free cash, and `realized_loss` is approximated from before/after realized-PnL snapshots for `RISK MAX_DAILY_LOSS`.
+
+**`DhanClient` order execution** (`src/broker/dhan/rest.rs`). `place_order` resolves the strategy symbol through `SymbolMap`, builds an intraday `NSE_EQ` DAY order, maps Dhan order statuses into `OrderStatus`, and rejects Dhan `REJECTED` / `CANCELLED` responses as broker errors. `get_positions` maps Dhan net positions into the shared `Position` model and skips flat rows.
 
 **`order_builder`** (`src/strategy/execution/order_builder.rs`). Converts an `ActionNode` plus current price and current position into an `Order`. `SELL ALL` is resolved against the live position quantity — if there's no position it returns `OrderBuildError::NoPosition`, which the engine logs as a `RuleSkipped` entry rather than a hard error. The CLI test for `SELL ALL` with no position is in `order_builder.rs`.
 
@@ -222,7 +227,7 @@ The **registry** (`src/commands/registry.rs`) is intentionally minimal: it is a 
 
 `refresh_indices` writes per-index JSON to `<app_data>/indices/<stem>.json` and the Dhan scrip master CSV to `<app_data>/sec_id_cache.csv` (atomic temp+rename). On a successful symbol-map refresh it swaps the in-memory `Arc<RwLock<SymbolMap>>` so subsequent IPC calls see the new map without restarting the app.
 
-**Startup wiring** (in `src-tauri/src/main.rs::setup`): after the plugin shared infrastructure is built, the closure constructs `IndexRegistry`, calls `load_from_dirs(&cache_dir, &resource_dir)` (cache first, bundled seed second), and spawns a background task that calls `refresh_all_if_stale(...)` with a 90-day staleness window. The symbol map is loaded by trying `<app_data>/sec_id_cache.csv` first, then falling back to the bundled seed (`sample-data/sec_id.csv` in the repo root or `src-tauri/resources/sample-data/sec_id.csv` in the bundled resource dir). A second background task checks the cache with a 7-day staleness window and refreshes via `refresh_symbol_map(...)` when stale. Both background refreshes are non-fatal — failures are logged to stderr and the app keeps running with the seed data.
+**Startup wiring** (in `src-tauri/src/main.rs::setup`): the symbol map is loaded before `DataState` so the Dhan client and `AppState` share one `Arc<RwLock<SymbolMap>>`. Then the closure builds plugin infrastructure, constructs `IndexRegistry`, calls `load_from_dirs(&cache_dir, &resource_dir)` (cache first, bundled seed second), and spawns a background task that calls `refresh_all_if_stale(...)` with a 90-day staleness window. A second background task checks the symbol-map cache with a 7-day staleness window and refreshes via `refresh_symbol_map(...)` when stale. Both background refreshes are non-fatal — failures are logged to stderr and the app keeps running with the seed data.
 
 ---
 
@@ -232,7 +237,7 @@ The **registry** (`src/commands/registry.rs`) is intentionally minimal: it is a 
 
 - **`run <file.algomln> --data <csv> [--candles N] [--cash N] [--symbol X]`** — load strategy + CSV, truncate candles, run `run_backtest_internal`, print a formatted summary.
 - **`profile <name> [candles]`** — load the bundled NIFTY sample, run a built-in strategy (`rsi` or `ema`), print the throughput-focused summary. Used for benchmarking the engine.
-- **`backtest <file.algomln> --security <id> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--exchange X] [--instrument Y] [--timeframe 1m|5m|…]`** — fetch from Dhan directly and run. Requires `DHAN_ACCESS_TOKEN` in `.env`.
+- **`backtest <file.algomln> --security <id> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--exchange X] [--instrument Y] [--timeframe 1m|5m|…]`** — fetch from Dhan directly and run. Requires `DHAN_ACCESS_TOKEN` in `.env`; live order placement also requires `DHAN_CLIENT_ID`.
 
 The CLI also has a default mode (no subcommand) that runs three tiny deterministic tests against `sample-data/tiny_candles.csv` — useful for spot-checking the engine after a refactor.
 

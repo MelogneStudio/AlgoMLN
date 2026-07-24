@@ -1,7 +1,10 @@
 use std::{env, fs, path::Path, sync::Arc};
 
 use algomln::{
-    broker::{symbol_map::{refresh_symbol_map, SymbolMap}, Timeframe},
+    broker::{
+        symbol_map::{refresh_symbol_map, SymbolMap},
+        Timeframe,
+    },
     commands::{
         self,
         registry::{DeployedStrategy, StrategyMode, StrategyRegistry, StrategyStatus},
@@ -169,9 +172,6 @@ async fn search_symbols(
 fn main() {
     load_dotenv();
 
-    let data = commands::data::DataState::dhan_from_env()
-        .expect("Set DHAN_ACCESS_TOKEN in .env before starting the Tauri app");
-
     tauri::Builder::default()
         .setup(move |app| {
             use tauri::Manager;
@@ -180,6 +180,60 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .expect("could not resolve app data dir");
+
+            // ---------- Symbol map (NSE -> Dhan SECURITY_ID) ----------
+            //
+            // Prefer the user cache (`<app_data>/sec_id_cache.csv`); fall back
+            // to the bundled seed (`sample-data/sec_id.csv` in the repo root,
+            // `src-tauri/resources/sample-data/sec_id.csv` in the bundled
+            // resource dir). If neither resolves, fall back to an empty map
+            // so the app still boots.
+            let sym_cache_path = store_dir.join("sec_id_cache.csv");
+            let sym_seed_path = std::path::PathBuf::from("sample-data/sec_id.csv");
+            let sym_resource_seed = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|d| d.join("resources").join("sample-data").join("sec_id.csv"));
+
+            let symbol_map = if sym_cache_path.exists() {
+                SymbolMap::load(&sym_cache_path).unwrap_or_else(|e| {
+                    eprintln!("[symbol_map] cache load failed ({e}); falling back to seed");
+                    SymbolMap::load(&sym_seed_path)
+                        .or_else(|_| {
+                            sym_resource_seed
+                                .as_ref()
+                                .and_then(|p| SymbolMap::load(p).ok())
+                                .ok_or_else(|| {
+                                    "seed sec_id.csv missing - add sample-data/sec_id.csv"
+                                        .to_string()
+                                })
+                        })
+                        .unwrap_or_else(|e| {
+                            eprintln!("[symbol_map] {e} - using empty map");
+                            SymbolMap::empty()
+                        })
+                })
+            } else {
+                SymbolMap::load(&sym_seed_path)
+                    .or_else(|_| {
+                        sym_resource_seed
+                            .as_ref()
+                            .and_then(|p| SymbolMap::load(p).ok())
+                            .ok_or_else(|| {
+                                "seed sec_id.csv missing - add sample-data/sec_id.csv".to_string()
+                            })
+                    })
+                    .unwrap_or_else(|e| {
+                        eprintln!("[symbol_map] {e} - using empty map");
+                        SymbolMap::empty()
+                    })
+            };
+            let symbol_map = Arc::new(parking_lot::RwLock::new(symbol_map));
+
+            let data =
+                commands::data::DataState::dhan_from_env_with_symbol_map(symbol_map.clone())
+                    .expect("Set DHAN_ACCESS_TOKEN in .env before starting the Tauri app");
             let store_path = store_dir.join("strategies.json");
             let registry = StrategyRegistry::open(store_path.clone())
                 .unwrap_or_else(|error| {
@@ -381,58 +435,6 @@ fn main() {
                 eprintln!("[indices] background refresh: {}/{} ok", ok, outcomes.len());
             });
 
-            // ---------- Symbol map (NSE → Dhan SECURITY_ID) ----------
-            //
-            // Prefer the user cache (`<app_data>/sec_id_cache.csv`); fall back
-            // to the bundled seed (`sample-data/sec_id.csv` in the repo root,
-            // `src-tauri/resources/sample-data/sec_id.csv` in the bundled
-            // resource dir). If neither resolves, fall back to an empty map
-            // so the app still boots.
-            let sym_cache_path = store_dir.join("sec_id_cache.csv");
-            let sym_seed_path = std::path::PathBuf::from("sample-data/sec_id.csv");
-            let sym_resource_seed = app
-                .path()
-                .resource_dir()
-                .ok()
-                .map(|d| d.join("resources").join("sample-data").join("sec_id.csv"));
-
-            let symbol_map = if sym_cache_path.exists() {
-                SymbolMap::load(&sym_cache_path).unwrap_or_else(|e| {
-                    eprintln!(
-                        "[symbol_map] cache load failed ({e}); falling back to seed"
-                    );
-                    SymbolMap::load(&sym_seed_path)
-                        .or_else(|_| {
-                            sym_resource_seed
-                                .as_ref()
-                                .and_then(|p| SymbolMap::load(p).ok())
-                                .ok_or_else(|| {
-                                    "seed sec_id.csv missing — add sample-data/sec_id.csv"
-                                        .to_string()
-                                })
-                        })
-                        .unwrap_or_else(|e| {
-                            eprintln!("[symbol_map] {e} — using empty map");
-                            SymbolMap::empty()
-                        })
-                })
-            } else {
-                SymbolMap::load(&sym_seed_path)
-                    .or_else(|_| {
-                        sym_resource_seed
-                            .as_ref()
-                            .and_then(|p| SymbolMap::load(p).ok())
-                            .ok_or_else(|| {
-                                "seed sec_id.csv missing — add sample-data/sec_id.csv"
-                                    .to_string()
-                            })
-                    })
-                    .unwrap_or_else(|e| {
-                        eprintln!("[symbol_map] {e} — using empty map");
-                        SymbolMap::empty()
-                    })
-            };
-            let symbol_map = Arc::new(parking_lot::RwLock::new(symbol_map));
 
             // Background 7-day staleness check for the symbol map.
             let bg_sym_map = symbol_map.clone();

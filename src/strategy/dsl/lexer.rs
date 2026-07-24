@@ -491,10 +491,7 @@ BUY 10
 
     #[test]
     fn tokenizes_risk_sub_keywords() {
-        let tokens = Lexer::tokenize(
-            "RISK MAX_POSITIONS 3\nRISK MAX_ORDERS 20",
-        )
-        .unwrap();
+        let tokens = Lexer::tokenize("RISK MAX_POSITIONS 3\nRISK MAX_ORDERS 20").unwrap();
         assert!(tokens.iter().any(|token| token.kind == TokenKind::Risk));
         assert!(tokens
             .iter()

@@ -22,17 +22,10 @@ impl PluginLoader {
         let capabilities = manifest.to_capabilities()?;
         let entry = dir.join(&manifest.entry);
 
-        let ext = entry
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = entry.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         match ext {
-            "rhai" => Ok(Box::new(RhaiPlugin::new(
-                meta,
-                capabilities,
-                entry,
-            )?)),
+            "rhai" => Ok(Box::new(RhaiPlugin::new(meta, capabilities, entry)?)),
             "wasm" => Ok(Box::new(WasmPlugin::new(
                 meta,
                 capabilities,

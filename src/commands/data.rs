@@ -3,7 +3,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::{
-    broker::{dhan::DhanClient, BrokerClient, Timeframe},
+    broker::{
+        dhan::{DhanAuth, DhanClient},
+        symbol_map::SymbolMap,
+        BrokerClient, Timeframe,
+    },
     feed::FeedManager,
     models::{Candle, Quote},
 };
@@ -15,8 +19,17 @@ pub struct DataState {
 
 impl DataState {
     pub fn dhan_from_env() -> anyhow::Result<Self> {
+        Self::dhan_from_env_with_symbol_map(Arc::new(parking_lot::RwLock::new(SymbolMap::empty())))
+    }
+
+    pub fn dhan_from_env_with_symbol_map(
+        symbol_map: Arc<parking_lot::RwLock<SymbolMap>>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
-            broker: Arc::new(DhanClient::from_env()?),
+            broker: Arc::new(DhanClient::with_symbol_map(
+                DhanAuth::from_env()?,
+                symbol_map,
+            )),
             feed: Arc::new(Mutex::new(FeedManager::new())),
         })
     }

@@ -14,6 +14,8 @@ The frontend is a single-page React 19 + TypeScript app that runs inside a Tauri
 
 There is no separate "live code path" in the UI either — paper and live deploys share the same screens, hooks, and wire types. The only place the Tauri boundary is felt is the `isTauri()` check in `src/types/tauri.ts`.
 
+Live Dhan order placement is currently a backend concern behind the existing deploy/execution boundary: the React app does not build Dhan order bodies or resolve Dhan security IDs. It continues to render strategy, backtest, Settings, and IPC state while Rust owns broker execution.
+
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │ App.tsx                                                           │

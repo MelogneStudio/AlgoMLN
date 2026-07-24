@@ -7,8 +7,8 @@ use crate::broker::Timeframe;
 use crate::models::{Candle, Position};
 use crate::plugin::api::events::{EventBus, EventKind};
 use crate::strategy::dsl::{
-    ActionNode, CompareOp, ConditionNode, ExprNode, IndicatorKind, PriceField, RiskConfig, RuleNode,
-    StrategyNode,
+    ActionNode, CompareOp, ConditionNode, ExprNode, IndicatorKind, PriceField, RiskConfig,
+    RuleNode, StrategyNode,
 };
 use crate::strategy::execution::{
     build_order, ExecutionTarget, OrderBuildError, PaperPosition, PaperTrade,
@@ -203,7 +203,9 @@ impl StrategyEngine {
         // same candle (closing or opening a position) is reflected in the
         // position we evaluate here. It also runs after the cross-update
         // pass for symmetry with the other post-rule bookkeeping.
-        if self.instance.strategy.stop_loss.is_some() || self.instance.strategy.take_profit.is_some() {
+        if self.instance.strategy.stop_loss.is_some()
+            || self.instance.strategy.take_profit.is_some()
+        {
             self.run_stop_loss_take_profit_pass(&ctx).await;
         }
 
@@ -241,12 +243,7 @@ impl StrategyEngine {
         Ok(should_fire.then(|| rule.action.clone()))
     }
 
-    async fn submit_action(
-        &mut self,
-        source_id: &str,
-        action: ActionNode,
-        ctx: &EvalContext<'_>,
-    ) {
+    async fn submit_action(&mut self, source_id: &str, action: ActionNode, ctx: &EvalContext<'_>) {
         // Run risk-control checks before building the order. If any limit is
         // breached we log a `RiskBreach` entry and return without
         // touching the broker. Order is evaluated after the position
@@ -435,9 +432,7 @@ impl StrategyEngine {
     /// dividing by zero or panicking.
     fn broker_initial_cash(&self) -> f64 {
         let any = self.instance.execution_target.as_any();
-        if let Some(paper) =
-            any.downcast_ref::<crate::strategy::execution::PaperBroker>()
-        {
+        if let Some(paper) = any.downcast_ref::<crate::strategy::execution::PaperBroker>() {
             paper.get_state().initial_cash
         } else {
             0.0
@@ -1084,12 +1079,7 @@ mod tests {
         // SL fire per candle the position is open and underwater.
         let mut engine = make_engine("STOP_LOSS 2%\nWHEN close > 0\nBUY 1", 100_000.0);
         // Open at 100, then stay at 97 (3% loss) for three more candles.
-        let candles: Vec<Candle> = vec![
-            candle(100.0),
-            candle(97.0),
-            candle(97.0),
-            candle(97.0),
-        ];
+        let candles: Vec<Candle> = vec![candle(100.0), candle(97.0), candle(97.0), candle(97.0)];
 
         let _ = engine.on_candle(&candles[..1]).await;
         let mut total_sl = 0;
@@ -1113,8 +1103,7 @@ mod tests {
         // stays above 100 → trigger holds → re-fires after drop). With the
         // rule re-armed only after close drops below 105, the third
         // qualifying candle must be skipped.
-        let mut engine =
-            make_engine("RISK MAX_ORDERS 2\nWHEN close > 100\nBUY 1", 100_000.0);
+        let mut engine = make_engine("RISK MAX_ORDERS 2\nWHEN close > 100\nBUY 1", 100_000.0);
         let candles: Vec<Candle> = vec![
             candle(100.0),
             candle(110.0),
@@ -1157,8 +1146,7 @@ mod tests {
         // toward the limit. The next up-candle's BUY succeeds (price
         // 80) and is the first counted order; the third up-candle is
         // blocked.
-        let mut engine =
-            make_engine("RISK MAX_ORDERS 1\nWHEN close > 50\nBUY 1", 100.0);
+        let mut engine = make_engine("RISK MAX_ORDERS 1\nWHEN close > 50\nBUY 1", 100.0);
         let candles: Vec<Candle> = vec![
             candle(40.0),  // close <= 50: rule doesn't fire
             candle(200.0), // fires BUY → fails (cost 200 > cash 100)
@@ -1205,10 +1193,7 @@ mod tests {
         // The first up-candle's BUY opens a position. The next up-candle
         // (after a reset) must be blocked because the first position is
         // still open.
-        let mut engine = make_engine(
-            "RISK MAX_POSITIONS 1\nWHEN close > 100\nBUY 1",
-            100_000.0,
-        );
+        let mut engine = make_engine("RISK MAX_POSITIONS 1\nWHEN close > 100\nBUY 1", 100_000.0);
         let candles: Vec<Candle> = vec![
             candle(50.0),  // rule doesn't fire
             candle(150.0), // fires BUY → succeeds
@@ -1323,8 +1308,7 @@ mod tests {
         // MAX_ORDERS 1 with alternating up/down. The first up-candle's
         // BUY succeeds (count = 1). The second up-candle's BUY is
         // blocked; the breach must NOT count toward the limit.
-        let mut engine =
-            make_engine("RISK MAX_ORDERS 1\nWHEN close > 100\nBUY 1", 100_000.0);
+        let mut engine = make_engine("RISK MAX_ORDERS 1\nWHEN close > 100\nBUY 1", 100_000.0);
         let candles: Vec<Candle> = vec![
             candle(50.0),  // rule doesn't fire
             candle(150.0), // fires BUY → succeeds (count = 1)

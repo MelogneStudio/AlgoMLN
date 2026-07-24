@@ -3,15 +3,21 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
+use std::sync::Arc;
 
 use crate::{
-    broker::{BrokerClient, Timeframe},
-    models::{Candle, Order, OrderResult, Portfolio, Position, Quote},
+    broker::{symbol_map::SymbolMap, BrokerClient, Timeframe},
+    models::{
+        Candle, Order, OrderResult, OrderSide, OrderStatus, OrderType, Portfolio, Position, Quote,
+    },
 };
 
 use super::{
     auth::DhanAuth,
-    models::{DhanQuoteValue, DhanSymbol, HistoricalResponse, IntradayRequest},
+    models::{
+        DhanPosition, DhanQuoteValue, DhanSymbol, HistoricalResponse, IntradayRequest,
+        PlaceOrderRequest, PlaceOrderResponse,
+    },
 };
 
 const DHAN_BASE_URL: &str = "https://api.dhan.co/v2";
@@ -40,6 +46,7 @@ pub struct DhanClient {
     http: reqwest::Client,
     auth: DhanAuth,
     config: DhanConfig,
+    symbol_map: Arc<parking_lot::RwLock<SymbolMap>>,
 }
 
 impl DhanClient {
@@ -47,11 +54,31 @@ impl DhanClient {
         Self::with_config(auth, DhanConfig::default())
     }
 
+    pub fn with_symbol_map(
+        auth: DhanAuth,
+        symbol_map: Arc<parking_lot::RwLock<SymbolMap>>,
+    ) -> Self {
+        Self::with_config_and_symbol_map(auth, DhanConfig::default(), symbol_map)
+    }
+
     pub fn with_config(auth: DhanAuth, config: DhanConfig) -> Self {
+        Self::with_config_and_symbol_map(
+            auth,
+            config,
+            Arc::new(parking_lot::RwLock::new(SymbolMap::empty())),
+        )
+    }
+
+    pub fn with_config_and_symbol_map(
+        auth: DhanAuth,
+        config: DhanConfig,
+        symbol_map: Arc<parking_lot::RwLock<SymbolMap>>,
+    ) -> Self {
         Self {
             http: reqwest::Client::new(),
             auth,
             config,
+            symbol_map,
         }
     }
 
@@ -104,6 +131,45 @@ impl DhanClient {
             .json::<T>()
             .await
             .with_context(|| format!("Dhan response was not valid JSON: {path}"))
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let response = self
+            .http
+            .get(format!("{}{}", self.config.base_url, path))
+            .headers(self.headers()?)
+            .send()
+            .await
+            .with_context(|| format!("Dhan request failed: {path}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("Dhan request {path} failed with {status}: {body}");
+        }
+
+        response
+            .json::<T>()
+            .await
+            .with_context(|| format!("Dhan response was not valid JSON: {path}"))
+    }
+
+    fn resolve_security_id(&self, symbol: &str) -> Result<String> {
+        let symbol_map = self.symbol_map.read();
+        let security_id = symbol_map
+            .get(symbol)
+            .ok_or_else(|| anyhow!("symbol not in map: {symbol}"))?;
+        Ok(security_id.to_string())
+    }
+
+    fn order_status(status: &str) -> OrderStatus {
+        match status.trim().to_ascii_uppercase().as_str() {
+            "TRADED" | "FILLED" => OrderStatus::Filled,
+            "REJECTED" => OrderStatus::Rejected,
+            "CANCELLED" | "CANCELED" => OrderStatus::Cancelled,
+            "PENDING" | "TRANSIT" => OrderStatus::Pending,
+            _ => OrderStatus::Open,
+        }
     }
 
     pub fn dhan_timestamp_to_unix_ms(timestamp: f64) -> Option<i64> {
@@ -317,12 +383,71 @@ impl BrokerClient for DhanClient {
     }
 
     async fn place_order(&self, order: Order) -> Result<OrderResult> {
-        let _ = order;
-        bail!("Dhan order placement is not implemented yet");
+        let dhan_client_id = self
+            .auth
+            .client_id
+            .clone()
+            .ok_or_else(|| anyhow!("Dhan client id is not configured"))?;
+        let security_id = self.resolve_security_id(&order.symbol)?;
+        let order_type = match order.order_type {
+            OrderType::Market => "MARKET",
+            OrderType::Limit => "LIMIT",
+            OrderType::StopLoss => "STOP_LOSS",
+        };
+        let price = match order.order_type {
+            OrderType::Limit => order
+                .price
+                .ok_or_else(|| anyhow!("limit order requires a price"))?,
+            _ => order.price.unwrap_or_default(),
+        };
+        let body = PlaceOrderRequest {
+            dhan_client_id,
+            transaction_type: match order.side {
+                OrderSide::Buy => "BUY".to_string(),
+                OrderSide::Sell => "SELL".to_string(),
+            },
+            exchange_segment: "NSE_EQ".to_string(),
+            product_type: "INTRADAY".to_string(),
+            order_type: order_type.to_string(),
+            validity: "DAY".to_string(),
+            security_id,
+            quantity: order.quantity,
+            price,
+            trigger_price: 0.0,
+            disclosed_quantity: 0,
+            after_market_order: false,
+            amo_time: "OPEN".to_string(),
+            bo_profit_value: 0.0,
+            bo_stop_loss_value: 0.0,
+        };
+
+        let response = self.post::<PlaceOrderResponse>("/orders", body).await?;
+        let status = Self::order_status(&response.order_status);
+        if matches!(status, OrderStatus::Rejected | OrderStatus::Cancelled) {
+            return Err(anyhow!("order rejected: {}", response.order_status));
+        }
+
+        Ok(OrderResult {
+            order_id: response.order_id,
+            status,
+            timestamp: Utc::now().timestamp_millis(),
+        })
     }
 
     async fn get_positions(&self) -> Result<Vec<Position>> {
-        bail!("Dhan positions are not implemented yet");
+        let positions = self.get::<Vec<DhanPosition>>("/positions").await?;
+        Ok(positions
+            .into_iter()
+            .filter(|position| position.net_qty != 0)
+            .map(|position| Position {
+                symbol: position.trading_symbol,
+                quantity: position.net_qty,
+                average_price: position.buy_avg,
+                ltp: position.buy_avg,
+                realized_pnl: position.realized_profit,
+                unrealized_pnl: position.unrealized_profit,
+            })
+            .collect())
     }
 
     async fn get_portfolio(&self) -> Result<Portfolio> {

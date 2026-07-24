@@ -10,9 +10,7 @@ use super::{Candle, MarketDataApi, MarketDataEvent, MarketEventKind};
 
 pub struct BrokerMarketDataApi {
     pub broker: Arc<dyn BrokerClient>,
-    subscriptions: Arc<
-        Mutex<HashMap<SubscriptionHandle, tokio::task::AbortHandle>>,
-    >,
+    subscriptions: Arc<Mutex<HashMap<SubscriptionHandle, tokio::task::AbortHandle>>>,
 }
 
 impl BrokerMarketDataApi {
@@ -103,8 +101,8 @@ impl MarketDataApi for BrokerMarketDataApi {
         let broker = self.broker.clone();
         let sym = symbol.to_string();
         // SAFETY: requires a multi-thread Tokio runtime to be current on this thread.
-        let res: anyhow::Result<Vec<crate::models::Candle>> =
-            tokio::runtime::Handle::current().block_on(async move {
+        let res: anyhow::Result<Vec<crate::models::Candle>> = tokio::runtime::Handle::current()
+            .block_on(async move {
                 let timeframe = Timeframe::M1;
                 let now = chrono::Utc::now().timestamp();
                 broker.get_ohlcv(&sym, timeframe, now - 60, now).await

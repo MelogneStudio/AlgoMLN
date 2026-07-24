@@ -23,7 +23,6 @@ use crate::strategy::runtime::{StrategyEngine, StrategyInstance, StrategyStatus}
 /// its only consumer (`PortfolioEngine::from_trade_in`).
 pub use crate::strategy::portfolio::engine::resolve_trade_in_symbols;
 
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BacktestResult {
@@ -259,18 +258,11 @@ pub async fn run_backtest_dsl(
     initial_cash: f64,
     data: &DataState,
 ) -> Result<BacktestResultWire, String> {
-    let tokens = Lexer::tokenize(dsl_source).map_err(|error| {
-        format!(
-            "line {} col {}: {}",
-            error.line, error.col, error.message
-        )
-    })?;
-    let node = Parser::new(tokens).parse().map_err(|error| {
-        format!(
-            "line {} col {}: {}",
-            error.line, error.col, error.message
-        )
-    })?;
+    let tokens = Lexer::tokenize(dsl_source)
+        .map_err(|error| format!("line {} col {}: {}", error.line, error.col, error.message))?;
+    let node = Parser::new(tokens)
+        .parse()
+        .map_err(|error| format!("line {} col {}: {}", error.line, error.col, error.message))?;
 
     let validation_errors = AstValidator::validate(&node);
     if !validation_errors.is_empty() {
@@ -306,27 +298,19 @@ pub async fn run_backtest_dsl(
     Ok(map_to_wire(&result))
 }
 
-async fn fetch_candles(
-    symbol: &str,
-    data: &DataState,
-) -> Result<(Vec<Candle>, bool), String> {
+async fn fetch_candles(symbol: &str, data: &DataState) -> Result<(Vec<Candle>, bool), String> {
     // Try the live broker with the last 7 days of 1-minute candles. If it
     // returns an error or an empty vec (e.g. invalid security ID, no token,
     // holiday window), fall through to the bundled sample CSV.
     let to = Utc::now().timestamp_millis();
     let from = to - 7 * 24 * 60 * 60 * 1_000;
-    let broker_result = data
-        .broker
-        .get_ohlcv(symbol, Timeframe::M1, from, to)
-        .await;
+    let broker_result = data.broker.get_ohlcv(symbol, Timeframe::M1, from, to).await;
 
     match broker_result {
         Ok(candles) if !candles.is_empty() => Ok((candles, false)),
         Ok(_) => load_fallback_candles().await.map(|c| (c, true)),
         Err(error) => {
-            eprintln!(
-                "run_backtest_dsl: live fetch failed ({error}); falling back to bundled CSV"
-            );
+            eprintln!("run_backtest_dsl: live fetch failed ({error}); falling back to bundled CSV");
             load_fallback_candles().await.map(|c| (c, true))
         }
     }
@@ -349,7 +333,11 @@ async fn load_fallback_candles() -> Result<Vec<Candle>, String> {
 
 fn map_to_wire(result: &BacktestResult) -> BacktestResultWire {
     BacktestResultWire {
-        trade_history: result.trade_history.iter().map(PaperTradeWire::from).collect(),
+        trade_history: result
+            .trade_history
+            .iter()
+            .map(PaperTradeWire::from)
+            .collect(),
         final_cash: result.final_cash,
         initial_cash: result.initial_cash,
         total_realized_pnl: result.total_realized_pnl,

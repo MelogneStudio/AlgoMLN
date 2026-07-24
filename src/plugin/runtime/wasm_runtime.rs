@@ -27,9 +27,7 @@ use wasmtime::ResourceLimiter;
 use wasmtime::{Caller, Config, Engine, Instance, Linker, Memory, Module, OptLevel, Store};
 
 use crate::plugin::host::PluginHost;
-use crate::plugin::types::{
-    Capability, NotificationKind, PluginError, PluginMeta, PluginResult,
-};
+use crate::plugin::types::{Capability, NotificationKind, PluginError, PluginMeta, PluginResult};
 
 use super::super::Plugin;
 
@@ -383,8 +381,9 @@ fn build_linker(engine: &Engine) -> PluginResult<Linker<WasmState>> {
                         return -1;
                     }
                 };
-                if let Some(tauri_ui) =
-                    ui.as_any().downcast_ref::<crate::plugin::api::ui::TauriUiApi>()
+                if let Some(tauri_ui) = ui
+                    .as_any()
+                    .downcast_ref::<crate::plugin::api::ui::TauriUiApi>()
                 {
                     match tauri_ui.emit_panel_data(panel_id, value) {
                         Ok(()) => 0,

@@ -82,8 +82,8 @@ impl StorageApi for PluginKvStore {
             .map_err(|e| PluginError::ApiError(format!("read_dir failed: {e}")))?;
         let mut keys = Vec::new();
         for entry in entries {
-            let entry = entry
-                .map_err(|e| PluginError::ApiError(format!("dir entry error: {e}")))?;
+            let entry =
+                entry.map_err(|e| PluginError::ApiError(format!("dir entry error: {e}")))?;
             let name = entry.file_name().to_string_lossy().to_string();
             // Only consider *.val files.
             let stripped = match name.strip_suffix(".val") {

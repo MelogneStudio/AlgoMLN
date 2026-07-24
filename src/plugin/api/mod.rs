@@ -12,7 +12,9 @@ pub mod ui;
 
 use std::sync::Arc;
 
-use crate::plugin::types::{NotificationKind, PluginId, PluginResult, ScheduleHandle, SubscriptionHandle};
+use crate::plugin::types::{
+    NotificationKind, PluginId, PluginResult, ScheduleHandle, SubscriptionHandle,
+};
 
 #[async_trait::async_trait]
 pub trait MarketDataApi: Send + Sync {

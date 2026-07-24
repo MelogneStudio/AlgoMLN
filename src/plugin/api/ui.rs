@@ -12,8 +12,14 @@ use super::{UiApi, UiPanel};
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UiMessage {
-    PanelRegistered { id: String, title: String },
-    Notification { msg: String, kind: String },
+    PanelRegistered {
+        id: String,
+        title: String,
+    },
+    Notification {
+        msg: String,
+        kind: String,
+    },
     PanelData {
         panel_id: String,
         data: serde_json::Value,

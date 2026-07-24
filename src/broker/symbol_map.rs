@@ -8,6 +8,7 @@ const DHAN_SCRIP_MASTER_URL: &str = "https://images.dhan.co/api-data/api-scrip-m
 
 /// Maps NSE equity trading symbols to Dhan security IDs.
 /// Loaded once at startup; shared via Arc.
+#[derive(Debug)]
 pub struct SymbolMap {
     /// key: uppercase NSE symbol, value: Dhan SECURITY_ID
     map: HashMap<String, u32>,

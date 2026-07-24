@@ -4,9 +4,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Deserialize;
 
-use super::types::{
-    Capability, PluginError, PluginId, PluginMeta, PluginResult, PluginVersion,
-};
+use super::types::{Capability, PluginError, PluginId, PluginMeta, PluginResult, PluginVersion};
 
 lazy_static! {
     static ref PLUGIN_ID_RE: Regex =
@@ -44,16 +42,15 @@ fn default_memory() -> u32 {
 impl PluginManifest {
     pub fn load(plugin_dir: &Path) -> PluginResult<Self> {
         let manifest_path = plugin_dir.join("plugin.toml");
-        let raw = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| PluginError::ManifestParse(format!("read {}: {e}", manifest_path.display())))?;
+        let raw = std::fs::read_to_string(&manifest_path).map_err(|e| {
+            PluginError::ManifestParse(format!("read {}: {e}", manifest_path.display()))
+        })?;
 
         let manifest: PluginManifest = toml::from_str(&raw)
             .map_err(|e| PluginError::ManifestParse(format!("toml parse: {e}")))?;
 
         if manifest.id.len() < 2 || !PLUGIN_ID_RE.is_match(&manifest.id) {
-            return Err(PluginError::ManifestParse(
-                "id must be kebab-case".into(),
-            ));
+            return Err(PluginError::ManifestParse("id must be kebab-case".into()));
         }
 
         let _ = PluginVersion::try_from(manifest.version.as_str())
@@ -108,10 +105,7 @@ impl PluginManifest {
     pub fn to_capabilities(&self) -> PluginResult<Vec<Capability>> {
         self.capabilities
             .iter()
-            .map(|c| {
-                Capability::try_from(c.as_str())
-                    .map_err(|e| PluginError::ManifestParse(e))
-            })
+            .map(|c| Capability::try_from(c.as_str()).map_err(|e| PluginError::ManifestParse(e)))
             .collect()
     }
 }

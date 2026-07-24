@@ -14,8 +14,14 @@ use crate::strategy::execution::paper::PaperTrade;
 pub enum EventKind {
     CandleProcessed(Candle),
     TradeExecuted(PaperTrade),
-    RuleFired { rule_id: String, strategy_id: String },
-    StrategyStatusChanged { strategy_id: String, new_status: String },
+    RuleFired {
+        rule_id: String,
+        strategy_id: String,
+    },
+    StrategyStatusChanged {
+        strategy_id: String,
+        new_status: String,
+    },
     SystemShutdown,
 }
 

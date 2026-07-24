@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
-use crate::commands::state::AppState;
-use crate::indices::{IndexInfo, refresh_index};
 use crate::broker::symbol_map::refresh_symbol_map;
+use crate::commands::state::AppState;
+use crate::indices::{refresh_index, IndexInfo};
 use crate::strategy::dsl::ast::IndexAlias;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tauri::{AppHandle, Manager};
 
 /// Returned by `refresh_indices` IPC command.
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,14 +35,8 @@ pub fn get_index_symbols(state: &AppState, alias: String) -> Result<Vec<String>,
 
 /// Refresh all 22 indices from niftyindices.com AND the Dhan scrip master.
 /// Writes updated JSON/CSV to app data cache. Non-fatal: errors are reported in the result.
-pub async fn refresh_indices(
-    app: &AppHandle,
-    state: &AppState,
-) -> RefreshResult {
-    let cache_dir = app
-        .path()
-        .app_data_dir()
-        .expect("app_data_dir unavailable");
+pub async fn refresh_indices(app: &AppHandle, state: &AppState) -> RefreshResult {
+    let cache_dir = app.path().app_data_dir().expect("app_data_dir unavailable");
 
     let indices_cache = cache_dir.join("indices");
     let _ = std::fs::create_dir_all(&indices_cache);
@@ -77,5 +71,10 @@ pub async fn refresh_indices(
         }
     };
 
-    RefreshResult { refreshed, failed, symbol_map_updated, symbol_map_count }
+    RefreshResult {
+        refreshed,
+        failed,
+        symbol_map_updated,
+        symbol_map_count,
+    }
 }

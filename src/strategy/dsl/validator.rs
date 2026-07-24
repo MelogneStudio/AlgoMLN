@@ -61,9 +61,7 @@ fn validate_risk(risk: &super::ast::RiskConfig, errors: &mut Vec<ValidationError
         if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {
             errors.push(ValidationError {
                 rule_id: String::new(),
-                message: format!(
-                    "RISK MAX_DAILY_LOSS must be in (0, 100] (got {pct})"
-                ),
+                message: format!("RISK MAX_DAILY_LOSS must be in (0, 100] (got {pct})"),
                 kind: ValidationErrorKind::InvalidMaxDailyLoss,
             });
         }
@@ -125,9 +123,7 @@ fn validate_percent_threshold(value: Option<f64>, label: &str, errors: &mut Vec<
             };
             errors.push(ValidationError {
                 rule_id: String::new(),
-                message: format!(
-                    "{label} must be in (0, 100] (got {pct})"
-                ),
+                message: format!("{label} must be in (0, 100] (got {pct})"),
                 kind,
             });
         }
