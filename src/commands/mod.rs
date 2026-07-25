@@ -1,5 +1,6 @@
 pub mod data;
 pub mod indices;
+pub mod live;
 pub mod plugins;
 pub mod registry;
 pub mod search;

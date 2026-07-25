@@ -4,6 +4,7 @@ pub mod data;
 pub mod feed;
 pub mod indicators;
 pub mod indices;
+pub mod live;
 pub mod models;
 pub mod plugin;
 pub mod search;

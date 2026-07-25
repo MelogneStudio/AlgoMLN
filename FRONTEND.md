@@ -169,6 +169,8 @@ All IPC wrappers live in `src/types/tauri.ts` and are thin `invoke<T>(name, args
 
 The naming convention is camelCase on the TS side because that's what Tauri's invoke expects for argument keys.
 
+The Rust backend also registers `get_trade_log`, which returns immutable live execution log entries newest first from `<app_data>/trade_log.jsonl`. The backend now also stores a single active `LiveSession` slot in `AppState`, but start/pause/resume/stop IPC wrappers and UI consumers have not been added yet.
+
 ### Plugin UI messages
 
 Plugins communicate with the UI through a single Tauri event channel, `"plugin-ui-message"`. The Rust side subscribes a fresh `broadcast::Receiver<UiMessage>` from the `TauriUiApi` and re-emits every message on the bus. The frontend listener (`src/hooks/usePluginUiMessages.ts` or equivalent) does the inverse: one `listen<UiMessage>("plugin-ui-message", ...)` call, then dispatches on the `kind` discriminator:
@@ -214,6 +216,6 @@ The `Button` component (`src/components/Button/Button.tsx`) is the single primit
 - It does not run a strategy itself. There is no JS-side backtest engine.
 - It does not parse DSL itself. `parseDslToStrategy` in `useDslSync.ts` is a *builder-shaped* parser used only to round-trip the visual builder state — it is not a real DSL parser. The authoritative parser is in Rust.
 - It does not store deployed strategies itself. The Tauri `StrategyRegistry` owns the persistence.
-- It does not schedule ticks. WebSocket tick handling is in the Rust feed manager (`src/feed/manager.rs`); the React side has a `subscribe_ticks` IPC wrapper but no consumer yet.
+- It does not schedule ticks or drive live sessions. WebSocket tick handling is in the Rust feed manager (`src/feed/manager.rs`), and live candle assembly/session lifecycle live in `src/live/`; the React side has a `subscribe_ticks` IPC wrapper but no session-control UI yet.
 
 If you find yourself wanting to add any of the above, the rule of thumb is: do it in Rust, expose a wire type, and have the React side render it.

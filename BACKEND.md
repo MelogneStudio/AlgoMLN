@@ -169,6 +169,14 @@ The engine never imports a concrete broker type for order routing — it only kn
 
 **`DhanBroker`** (`src/strategy/execution/dhan.rs`). A live `ExecutionTarget` around `Arc<DhanClient>`. `execute` posts to Dhan `/orders`, `get_positions` reads `/positions`, `available_cash` returns `f64::MAX` because this Dhan API surface does not expose free cash, and `realized_loss` is approximated from before/after realized-PnL snapshots for `RISK MAX_DAILY_LOSS`.
 
+### Live session manager
+
+`src/live/session.rs` owns the Phase 7 single-session live lifecycle. `LiveSession::start` builds a `StrategyEngine` around the parsed `StrategyNode`, attaches the shared plugin `EventBus`, pre-seeds `candle_history` with recent 1-minute OHLCV, subscribes the shared `FeedManager` to the symbol, and spawns one tick-listening task. `AppState.live_session` is `Arc<std::sync::Mutex<Option<Arc<LiveSession>>>>`, so the app can hold at most one active live strategy in this phase.
+
+`src/live/candle_assembler.rs` converts tick fan-out (`Tick { symbol, ltp, volume, timestamp }`) into completed 1-minute `Candle`s. The assembler truncates millisecond timestamps to minute boundaries, updates OHLCV while ticks remain inside the same minute, and returns the completed prior candle on the first tick of a new minute.
+
+The live task receives ticks continuously. When paused it drains ticks but skips candle assembly/evaluation. When running, each completed candle is appended to the rolling history and the full slice is passed to `StrategyEngine::on_candle`; the engine's `BoundedWindowProvider` keeps indicator work bounded. `OrderSubmitted` and `OrderExecuted` log pairs are converted into immutable `TradeLogEntry` rows in `<app_data>/trade_log.jsonl`.
+
 **`DhanClient` order execution** (`src/broker/dhan/rest.rs`). `place_order` resolves the strategy symbol through `SymbolMap`, builds an intraday `NSE_EQ` DAY order, maps Dhan order statuses into `OrderStatus`, and rejects Dhan `REJECTED` / `CANCELLED` responses as broker errors. `get_positions` maps Dhan net positions into the shared `Position` model and skips flat rows.
 
 **`order_builder`** (`src/strategy/execution/order_builder.rs`). Converts an `ActionNode` plus current price and current position into an `Order`. `SELL ALL` is resolved against the live position quantity — if there's no position it returns `OrderBuildError::NoPosition`, which the engine logs as a `RuleSkipped` entry rather than a hard error. The CLI test for `SELL ALL` with no position is in `order_builder.rs`.
@@ -208,10 +216,13 @@ Registered commands:
 - `deploy_strategy` — `registry.deploy(name, dsl_source, mode)`. Validates the DSL, generates `strat-{ms}-{counter}` id, persists a new record. New strategies default to `Paused`.
 - `list_strategies` — `registry.list()`. Returns `DeployedStrategy` records sorted by `deployed_at` ascending.
 - `set_strategy_status` — `registry.set_status(id, status)`. Flips the status and persists.
+- `get_trade_log` — reads `<app_data>/trade_log.jsonl` through `commands::live` and returns immutable live execution records newest first.
 
-The **registry** (`src/commands/registry.rs`) is intentionally minimal: it is a JSON-persisted store of deploy/list/set_status operations and a *stub* for execution. It does not schedule ticks or run a live engine — the engine lifecycle is wired separately. The storage path is `app_data_dir/strategies.json` (Windows: `%APPDATA%\com.algomln.app\strategies.json`, identifier from `src-tauri/tauri.conf.json`).
+The **registry** (`src/commands/registry.rs`) is intentionally minimal: it is a JSON-persisted store of deploy/list/set_status operations and a *stub* for execution. It does not schedule ticks or run a live engine; the active engine lifecycle lives in `src/live/session.rs` and is stored separately in `AppState.live_session`. The storage path is `app_data_dir/strategies.json` (Windows: `%APPDATA%\com.algomln.app\strategies.json`, identifier from `src-tauri/tauri.conf.json`).
 
 `StrategyRegistry::open` reads the file (or creates an empty one) and builds an in-memory `HashMap<id, DeployedStrategyRecord>`. Deploys and status changes take the mutex, mutate, then write the full snapshot back to disk (small file, simple semantics). The on-disk record has `deployed_at` for sort order; the wire `DeployedStrategy` drops it and replaces the single `mode` with a `modes: [mode]` array to match the TS side.
+
+The **live trade log** (`src/live/trade_log.rs`) is separate from the strategy registry and from the in-memory paper broker history. `TradeLog::open` creates parent directories and opens `<app_data>/trade_log.jsonl` with `create(true).append(true)`, never truncate. `append` writes exactly one compact JSON object plus a newline under a `Mutex<File>` lock and flushes. `read_all` skips blank lines silently, warns on malformed JSONL lines, and is used by `get_trade_log` without borrowing the live file handle.
 
 `StrategyMode::parse` and `StrategyStatus::parse` accept case-insensitive inputs and reject anything outside the known set, so the UI can't pass typos through.
 
@@ -299,7 +310,7 @@ The Tauri shell exposes four plugin commands and one Tauri-event channel:
 
 Each `#[tauri::command]` wrapper is one line because the `tauri::command` macro generates module-private artifacts (`__cmd__name`, `__tauri_command_name_name`) that `tauri::generate_handler!` must resolve in the same scope — so the wrappers live in `main.rs` and the bodies live in the library.
 
-`AppState` is defined in `src/commands/state.rs` and re-exported as `commands::AppState`. It carries `DataState`, `Arc<StrategyRegistry>`, `Arc<PluginRegistry>`, and a `tokio::sync::broadcast::Receiver<UiMessage>` for downstream consumers (e.g. a future audit-log command). The Tauri `setup` closure builds the plugin's shared infrastructure (registries, event bus, scheduler, broker wrappers, noop execution) and wires them into a single `HostFactory` closure that the registry calls per plugin. The factory also creates a `<app_data>/logs/` directory and hands each plugin a `RateLimitedFileLog` rooted there — see `src/plugin/api/log_file.rs`. After `scan_and_load`, a `tokio::spawn` subscribes a fresh `TauriUiApi` receiver and re-emits every `UiMessage` on the Tauri event bus as `"plugin-ui-message"` so the React frontend can subscribe once and dispatch on the `UiMessage` variant.
+`AppState` is defined in `src/commands/state.rs` and re-exported as `commands::AppState`. It carries `DataState`, `Arc<StrategyRegistry>`, `Arc<PluginRegistry>`, the shared `EventBus`, `Arc<TradeLog>`, and `live_session: Arc<std::sync::Mutex<Option<Arc<LiveSession>>>>` for the Phase 7 single active live runner. The Tauri `setup` closure builds the plugin's shared infrastructure (registries, event bus, scheduler, broker wrappers, noop execution) and wires them into a single `HostFactory` closure that the registry calls per plugin. The factory also creates a `<app_data>/logs/` directory and hands each plugin a `RateLimitedFileLog` rooted there — see `src/plugin/api/log_file.rs`. After `scan_and_load`, a `tokio::spawn` subscribes a fresh `TauriUiApi` receiver and re-emits every `UiMessage` on the Tauri event bus as `"plugin-ui-message"` so the React frontend can subscribe once and dispatch on the `UiMessage` variant.
 
 ### Rhai plugin runtime (`src/plugin/runtime/rhai_runtime.rs`)
 

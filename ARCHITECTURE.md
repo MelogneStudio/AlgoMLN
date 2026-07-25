@@ -28,6 +28,11 @@ AlgoMLN/
 │   │   └── refresh.rs          refresh_index, refresh_all_if_stale (niftyindices.com)
 │   ├── feed/                   WebSocket feed manager (subscriptions, tick fan-out)
 │   ├── data/                   Shared CSV loaders (load_nifty_candles, parse_market_row)
+│   ├── live/                   Live strategy lifecycle + persistence helpers
+│   │   ├── mod.rs              module root
+│   │   ├── candle_assembler.rs Per-symbol 1-minute candles from live ticks
+│   │   ├── session.rs          Single live session manager (engine + Dhan + feed task)
+│   │   └── trade_log.rs        Append-only JSONL live execution audit log
 │   ├── strategy/
 │   │   ├── dsl/                Lexer → Parser → AST → Validator
 │   │   ├── runtime/            StrategyEngine + EvalContext, CrossDetector, TriggerStateMap
@@ -67,6 +72,7 @@ AlgoMLN/
 │   │   ├── indices.rs          index registry + symbol map IPC commands
 │   │   ├── strategy.rs         DSL helpers, backtest orchestrator, wire types
 │   │   ├── registry.rs         StrategyRegistry — JSON-persisted deploy/list/status
+│   │   ├── live.rs             live audit log IPC body
 │   │   ├── state.rs            AppState — the struct held by Tauri::manage
 │   │   └── plugins.rs          list/enable/disable/reload plugin command bodies
 │   └── bin/
@@ -228,6 +234,10 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | Paper broker (in-memory cash + positions) | `src/strategy/execution/paper.rs` |
 | Dhan live broker (`ExecutionTarget` backed by REST orders/positions) | `src/strategy/execution/dhan.rs` |
 | `ActionNode` → `Order` builder | `src/strategy/execution/order_builder.rs` |
+| Live 1-minute candle assembler | `src/live/candle_assembler.rs` |
+| Live session manager (single active live strategy) | `src/live/session.rs` |
+| Immutable live trade log (append-only JSONL) | `src/live/trade_log.rs` |
+| Trade log IPC reader (`get_trade_log`, newest first) | `src/commands/live.rs` |
 | BrokerClient trait (data fetch) | `src/broker/mod.rs` |
 | Dhan auth / REST orders, positions, market data / WebSocket | `src/broker/dhan/{auth,rest,websocket,models}.rs` |
 | Timeframe enum + Dhan interval strings | `src/broker/mod.rs` |
@@ -258,6 +268,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | Backtest orchestrator + wire types | `src/commands/strategy.rs` (`run_backtest_dsl`, `validate_dsl`, `BacktestResultWire`, `PaperTradeWire`) |
 | Strategy registry (deploy/list/set_status) | `src/commands/registry.rs` |
 | Index / symbol-map commands (list/get/refresh) | `src/commands/indices.rs` |
+| Active live session slot | `src/commands/state.rs` (`AppState.live_session`) |
 | Registry persistence path | `%APPDATA%\com.algomln.app\strategies.json` on Windows (`app_data_dir` + `strategies.json`) |
 
 ### Wire types & IPC contract

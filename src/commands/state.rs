@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use tokio::sync::broadcast;
 
@@ -6,6 +9,8 @@ use crate::broker::symbol_map::SymbolMap;
 use crate::commands::data::DataState;
 use crate::commands::registry::StrategyRegistry;
 use crate::indices::IndexRegistry;
+use crate::live::session::LiveSession;
+use crate::live::trade_log::TradeLog;
 use crate::plugin::api::events::EventBus;
 use crate::plugin::api::ui::UiMessage;
 use crate::plugin::registry::PluginRegistry;
@@ -26,4 +31,10 @@ pub struct AppState {
     /// NSE symbol → Dhan `SECURITY_ID` map. Behind an `RwLock` so a future
     /// hot-refresh can swap the map without restarting the app.
     pub symbol_map: Arc<parking_lot::RwLock<SymbolMap>>,
+    /// Append-only live execution audit log, persisted as JSONL.
+    pub trade_log: Arc<TradeLog>,
+    /// Path to the JSONL audit log for read-only IPC snapshots.
+    pub trade_log_path: PathBuf,
+    /// Phase-7 live runner: at most one live strategy session is active.
+    pub live_session: Arc<Mutex<Option<Arc<LiveSession>>>>,
 }

@@ -1,4 +1,8 @@
-use std::{env, fs, path::Path, sync::Arc};
+use std::{
+    env, fs,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use algomln::{
     broker::{
@@ -12,6 +16,7 @@ use algomln::{
         strategy::{run_backtest_dsl, BacktestResultWire},
     },
     indices::{refresh_all_if_stale, IndexRegistry},
+    live::trade_log::{TradeLog, TradeLogEntry},
     models::{Candle, Quote},
     plugin::{
         api::{
@@ -169,6 +174,11 @@ async fn search_symbols(
     commands::search::search_symbols_impl(&state, query).await
 }
 
+#[tauri::command]
+async fn get_trade_log(state: State<'_, AppState>) -> Result<Vec<TradeLogEntry>, String> {
+    commands::live::get_trade_log(state).await
+}
+
 fn main() {
     load_dotenv();
 
@@ -180,6 +190,10 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .expect("could not resolve app data dir");
+            let trade_log_path = store_dir.join("trade_log.jsonl");
+            let trade_log = Arc::new(
+                TradeLog::open(trade_log_path.clone()).expect("could not open immutable trade log"),
+            );
 
             // ---------- Symbol map (NSE -> Dhan SECURITY_ID) ----------
             //
@@ -463,6 +477,9 @@ fn main() {
                 ui_receiver,
                 index_registry,
                 symbol_map,
+                trade_log,
+                trade_log_path,
+                live_session: Arc::new(Mutex::new(None)),
             });
             Ok(())
         })
@@ -483,6 +500,7 @@ fn main() {
             get_index_symbols,
             refresh_indices,
             search_symbols,
+            get_trade_log,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AlgoMLN");

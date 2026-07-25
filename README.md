@@ -29,7 +29,7 @@ Data → Indicators → Strategy Engine → Backtesting → Execution → UI
 Phase 1 (Data) · Phase 2 (Indicators) · Phase 2.5–2.9 (Strategy Engine) ✅
 Phase 3–5 UI (Builder / Strategies / Coder / Uploader / Settings) ✅
 Phase 6 (Plugin System — Rhai + WASM runtimes, capability gating) ✅
-Phase 7 (Live Trading) — pending
+Phase 7 (Live Trading) — in progress (single live session manager + trade log)
 ```
 
 Run `cargo test --workspace` for the current test count
@@ -43,6 +43,7 @@ Current count: `220 passing | 1 ignored | 0 failed`.
 - Tick fan-out to internal subscribers
 - Historical OHLCV fetch
 - Tauri IPC commands exposing data to React
+- Per-symbol live 1-minute candle assembly from ticks
 
 ### ✅ Phase 2 — Indicator Engine
 Pure Rust functions. Stateless. `fn indicator(candles: &[Candle], period: usize) -> Vec<f64>`.
@@ -414,8 +415,9 @@ Plugin manifest → PluginLoader → Rhai / WASM runtime → capability-gated Pl
 - Risk controls
 - Multi-symbol strategies
 
-### Phase 7 — Live Trading (pending)
+### Phase 7 — Live Trading (in progress)
 - Live broker execution via `ExecutionTarget`
+- Single active `LiveSession` manager for tick subscription, candle assembly, engine evaluation, cancellation, and immutable trade logging
 - Wire the plugin `Execution` capability to a real broker-agnostic facade (currently a no-op stub)
 - Two hard confirmation steps required
 - User-defined risk limits (max loss, max orders)
