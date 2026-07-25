@@ -9,7 +9,10 @@ use parking_lot::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::{
-    broker::{dhan::DhanClient, BrokerClient},
+    broker::{
+        dhan::{DhanClient, DhanError},
+        BrokerClient,
+    },
     models::{Order, OrderResult, Position},
 };
 
@@ -182,12 +185,17 @@ async fn refresh_once(
 #[async_trait]
 impl ExecutionTarget for DhanBroker {
     async fn execute(&self, order: Order) -> Result<OrderResult, ExecutionError> {
-        let result = self.client.place_order(order).await.map_err(broker_error)?;
+        let result = match self.client.place_order(order).await {
+            Ok(result) => result,
+            Err(error) => return Err(map_place_order_error(error)),
+        };
+
         // Refresh the realized-loss cache immediately so the risk gate sees the
         // freshest number the broker can give us; the periodic task keeps it
         // current between orders.
         self.refresh_realized_loss().await;
-        Ok(result)
+
+        classify_result(result)
     }
 
     async fn get_positions(&self) -> Result<Vec<Position>, ExecutionError> {
@@ -231,6 +239,40 @@ fn broker_error(error: anyhow::Error) -> ExecutionError {
     }
 }
 
+/// Decide how a placed order's status maps to the `ExecutionTarget::execute`
+/// contract. A terminal non-fill (rejected / cancelled / expired) is a hard
+/// error. Non-terminal statuses (transit / pending) and fills both return `Ok`
+/// with the status intact — the caller inspects `status.is_fill()` before
+/// treating the result as an execution.
+fn classify_result(result: OrderResult) -> Result<OrderResult, ExecutionError> {
+    if result.status.is_terminal() && !result.status.is_fill() {
+        let message = format!("order {} status: {:?}", result.order_id, result.status);
+        return Err(ExecutionError {
+            message: message.clone(),
+            kind: ExecutionErrorKind::BrokerError(message),
+        });
+    }
+    Ok(result)
+}
+
+/// Map a `place_order` error to an `ExecutionError`. A timed-out order surfaces
+/// as [`DhanError::OrderStatusUnknown`]; we preserve its "check broker app"
+/// message so the caller/UI never mistakes an unknown-status order for a plain
+/// failure (or, worse, a fill). All other errors pass through `broker_error`.
+fn map_place_order_error(error: anyhow::Error) -> ExecutionError {
+    if let Some(DhanError::OrderStatusUnknown { correlation_id }) =
+        error.downcast_ref::<DhanError>()
+    {
+        let message =
+            format!("order status unknown, check broker app; correlation_id={correlation_id}");
+        return ExecutionError {
+            message: message.clone(),
+            kind: ExecutionErrorKind::BrokerError(message),
+        };
+    }
+    broker_error(error)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -242,12 +284,15 @@ mod tests {
     use parking_lot::{Mutex, RwLock};
 
     use crate::{
-        broker::dhan::{DhanAuth, DhanClient},
-        models::Position,
-        strategy::execution::ExecutionTarget,
+        broker::dhan::{DhanAuth, DhanClient, DhanError},
+        models::{OrderResult, OrderStatus, Position},
+        strategy::execution::{ExecutionError, ExecutionErrorKind, ExecutionTarget},
     };
 
-    use super::{DhanBroker, PositionsSource, MAX_CONSECUTIVE_FAILURES};
+    use super::{
+        classify_result, map_place_order_error, DhanBroker, PositionsSource,
+        MAX_CONSECUTIVE_FAILURES,
+    };
 
     fn broker() -> DhanBroker {
         let auth = DhanAuth::new("test-token").unwrap();
@@ -334,5 +379,59 @@ mod tests {
             broker.refresh_realized_loss().await;
         }
         assert!(broker.is_stale());
+    }
+
+    fn order_result(status: OrderStatus) -> OrderResult {
+        OrderResult {
+            order_id: "order-1".to_string(),
+            status,
+            timestamp: 0,
+            correlation_id: "algomln-test".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_rejected_returns_err() {
+        let classified = classify_result(order_result(OrderStatus::Rejected));
+        assert!(matches!(
+            classified,
+            Err(ExecutionError {
+                kind: ExecutionErrorKind::BrokerError(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_transit_returns_ok_without_fill() {
+        // Non-terminal statuses pass through as Ok with the status intact so
+        // the caller can branch on `is_fill()` — they must NOT be errors.
+        let classified = classify_result(order_result(OrderStatus::Transit))
+            .expect("transit must not be an execution error");
+        assert_eq!(classified.status, OrderStatus::Transit);
+        assert!(!classified.status.is_fill());
+    }
+
+    #[test]
+    fn test_traded_returns_ok() {
+        let classified = classify_result(order_result(OrderStatus::Traded))
+            .expect("traded must be Ok");
+        assert!(classified.status.is_fill());
+    }
+
+    #[test]
+    fn test_order_status_unknown_maps_to_broker_error() {
+        let mapped = map_place_order_error(
+            DhanError::OrderStatusUnknown {
+                correlation_id: "algomln-abc".to_string(),
+            }
+            .into(),
+        );
+        assert!(matches!(
+            mapped.kind,
+            ExecutionErrorKind::BrokerError(_)
+        ));
+        assert!(mapped.message.contains("check broker app"));
+        assert!(mapped.message.contains("algomln-abc"));
     }
 }

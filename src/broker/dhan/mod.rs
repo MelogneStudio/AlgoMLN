@@ -4,4 +4,4 @@ pub mod rest;
 pub mod websocket;
 
 pub use auth::DhanAuth;
-pub use rest::{DhanClient, DhanConfig};
+pub use rest::{DhanClient, DhanConfig, DhanError};

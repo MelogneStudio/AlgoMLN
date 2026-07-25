@@ -125,8 +125,9 @@ impl PaperBroker {
 
         Ok(OrderResult {
             order_id: format!("paper-{}", state.trade_history.len()),
-            status: OrderStatus::Filled,
+            status: OrderStatus::Traded,
             timestamp: Utc::now().timestamp_millis(),
+            correlation_id: String::new(),
         })
     }
 }

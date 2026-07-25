@@ -24,6 +24,31 @@ const DHAN_BASE_URL: &str = "https://api.dhan.co/v2";
 const INTRADAY_CHUNK_MS: i64 = 89 * 24 * 60 * 60 * 1_000;
 const DHAN_HISTORICAL_EPOCH_OFFSET_SECONDS: i64 = 315_532_800;
 
+/// Errors from the Dhan REST client that callers must handle specifically
+/// (rather than as an opaque `anyhow` error). Currently only the
+/// order-placement "unknown status" case.
+#[derive(Debug, Clone)]
+pub enum DhanError {
+    /// An order request timed out. The order may or may not have reached the
+    /// exchange, so the caller must **not** retry and must **not** assume a
+    /// fill — it should tell the user to check their broker app. Carries the
+    /// `correlationId` so the user (and support) can locate the order.
+    OrderStatusUnknown { correlation_id: String },
+}
+
+impl std::fmt::Display for DhanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OrderStatusUnknown { correlation_id } => write!(
+                f,
+                "order status unknown, check broker app; correlation_id={correlation_id}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DhanError {}
+
 #[derive(Debug, Clone)]
 pub struct DhanConfig {
     pub base_url: String,
@@ -105,6 +130,12 @@ impl DhanClient {
         )
     }
 
+    /// Shared POST helper. **Performs exactly one request — no automatic
+    /// retry** on timeout, 5xx, or network error. Order placement relies on
+    /// this invariant (a retried order can double-fill); see
+    /// [`DhanClient::post_order_no_retry`], which additionally distinguishes a
+    /// timed-out order as [`DhanError::OrderStatusUnknown`]. Do not add retry
+    /// logic here without routing order placement around it.
     async fn post<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -131,6 +162,51 @@ impl DhanClient {
             .json::<T>()
             .await
             .with_context(|| format!("Dhan response was not valid JSON: {path}"))
+    }
+
+    /// POST to `/orders` with **no automatic retry**. Order placement is not
+    /// idempotent at the network layer: a timed-out request may still have
+    /// reached the exchange, so retrying blindly risks a duplicate fill. On a
+    /// request timeout this returns [`DhanError::OrderStatusUnknown`] so the
+    /// caller can surface "check your broker app" instead of assuming success
+    /// or failure. See Phase 7 Fix Pack, Fix 2.
+    async fn post_order_no_retry(
+        &self,
+        body: &PlaceOrderRequest,
+        correlation_id: &str,
+    ) -> Result<PlaceOrderResponse> {
+        let request_body =
+            serde_json::to_string(body).unwrap_or_else(|_| "<unserializable>".to_string());
+        let response = match self
+            .http
+            .post(format!("{}/orders", self.config.base_url))
+            .headers(self.headers()?)
+            .json(body)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(err) if err.is_timeout() => {
+                return Err(DhanError::OrderStatusUnknown {
+                    correlation_id: correlation_id.to_string(),
+                }
+                .into());
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context("Dhan order request failed: /orders"));
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("Dhan request /orders failed with {status}: {body}; request body: {request_body}");
+        }
+
+        response
+            .json::<PlaceOrderResponse>()
+            .await
+            .context("Dhan response was not valid JSON: /orders")
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -164,11 +240,13 @@ impl DhanClient {
 
     fn order_status(status: &str) -> OrderStatus {
         match status.trim().to_ascii_uppercase().as_str() {
-            "TRADED" | "FILLED" => OrderStatus::Filled,
+            "TRANSIT" => OrderStatus::Transit,
+            "PENDING" => OrderStatus::Pending,
+            "TRADED" | "FILLED" | "COMPLETE" | "EXECUTED" => OrderStatus::Traded,
             "REJECTED" => OrderStatus::Rejected,
             "CANCELLED" | "CANCELED" => OrderStatus::Cancelled,
-            "PENDING" | "TRANSIT" => OrderStatus::Pending,
-            _ => OrderStatus::Open,
+            "EXPIRED" => OrderStatus::Expired,
+            other => OrderStatus::Unknown(other.to_string()),
         }
     }
 
@@ -400,8 +478,12 @@ impl BrokerClient for DhanClient {
                 .ok_or_else(|| anyhow!("limit order requires a price"))?,
             _ => order.price.unwrap_or_default(),
         };
+        // Idempotency key: if any layer retries a timed-out request, Dhan
+        // dedupes on this so the same order is not placed twice.
+        let correlation_id = format!("algomln-{}", uuid::Uuid::new_v4());
         let body = PlaceOrderRequest {
             dhan_client_id,
+            correlation_id: correlation_id.clone(),
             transaction_type: match order.side {
                 OrderSide::Buy => "BUY".to_string(),
                 OrderSide::Sell => "SELL".to_string(),
@@ -421,16 +503,19 @@ impl BrokerClient for DhanClient {
             bo_stop_loss_value: 0.0,
         };
 
-        let response = self.post::<PlaceOrderResponse>("/orders", body).await?;
+        // Place-and-return: Dhan responds as soon as the order is accepted,
+        // which may be a non-terminal status (TRANSIT/PENDING). We return the
+        // status as-is; `DhanBroker::execute` decides how to treat each state
+        // (fill vs. submitted vs. rejected). No retry — see
+        // `post_order_no_retry`.
+        let response = self.post_order_no_retry(&body, &correlation_id).await?;
         let status = Self::order_status(&response.order_status);
-        if matches!(status, OrderStatus::Rejected | OrderStatus::Cancelled) {
-            return Err(anyhow!("order rejected: {}", response.order_status));
-        }
 
         Ok(OrderResult {
             order_id: response.order_id,
             status,
             timestamp: Utc::now().timestamp_millis(),
+            correlation_id,
         })
     }
 
@@ -480,6 +565,59 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use std::{env, fs};
+
+    #[test]
+    fn maps_dhan_order_status_strings() {
+        assert_eq!(DhanClient::order_status("TRANSIT"), OrderStatus::Transit);
+        assert_eq!(DhanClient::order_status("pending"), OrderStatus::Pending);
+        assert_eq!(DhanClient::order_status("TRADED"), OrderStatus::Traded);
+        assert_eq!(DhanClient::order_status("REJECTED"), OrderStatus::Rejected);
+        assert_eq!(DhanClient::order_status("CANCELLED"), OrderStatus::Cancelled);
+        assert_eq!(DhanClient::order_status("EXPIRED"), OrderStatus::Expired);
+        assert_eq!(
+            DhanClient::order_status("SOMETHING_ELSE"),
+            OrderStatus::Unknown("SOMETHING_ELSE".to_string())
+        );
+    }
+
+    #[test]
+    fn test_correlation_id_is_present() {
+        // The order request body must carry a `correlationId` beginning with
+        // "algomln-" so a retried request can be deduplicated by the broker.
+        let correlation_id = format!("algomln-{}", uuid::Uuid::new_v4());
+        let body = PlaceOrderRequest {
+            dhan_client_id: "client".to_string(),
+            correlation_id: correlation_id.clone(),
+            transaction_type: "BUY".to_string(),
+            exchange_segment: "NSE_EQ".to_string(),
+            product_type: "INTRADAY".to_string(),
+            order_type: "MARKET".to_string(),
+            validity: "DAY".to_string(),
+            security_id: "2885".to_string(),
+            quantity: 1,
+            price: 0.0,
+            trigger_price: 0.0,
+            disclosed_quantity: 0,
+            after_market_order: false,
+            amo_time: "OPEN".to_string(),
+            bo_profit_value: 0.0,
+            bo_stop_loss_value: 0.0,
+        };
+
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&body).expect("serialize place order request"),
+        )
+        .expect("valid json");
+
+        let correlation = json
+            .get("correlationId")
+            .and_then(|v| v.as_str())
+            .expect("correlationId field present");
+        assert!(
+            correlation.starts_with("algomln-"),
+            "correlationId was {correlation}"
+        );
+    }
 
     #[test]
     fn converts_dhan_unix_seconds_to_unix_ms() {

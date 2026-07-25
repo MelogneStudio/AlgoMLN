@@ -70,6 +70,9 @@ pub struct DhanQuoteValue {
 #[serde(rename_all = "camelCase")]
 pub struct PlaceOrderRequest {
     pub dhan_client_id: String,
+    /// Idempotency key echoed by Dhan. Prevents a retried/duplicated HTTP
+    /// request from placing the same order twice.
+    pub correlation_id: String,
     #[serde(rename = "transactionType")]
     pub transaction_type: String,
     pub exchange_segment: String,
