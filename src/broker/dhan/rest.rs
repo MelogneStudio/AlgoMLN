@@ -6,7 +6,10 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::{
-    broker::{symbol_map::SymbolMap, BrokerClient, Timeframe},
+    broker::{
+        symbol_map::{Segment, SymbolEntry, SymbolMap},
+        BrokerClient, Timeframe,
+    },
     models::{
         Candle, Order, OrderResult, OrderSide, OrderStatus, OrderType, Portfolio, Position, Quote,
     },
@@ -230,12 +233,11 @@ impl DhanClient {
             .with_context(|| format!("Dhan response was not valid JSON: {path}"))
     }
 
-    fn resolve_security_id(&self, symbol: &str) -> Result<String> {
+    fn resolve_symbol_entry(&self, symbol: &str) -> Result<SymbolEntry> {
         let symbol_map = self.symbol_map.read();
-        let security_id = symbol_map
-            .get(symbol)
-            .ok_or_else(|| anyhow!("symbol not in map: {symbol}"))?;
-        Ok(security_id.to_string())
+        symbol_map
+            .lookup(symbol)
+            .ok_or_else(|| anyhow!("symbol not in map: {symbol}"))
     }
 
     fn order_status(status: &str) -> OrderStatus {
@@ -466,7 +468,18 @@ impl BrokerClient for DhanClient {
             .client_id
             .clone()
             .ok_or_else(|| anyhow!("Dhan client id is not configured"))?;
-        let security_id = self.resolve_security_id(&order.symbol)?;
+        let entry = self.resolve_symbol_entry(&order.symbol)?;
+        // Segment guard (Phase 7 Fix Pack, Fix 3). Defence in depth: even if a
+        // pre-flight gate is bypassed, the broker refuses anything that is not
+        // NSE equity intraday. Relaxing this is a Phase 8 task.
+        if entry.segment != Segment::NseEq {
+            bail!(
+                "Phase 7 only supports NSE equity intraday trading; symbol {} is {:?}",
+                order.symbol,
+                entry.segment
+            );
+        }
+        let security_id = entry.security_id.to_string();
         let order_type = match order.order_type {
             OrderType::Market => "MARKET",
             OrderType::Limit => "LIMIT",
@@ -488,7 +501,7 @@ impl BrokerClient for DhanClient {
                 OrderSide::Buy => "BUY".to_string(),
                 OrderSide::Sell => "SELL".to_string(),
             },
-            exchange_segment: "NSE_EQ".to_string(),
+            exchange_segment: entry.segment.as_dhan_string().to_string(),
             product_type: "INTRADAY".to_string(),
             order_type: order_type.to_string(),
             validity: "DAY".to_string(),
@@ -616,6 +629,37 @@ mod tests {
         assert!(
             correlation.starts_with("algomln-"),
             "correlationId was {correlation}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_place_order_rejects_non_equity() {
+        use crate::models::{Order, OrderSide, OrderType};
+
+        let mut symbol_map = SymbolMap::empty();
+        symbol_map.insert_entry("BANKNIFTY", 1234, Segment::NseFno);
+        let symbol_map = Arc::new(parking_lot::RwLock::new(symbol_map));
+
+        let auth = DhanAuth::with_client_id("test-token", "client-1").unwrap();
+        let client = DhanClient::with_symbol_map(auth, symbol_map);
+
+        let order = Order {
+            symbol: "BANKNIFTY".to_string(),
+            side: OrderSide::Buy,
+            quantity: 1,
+            order_type: OrderType::Market,
+            price: None,
+        };
+
+        // The segment guard runs before any HTTP request, so this fails fast
+        // without touching the network.
+        let error = client
+            .place_order(order)
+            .await
+            .expect_err("non-equity order must be rejected");
+        assert!(
+            error.to_string().contains("Phase 7 only supports NSE equity"),
+            "unexpected error: {error}"
         );
     }
 

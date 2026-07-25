@@ -2,9 +2,44 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const DHAN_SCRIP_MASTER_URL: &str = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv";
+
+/// Exchange segment for a tradable symbol. Phase 7 supports only `NseEq` for
+/// order placement; the other variants exist so the segment guard can name a
+/// rejected symbol and so Phase 8 can relax the restriction without a schema
+/// change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Segment {
+    NseEq,
+    NseFno,
+    NseCurrency,
+    Bse,
+    Mcx,
+    Index,
+}
+
+impl Segment {
+    /// The Dhan `exchangeSegment` string for this segment.
+    pub fn as_dhan_string(self) -> &'static str {
+        match self {
+            Segment::NseEq => "NSE_EQ",
+            Segment::NseFno => "NSE_FNO",
+            Segment::NseCurrency => "NSE_CURRENCY",
+            Segment::Bse => "BSE_EQ",
+            Segment::Mcx => "MCX_COMM",
+            Segment::Index => "IDX_I",
+        }
+    }
+}
+
+/// A resolved symbol: its Dhan security id and the segment it trades in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymbolEntry {
+    pub security_id: u32,
+    pub segment: Segment,
+}
 
 /// Maps NSE equity trading symbols to Dhan security IDs.
 /// Loaded once at startup; shared via Arc.
@@ -12,6 +47,10 @@ const DHAN_SCRIP_MASTER_URL: &str = "https://images.dhan.co/api-data/api-scrip-m
 pub struct SymbolMap {
     /// key: uppercase NSE symbol, value: Dhan SECURITY_ID
     map: HashMap<String, u32>,
+    /// key: uppercase NSE symbol, value: exchange segment. Kept parallel to
+    /// `map` so `inner()` / `get()` retain their `u32` shape for the fuzzy
+    /// search path; `lookup()` joins the two.
+    segments: HashMap<String, Segment>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +85,7 @@ impl SymbolMap {
     fn parse_csv(text: &str) -> Result<Self, String> {
         let mut rdr = csv::Reader::from_reader(text.as_bytes());
         let mut map: HashMap<String, u32> = HashMap::new();
+        let mut segments: HashMap<String, Segment> = HashMap::new();
         let mut duplicates = 0usize;
 
         for result in rdr.deserialize::<ScripRow>() {
@@ -81,7 +121,10 @@ impl SymbolMap {
                     duplicates += 1;
                     // First occurrence wins (matches the user's Python script).
                 } else {
-                    map.insert(key, sec_id);
+                    map.insert(key.clone(), sec_id);
+                    // The CSV filter above admits only NSE equities, so every
+                    // parsed entry is NseEq.
+                    segments.insert(key, Segment::NseEq);
                 }
             }
         }
@@ -93,19 +136,48 @@ impl SymbolMap {
             );
         }
         eprintln!("[SymbolMap] loaded {} NSE equity symbols", map.len());
-        Ok(Self { map })
+        Ok(Self { map, segments })
     }
 
     /// Empty map — used when the seed file is unavailable so the app still boots.
     pub fn empty() -> Self {
         Self {
             map: HashMap::new(),
+            segments: HashMap::new(),
         }
     }
 
     /// Look up a security ID for a symbol. Case-insensitive.
     pub fn get(&self, symbol: &str) -> Option<u32> {
         self.map.get(&symbol.trim().to_uppercase()).copied()
+    }
+
+    /// Look up the full entry (security id + segment) for a symbol.
+    /// Case-insensitive. If the security id is present but the segment is
+    /// somehow missing, defaults to `NseEq` with a warning rather than
+    /// dropping the symbol.
+    pub fn lookup(&self, symbol: &str) -> Option<SymbolEntry> {
+        let key = symbol.trim().to_uppercase();
+        let security_id = *self.map.get(&key)?;
+        let segment = match self.segments.get(&key) {
+            Some(segment) => *segment,
+            None => {
+                eprintln!("[SymbolMap] segment missing for {key}; defaulting to NseEq");
+                Segment::NseEq
+            }
+        };
+        Some(SymbolEntry {
+            security_id,
+            segment,
+        })
+    }
+
+    /// Insert or overwrite a single entry. Used by tests and any future
+    /// non-CSV loader; the CSV path populates entries as NSE equities.
+    pub fn insert_entry(&mut self, symbol: &str, security_id: u32, segment: Segment) {
+        let key = symbol.trim().to_uppercase();
+        self.map.insert(key.clone(), security_id);
+        self.segments.insert(key, segment);
     }
 
     /// Borrow the raw symbol → security_id map. Used by the
@@ -205,5 +277,32 @@ mod tests {
         let (found, missing) = map.resolve_many(&symbols);
         assert!(found.is_empty());
         assert_eq!(missing, symbols);
+    }
+
+    #[test]
+    fn parsed_entries_are_nse_equity() {
+        let csv = "EXCH_ID,SEGMENT,SYMBOL_NAME,SECURITY_ID\n\
+                   NSE,E,RELIANCE,2885\n";
+        let map = SymbolMap::parse_csv(csv).unwrap();
+        let entry = map.lookup("reliance").expect("case-insensitive lookup");
+        assert_eq!(entry.security_id, 2885);
+        assert_eq!(entry.segment, Segment::NseEq);
+    }
+
+    #[test]
+    fn insert_entry_records_segment() {
+        let mut map = SymbolMap::empty();
+        map.insert_entry("BANKNIFTY", 1234, Segment::NseFno);
+        let entry = map.lookup("BANKNIFTY").unwrap();
+        assert_eq!(entry.security_id, 1234);
+        assert_eq!(entry.segment, Segment::NseFno);
+        // `get` still returns the security id for the fuzzy-search path.
+        assert_eq!(map.get("BANKNIFTY"), Some(1234));
+    }
+
+    #[test]
+    fn segment_as_dhan_string() {
+        assert_eq!(Segment::NseEq.as_dhan_string(), "NSE_EQ");
+        assert_eq!(Segment::NseFno.as_dhan_string(), "NSE_FNO");
     }
 }
