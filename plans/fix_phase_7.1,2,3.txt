@@ -1,0 +1,623 @@
+# AlgoMLN — Phase 7 Fix Pack (for Prompts 1–3, already implemented)
+
+Run this prompt in Claude Code / Cursor / Windsurf against the existing repo.
+Prompts 1, 2, and 3 of the Phase 7 plan have already been implemented. This
+prompt fixes real problems in that code before Prompt 4 (the safety gate)
+is written, because the gate depends on some of these fixes being correct.
+
+Output code only — no explanations, no questions, unless explicitly told to ask.
+
+---
+
+## Environment note (read first)
+
+This machine does **not** have the Rust toolchain, Node, or npm installed.
+You cannot run `cargo test`, `cargo build`, `cargo check`, `npm run build`,
+`npm run dev`, or `npm test` yourself. Whenever you would normally run one:
+
+1. Write the code change first.
+2. State the exact command you want executed (e.g. `cargo test --lib
+   trade_log`).
+3. Ask the user to run it and paste back the full output.
+4. Wait for the results before moving on to the next fix.
+5. If a command fails, ask for the complete error text — do not guess.
+
+Do not attempt to install toolchains. Do not skip verification steps by
+assuming the code compiles.
+
+---
+
+## Order of fixes
+
+Do them in this order. Each fix is self-contained enough to compile and
+test between fixes; ask for `cargo test --lib` results after each one
+before moving to the next.
+
+1. Redefine `realized_loss` (highest priority — the only kill switch).
+2. Order-placement lifecycle: `correlationId`, retry policy, TRANSIT/PENDING handling.
+3. Segment guard in `place_order` and `SymbolMap` metadata.
+4. Move trade logging into `DhanBroker::execute`.
+5. Pause semantics + `candle_history` bound.
+6. Tick loop robustness (`RecvError::Lagged`, mutex-across-await audit).
+7. Loud failure signal to the UI (event emit on `Failed`).
+
+---
+
+## Fix 1 — Redefine `realized_loss` on `DhanBroker`
+
+### Problem
+
+The current spec increments `realized_loss` by `price * quantity` on closing
+sells, which is notional value, not loss. It also uses a positions-snapshot
+diff around `place_order`, which races the fill (orders are `TRANSIT`/`PENDING`
+immediately after submit, so `realizedProfit` is unchanged). On any snapshot
+failure the code falls back to "0 additional loss", meaning the safety metric
+silently reads zero exactly when the broker API is flaky. Since the entire
+`RISK MAX_DAILY_LOSS` gate is fed by this number, it must be reliable.
+
+### Sign convention (pin this)
+
+`realized_loss()` returns a **non-negative magnitude of losses** in rupees.
+Profits do not reduce it. Formula:
+
+```
+realized_loss = max(0, -sum_of_realized_pnl_across_positions_today)
+```
+
+Where `realized_pnl_per_position` comes from Dhan's `realizedProfit` field on
+`GET /positions`. Positive `realizedProfit` = profit (contributes 0 to loss).
+Negative `realizedProfit` = loss (contributes its absolute value).
+
+Document this in a doc comment on `DhanBroker::realized_loss`.
+
+### Implementation
+
+Replace the current `realized_loss` mechanism on `DhanBroker` with a
+polling-based cache:
+
+```rust
+pub struct DhanBroker {
+    client: Arc<DhanClient>,
+    // Cached realized loss magnitude, in rupees, non-negative.
+    // Refreshed by a background task every REFRESH_INTERVAL seconds
+    // and also immediately after every successful order placement.
+    realized_loss: Arc<parking_lot::RwLock<f64>>,
+    // Number of consecutive refresh failures. When this exceeds
+    // MAX_CONSECUTIVE_FAILURES the session must be paused — see below.
+    consecutive_failures: Arc<AtomicU32>,
+    // Set by a background task; the session tick loop reads this and
+    // transitions to Failed if true.
+    stale: Arc<AtomicBool>,
+}
+
+const REFRESH_INTERVAL_SECS: u64 = 10;
+const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+```
+
+- On `DhanBroker::new`, spawn a background tokio task that calls
+  `refresh_realized_loss()` every 10 seconds.
+- `refresh_realized_loss()` calls `client.get_positions()`. On success it
+  computes the magnitude, writes it to `realized_loss`, resets
+  `consecutive_failures`, clears `stale`. On failure it increments
+  `consecutive_failures`. When it reaches `MAX_CONSECUTIVE_FAILURES` it sets
+  `stale = true` and logs `eprintln!("dhan_broker: realized_loss stale after
+  N failures — session should pause")`.
+- `execute()` calls `refresh_realized_loss()` immediately after a successful
+  `place_order` (fire-and-forget acceptable — the periodic task will catch up).
+- `realized_loss()` returns `*self.realized_loss.read()`. **Do not** treat
+  stale-ness as zero; add a new method `pub fn is_stale(&self) -> bool` that
+  returns `self.stale.load(Ordering::Relaxed)`. The session loop (Fix 6)
+  reads this and pauses the session if stale.
+
+Provide a `Drop` impl (or a `stop()` method) that aborts the background
+task so tests don't leak tasks.
+
+### Tests to add in `src/strategy/execution/dhan.rs`
+
+- `test_realized_loss_starts_at_zero`: newly constructed broker returns 0.
+- `test_realized_loss_magnitude_from_positions`: build a `DhanBroker` with a
+  mocked/injected positions source that returns two positions with
+  `realizedProfit = -500` and `realizedProfit = 200`. After manually calling
+  the refresh routine, `realized_loss()` returns `500.0` (not `-300`, not
+  `700`).
+- `test_realized_loss_is_stale_after_failures`: with a positions source that
+  always fails, after N refresh cycles `is_stale()` returns true.
+
+To make the broker testable without HTTP, extract the positions-fetch step
+behind a small trait or a function parameter that can be mocked in tests.
+Do this via a private `trait PositionsSource { async fn fetch(&self) -> ... }`
+implemented for `Arc<DhanClient>` in production and for a mock in tests.
+
+### After this fix
+
+Ask the user to run:
+```
+cargo test --lib strategy::execution::dhan
+cargo test --lib
+```
+
+Wait for output before moving on.
+
+---
+
+## Fix 2 — Order placement lifecycle (correlationId, retries, TRANSIT/PENDING)
+
+### Problem
+
+Three related issues:
+
+1. The `POST /orders` body has no `correlationId`. If any layer retries a
+   timed-out order request, the same order gets placed twice.
+2. Timeouts on order placement are *unknown status* (the order may have
+   reached the exchange). Retrying blindly is unsafe.
+3. `TRANSIT` and `PENDING` are non-terminal statuses. The current code
+   flows them through as successful executions with `price = 0.0`, then
+   the session tick loop writes a `TradeLogEntry` for a fill that has not
+   happened. The trade log is supposed to be an immutable record of
+   *executions* — writing pending submissions with fake prices corrupts it.
+
+### Implementation
+
+**A. `src/broker/dhan/rest.rs` — `place_order`:**
+
+- Generate a `correlationId = format!("algomln-{}", uuid::Uuid::new_v4())`
+  before the request and include it in the request body as `correlationId`.
+  Store it on the returned `OrderResult` (add a `pub correlation_id: String`
+  field to `OrderResult` if not present).
+- Audit the shared `post<T>()` helper. If it performs any automatic retry
+  (timeout, 5xx, network error), add a new helper — `post_no_retry<T>()`
+  or a parameter — used specifically by `place_order`. `place_order` must
+  never auto-retry. If the helper already has zero retries, add a doc
+  comment on the helper enforcing that invariant and add a `#[cfg(test)]`
+  assertion or a compile-time comment referencing this fix.
+- On network timeout, return a distinct error variant
+  `DhanError::OrderStatusUnknown { correlation_id }` (add to the error enum
+  if it doesn't exist). Callers must treat this as "do not retry, do not
+  assume filled, ask the user to check their broker app". Map this to
+  `ExecutionError::BrokerError("order status unknown, check broker app;
+  correlation_id=...")` at the `DhanBroker::execute` boundary.
+
+**B. Order status semantics:**
+
+Add an enum (or extend the existing `OrderStatus`) with these variants and
+a `is_terminal()` method:
+
+```rust
+pub enum OrderStatus {
+    Transit,        // non-terminal, submitted to broker
+    Pending,        // non-terminal, at exchange
+    Traded,         // terminal, filled (fully or partially — see notes)
+    Rejected,       // terminal, failed at broker or exchange
+    Cancelled,      // terminal
+    Expired,        // terminal
+    Unknown(String),// anything else Dhan sends
+}
+
+impl OrderStatus {
+    pub fn is_terminal(&self) -> bool { ... }
+    pub fn is_fill(&self) -> bool { matches!(self, Self::Traded) }
+}
+```
+
+`place_order` still returns as soon as Dhan responds (the API is
+place-and-return). But downstream code must inspect `is_fill()` before
+treating this as an execution.
+
+**C. `DhanBroker::execute`:**
+
+- On non-terminal status (`Transit`, `Pending`), return `Ok(OrderResult)`
+  with the status intact. Do not treat this as a fill.
+- On `Rejected` / `Cancelled` / `Expired`, return
+  `ExecutionError::BrokerError(format!("order {order_id} status: {status}"))`.
+- On `Traded`, return `Ok(OrderResult)` normally.
+- The trade log write (see Fix 4) branches on `is_fill()` vs. submitted.
+
+Do **not** add a background polling loop that upgrades `Transit` → `Traded`
+in Phase 7. That's a Phase 8 task. For now, the trade log records both
+submissions (with `orderStatus = "TRANSIT"` and `price = 0.0` clearly
+marked) and fills. The audit log is complete either way; the loss tracker
+in Fix 1 uses the positions endpoint, not the trade log, so it's not
+affected.
+
+### Tests to add
+
+- `test_correlation_id_is_present`: capture the JSON body of a
+  `place_order` call (via a mock HTTP client if one exists, or via a
+  serialisation test on `PlaceOrderRequest`) and assert
+  `correlationId` starts with `"algomln-"`.
+- `test_transit_is_not_terminal`: `OrderStatus::Transit.is_terminal() == false`.
+- `test_rejected_returns_err`: mocked response with `orderStatus = "REJECTED"`
+  → `execute` returns `Err(ExecutionError::BrokerError(...))`.
+
+After this fix, run:
+```
+cargo test --lib broker::dhan
+cargo test --lib strategy::execution::dhan
+```
+
+---
+
+## Fix 3 — Segment guard: reject non-equity symbols in Phase 7
+
+### Problem
+
+`place_order` hardcodes `exchangeSegment = "NSE_EQ"`. If a strategy targets
+an index (e.g. NIFTY, BANKNIFTY as underlying), an F&O contract, or a BSE
+symbol, either the order fails at the broker or it resolves to a
+wrong-segment `securityId` from `SymbolMap`. Phase 7 is intraday NSE
+equities only — enforce that explicitly.
+
+### Implementation
+
+**A.** Add a `segment: Segment` field to `SymbolMap` entries (or ensure the
+existing entry has enough info to derive it). `Segment` enum:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Segment {
+    NseEq,
+    NseFno,
+    NseCurrency,
+    Bse,
+    Mcx,
+    Index,
+}
+```
+
+If existing `SymbolMap` entries lack this field, this fix must add it and
+provide a migration or default (default to `NseEq` with a warning log if
+the field is missing, so we don't corrupt existing data).
+
+**B.** In `DhanClient::place_order`, before serialising the request:
+
+```rust
+let entry = symbol_map.read().lookup(&order.symbol)
+    .ok_or_else(|| anyhow::anyhow!("symbol not in map: {}", order.symbol))?;
+if entry.segment != Segment::NseEq {
+    anyhow::bail!(
+        "Phase 7 only supports NSE equity intraday trading; symbol {} is {:?}",
+        order.symbol, entry.segment
+    );
+}
+```
+
+Use `entry.segment.as_dhan_string()` (returns `"NSE_EQ"` for now) instead
+of a hardcoded string, so this is trivial to relax in Phase 8.
+
+**C.** This also belongs as a **pre-flight gate** in Prompt 4's `LiveGuard`,
+but adding it here means the broker itself is safe even if the gate is
+bypassed for any reason (defence in depth).
+
+### Test
+
+- `test_place_order_rejects_non_equity`: build an `Order` for a symbol
+  whose `SymbolMap` entry is `Segment::NseFno`; `place_order` returns
+  `Err` containing `"Phase 7 only supports NSE equity"`.
+
+---
+
+## Fix 4 — Move trade logging into `DhanBroker::execute`
+
+### Problem
+
+Trade log writes currently happen in the `LiveSession` tick loop when the
+engine emits `LogEntryKind::OrderExecuted`. Prompt 5 will add a plugin
+execution API (`DhanBrokerExecutionApi::submit_order`) that calls
+`broker.execute` directly, bypassing the engine loop — and therefore
+bypassing the trade log. The trade log is supposed to be a complete
+audit record of every live order.
+
+### Implementation
+
+Move the `trade_log.append(...)` call from `LiveSession`'s tick loop into
+`DhanBroker::execute`, immediately after `place_order` returns.
+
+**A.** `DhanBroker` needs a handle to the trade log and to the current
+strategy context (id, name, rule id, notes). Options:
+
+- Add `pub trade_log: Arc<TradeLog>` to `DhanBroker` (constructed with it).
+- Pass strategy context via a thread-local or a `SessionContext` set by
+  `LiveSession::start` and cleared on stop:
+
+  ```rust
+  pub struct SessionContext {
+      pub strategy_id: String,
+      pub strategy_name: String,
+      pub mode: String, // "live"
+  }
+  ```
+
+  Store as `Arc<RwLock<Option<SessionContext>>>` on `DhanBroker`. When
+  `LiveSession::start` is called, it writes the context. On stop, clears it.
+
+- Per-call annotation (rule id, notes) is passed via a new `execute_with_meta`
+  method:
+
+  ```rust
+  pub async fn execute_with_meta(
+      &self,
+      order: Order,
+      rule_id: &str,
+      notes: &str,
+  ) -> Result<OrderResult, ExecutionError>
+  ```
+
+  The `ExecutionTarget::execute` trait method delegates to
+  `execute_with_meta(order, "", "")` for the plugin path.
+
+**B.** Inside `execute_with_meta`, after `place_order`:
+
+- Build the `TradeLogEntry`:
+  - `id`: fresh uuid v4
+  - `timestamp`: `chrono::Utc::now().to_rfc3339()`
+  - `strategy_id`/`strategy_name`: from `SessionContext` (empty strings if
+    context is None — this happens if a plugin calls submit_order outside a
+    live session, which shouldn't happen but log it anyway)
+  - `mode`: `"live"`
+  - `rule_id`, `notes`: from arguments
+  - `price`: from `OrderResult.price` if it's a fill, else `0.0`
+  - `order_status`: string form of `OrderResult.status`
+- Call `self.trade_log.append(entry)`. If append fails, `eprintln!` a
+  loud error but do **not** propagate — the order already went through.
+  Failure to log is a serious operational issue but not a reason to
+  falsely tell the user the order failed.
+
+**C.** Remove the `on_candle` LogEntry-based logging from the session tick
+loop. The engine's `OrderExecuted` LogEntry now serves only as an
+internal signal for other engine bookkeeping; the persistent audit log
+is fully owned by `DhanBroker`.
+
+**D.** The session tick loop still needs to attach engine metadata (rule
+id, "stop_loss"/"take_profit"/"risk_breach" notes) to the trade log
+entry. It does this by inspecting each `LogEntry`, extracting the
+`rule_id`/`notes`, and passing them to `broker.execute_with_meta(order,
+rule_id, notes)`. That is: the engine returns intended orders + metadata,
+the session translates to broker calls, and the broker handles logging.
+
+### Test
+
+- `test_execute_writes_trade_log`: with a mock `place_order` returning
+  `TRADED`, call `execute_with_meta(order, "rule-1", "stop_loss")` on a
+  `DhanBroker` with a temp-file `TradeLog`. Read the log, assert one
+  entry present with the correct `rule_id`, `notes`, `strategy_id`
+  (from a preset `SessionContext`).
+
+---
+
+## Fix 5 — Pause semantics and `candle_history` bound
+
+### Problems
+
+1. Current spec says paused sessions "receive but skip `on_candle`". If
+   the engine holds stop-loss and risk-breach rules, pausing effectively
+   turns off the stop-loss on real open positions.
+2. It's ambiguous whether candles keep accumulating in `candle_history`
+   during pause. If they don't, resuming leaves a gap in indicator state.
+3. `candle_history` is a `Vec<Candle>` that grows forever. A session
+   running all day plus 500 seed candles is fine, but over multiple days
+   or on a long-running session it's unbounded.
+
+### Implementation
+
+**A.** Redefine pause: **pause suppresses new *entry* orders only**.
+Exit orders (stop-loss, take-profit) and risk-breach handling continue
+to run. The mechanism is a filter applied to the orders returned by
+`on_candle` before they hit the broker:
+
+```rust
+pub enum SessionMode { Running, Paused }
+
+// In the tick loop, after engine.on_candle returns Vec<LogEntry>:
+let mode = *session.mode.read();
+for order_intent in orders {
+    let is_exit_or_risk = matches!(
+        order_intent.reason,
+        OrderReason::StopLoss | OrderReason::TakeProfit | OrderReason::RiskBreach
+    );
+    if mode == SessionMode::Paused && !is_exit_or_risk {
+        // Skip entries while paused.
+        eprintln!("session paused: skipping entry order for {}", order_intent.symbol);
+        continue;
+    }
+    broker.execute_with_meta(...).await?;
+}
+```
+
+If the current `LogEntry` schema doesn't carry an `OrderReason`, add one
+(inferred from the rule that fired). Default to `OrderReason::Entry` for
+unclassified orders — pause blocks these by default, which is the safe
+side.
+
+**B.** `candle_history` continues to be appended during pause. Only the
+downstream *order execution* is affected. Add a doc comment on
+`LiveSession::pause()` stating this loudly.
+
+**C.** Cap `candle_history` size at a constant (e.g. 5000 candles). When
+the vector exceeds that, drop the oldest. The engine's
+`BoundedWindowProvider` only needs a window; older candles are dead
+weight and a memory risk in long sessions.
+
+```rust
+const MAX_CANDLE_HISTORY: usize = 5000;
+
+candle_history.push(new_candle);
+if candle_history.len() > MAX_CANDLE_HISTORY {
+    let drop = candle_history.len() - MAX_CANDLE_HISTORY;
+    candle_history.drain(0..drop);
+}
+```
+
+### Test
+
+- `test_paused_blocks_entries_allows_exits`: build a session with a
+  `MockBroker` recording orders. Feed it engine outputs containing one
+  `Entry` and one `StopLoss` order while `Paused`. Assert the mock saw
+  only the stop-loss.
+- `test_candle_history_capped`: push `MAX_CANDLE_HISTORY + 100` candles;
+  assert length == `MAX_CANDLE_HISTORY` and the oldest is dropped.
+
+---
+
+## Fix 6 — Tick loop robustness
+
+### Problems
+
+1. `tokio::sync::broadcast::Receiver::recv()` returns
+   `Err(RecvError::Lagged(n))` when the consumer falls behind. If the
+   loop treats this as fatal, a tick burst kills the live session.
+2. `Err(RecvError::Closed)` is the only fatal case — it means the
+   feed manager was dropped.
+3. Potential deadlock/panic: if the engine mutex is a
+   `parking_lot::Mutex` (sync) and it's held across an `.await` (e.g.
+   around a broker HTTP call), that's undefined behaviour. If it's a
+   `tokio::sync::Mutex`, holding it across awaits blocks the whole tick
+   loop.
+
+### Implementation
+
+**A.** In the tick loop:
+
+```rust
+loop {
+    tokio::select! {
+        _ = cancel.cancelled() => break,
+        recv = rx.recv() => match recv {
+            Ok(tick) => { /* feed to assembler */ }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!("live session: tick receiver lagged by {n} ticks");
+                // stats: bump a counter for the UI
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                eprintln!("live session: feed closed unexpectedly");
+                *session.status.write() = SessionStatus::Failed(
+                    "feed closed".into()
+                );
+                break;
+            }
+        }
+    }
+}
+```
+
+**B.** Also check `broker.is_stale()` (from Fix 1) at the top of each
+iteration. If stale, transition to `Paused` (not `Failed`) with a
+status note, and emit a UI event (Fix 7).
+
+**C.** Audit every `.await` inside the tick loop for held locks. Rules:
+
+- Never hold `engine.lock()` across a broker `.await`. Take the lock,
+  compute intended orders, drop the lock, then await broker calls.
+- If any mutex is `parking_lot::Mutex`, ensure the guard is dropped
+  (explicitly with `drop(guard)` or by ending its scope) before any
+  `.await`.
+- `candle_history` lock (also parking_lot) — same rule.
+
+Concretely, structure the per-candle work as:
+
+```rust
+let intended_orders: Vec<OrderIntent> = {
+    let mut engine = engine.lock();
+    let history = candle_history.lock();
+    engine.on_candle(&history)?
+}; // both guards dropped here
+for intent in intended_orders {
+    broker.execute_with_meta(intent.order, &intent.rule_id, &intent.notes).await?;
+}
+```
+
+### Test
+
+Hard to unit test the broadcast lag directly without a real channel, so:
+
+- `test_lag_error_does_not_break_loop`: build a session with a
+  test-only entry point that lets you inject a `RecvError::Lagged`. Assert
+  the session status remains `Running` afterwards.
+- Add a debug assertion or `#[cfg(debug_assertions)]` check that flags
+  locks held across awaits, if a suitable clippy lint isn't already on.
+
+---
+
+## Fix 7 — Loud failure signalling
+
+### Problem
+
+When `on_candle` errors or the feed closes, the session sets status to
+`Failed(...)` and exits. The UI only polls `getLiveStatus` every 5s,
+and only when the Live screen is open. A silently-failed session with
+open positions is a serious operational hazard.
+
+### Implementation
+
+**A.** Add a Tauri event emit on transition to `Failed` (or `Stopped`
+with open positions). Requires access to `AppHandle`.
+
+`LiveSession::start` already receives `event_bus: Arc<EventBus>` (from
+Prompt 5). Add an `app_handle: tauri::AppHandle` parameter to `start`
+(or an `emitter` trait object if you want to keep it Tauri-agnostic
+for tests):
+
+```rust
+pub async fn start(
+    // ... existing args ...
+    app_handle: tauri::AppHandle,
+) -> Result<Arc<Self>, String> { ... }
+```
+
+Store the handle in `LiveSession`. On transition to `Failed`:
+
+```rust
+app_handle.emit_all("live_session_failed", LiveSessionFailedPayload {
+    strategy_id: session.strategy_id.clone(),
+    reason: err.to_string(),
+    open_positions_estimate: /* try get_positions; if it fails, None */,
+}).ok();
+```
+
+Also emit on graceful stop when positions remain (Prompt 5 already
+computes `open_positions_warning` — emit that too as an event, not just
+a return value).
+
+**B.** Payload types:
+
+```rust
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveSessionFailedPayload {
+    pub strategy_id: String,
+    pub reason: String,
+    pub open_positions_estimate: Option<i64>,
+}
+```
+
+Register the event in the frontend later (Prompt 6 — note this here so
+the fixed Prompt 6 wires it up).
+
+**C.** For unit tests, make the emitter injectable — add a trait
+`SessionEventEmitter` with a real Tauri impl and a mock that records
+emissions.
+
+### Test
+
+- `test_failed_status_emits_event`: build a session with a mock emitter,
+  force a `Failed` transition (via a mock engine that returns an error
+  from `on_candle`), assert the mock recorded a `live_session_failed`
+  emission.
+
+---
+
+## After all seven fixes
+
+Ask the user to run the full test suite:
+
+```
+cargo test --lib
+cargo test --workspace
+```
+
+Report the results. If anything fails, walk the failures one by one and
+ask for specific error output. Do not proceed to Prompt 4 until:
+
+- All prior tests still pass.
+- The new tests from this fix pack pass.
+- The user confirms the fixes are merged.
