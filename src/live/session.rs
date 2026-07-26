@@ -130,10 +130,30 @@ impl LiveSession {
                             continue;
                         }
 
+                        // If the realized-loss cache has gone stale, pause immediately
+                        // rather than running the engine with an unreliable safety metric.
+                        // Only transition if currently Running (don't stomp Failed/Stopped).
+                        if task_session.broker.is_stale() {
+                            let should_pause = {
+                                let s = task_session.status.read();
+                                *s == SessionStatus::Running
+                            };
+                            if should_pause {
+                                task_session.broker.set_paused_for_entries(true);
+                                *task_session.status.write() = SessionStatus::Paused;
+                                eprintln!(
+                                    "[live_session] realized-loss cache stale; \
+                                     session paused until cache recovers"
+                                );
+                            }
+                        }
+
                         let Some(candle) = assembler.feed(&tick) else {
                             continue;
                         };
 
+                        // Append the new candle and clone the history while the lock is held;
+                        // the guard is dropped at the end of this block — before any .await.
                         let candles = {
                             let mut history = task_session.candle_history.lock().await;
                             history.push(candle.clone());
@@ -144,8 +164,14 @@ impl LiveSession {
                                 history.drain(0..excess);
                             }
                             history.clone()
-                        };
+                        }; // history guard dropped here — no lock held across the awaits below.
 
+                        // NOTE: the engine lock (tokio::sync::Mutex) is held across
+                        // on_candle's await, which includes the broker HTTP call. This is
+                        // safe (no UB, Send) but serialises candles if multiple tasks ever
+                        // compete for the lock. Phase 7 is single-session so this is
+                        // acceptable; Phase 8 should return OrderIntents from on_candle and
+                        // execute them outside the lock.
                         let mut engine = task_session.engine.lock().await;
                         engine.on_candle(&candles).await;
                     }
@@ -216,5 +242,30 @@ mod tests {
         // Oldest 100 candles (timestamps 0..100) were evicted; first remaining is 100.
         assert_eq!(history[0].timestamp, 100);
         assert_eq!(history[MAX_CANDLE_HISTORY - 1].timestamp, MAX_CANDLE_HISTORY as i64 + 99);
+    }
+
+    /// Verify that a `RecvError::Lagged` on the broadcast channel is recoverable:
+    /// the tick loop matches it to `continue`, not `break`, so the session stays alive.
+    /// This test demonstrates the channel contract that underpins that logic.
+    #[tokio::test]
+    async fn test_lag_error_does_not_break_loop() {
+        // Channel with capacity 1 — send two items before reading to force Lagged.
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<i32>(1);
+        let _ = tx.send(1);
+        let _ = tx.send(2); // overflows the buffer; receiver will see Lagged on next recv
+
+        let first = rx.recv().await;
+        assert!(
+            matches!(first, Err(tokio::sync::broadcast::error::RecvError::Lagged(_))),
+            "expected Lagged when receiver falls behind"
+        );
+
+        // After Lagged the receiver is still valid — the loop `continue`s and
+        // picks up the next available tick without breaking the session.
+        let _ = tx.send(3);
+        assert!(
+            rx.recv().await.is_ok(),
+            "receiver must still work after a Lagged error"
+        );
     }
 }
