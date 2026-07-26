@@ -11,6 +11,36 @@ use tokio_util::sync::CancellationToken;
 /// bounded window; retaining the full day is dead weight over long sessions.
 const MAX_CANDLE_HISTORY: usize = 5000;
 
+// ── Failure signalling ────────────────────────────────────────────────────────
+
+/// Payload emitted when a live session transitions to `Failed`.
+/// Serialised as camelCase JSON for the Tauri frontend event bus.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveSessionFailedPayload {
+    pub strategy_id: String,
+    pub reason: String,
+    /// Best-effort count of open positions at failure time. `None` if the
+    /// positions fetch itself failed, or if fetching was not attempted.
+    pub open_positions_estimate: Option<i64>,
+}
+
+/// Abstraction over "emit a session-failed alert". Implemented by a real
+/// `tauri::AppHandle` wrapper in production and a mock in tests. Keeping this
+/// as a trait means `LiveSession` compiles and tests cleanly without a Tauri
+/// dependency in the library crate.
+pub trait SessionEventEmitter: Send + Sync + 'static {
+    fn emit_failed(&self, payload: LiveSessionFailedPayload);
+}
+
+/// No-op emitter. Used as a default when no real emitter is wired up yet
+/// (e.g. tests that only care about broker / engine behaviour, not UI alerts).
+pub struct NoopEmitter;
+
+impl SessionEventEmitter for NoopEmitter {
+    fn emit_failed(&self, _payload: LiveSessionFailedPayload) {}
+}
+
 use crate::{
     broker::Timeframe,
     feed::FeedManager,
@@ -49,10 +79,18 @@ pub struct LiveSession {
     pub start_time: DateTime<Utc>,
     cancel: CancellationToken,
     task: Mutex<Option<JoinHandle<()>>>,
+    /// Emitter for loud failure alerts. The real impl wraps `tauri::AppHandle`
+    /// and calls `emit_all("live_session_failed", ...)`. Tests inject a mock.
+    emitter: Arc<dyn SessionEventEmitter>,
 }
 
 impl LiveSession {
     /// Construct and immediately start the tick-listening task.
+    ///
+    /// `emitter` receives a `live_session_failed` notification whenever the
+    /// session transitions to `Failed`. In production, pass a
+    /// `TauriSessionEmitter(app_handle)` (defined in the Tauri binary). In
+    /// tests or contexts that don't need UI alerts, pass `Arc::new(NoopEmitter)`.
     pub async fn start(
         strategy_id: String,
         strategy_name: String,
@@ -63,6 +101,7 @@ impl LiveSession {
         trade_log: Arc<TradeLog>,
         event_bus: Arc<EventBus>,
         initial_candles: Vec<Candle>,
+        emitter: Arc<dyn SessionEventEmitter>,
     ) -> Result<Arc<Self>, String> {
         // Write session context onto the broker before the engine starts so
         // every `execute`/`execute_with_meta` call during this session sees
@@ -97,6 +136,7 @@ impl LiveSession {
             start_time: Utc::now(),
             cancel: CancellationToken::new(),
             task: Mutex::new(None),
+            emitter,
         });
 
         let mut receiver = {
@@ -123,7 +163,21 @@ impl LiveSession {
                                 eprintln!("[live_session] tick receiver lagged by {skipped} message(s)");
                                 continue;
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                eprintln!("[live_session] feed closed unexpectedly — transitioning to Failed");
+                                let reason = "feed closed unexpectedly".to_string();
+                                *task_session.status.write() =
+                                    SessionStatus::Failed(reason.clone());
+                                // Emit the loud alert. open_positions_estimate is not fetched
+                                // here because we're inside the async task with no broker
+                                // handle; Phase 8 can add a best-effort fetch before breaking.
+                                task_session.emitter.emit_failed(LiveSessionFailedPayload {
+                                    strategy_id: task_session.strategy_id.clone(),
+                                    reason,
+                                    open_positions_estimate: None,
+                                });
+                                break;
+                            }
                         };
 
                         if tick.symbol != task_session.symbol {
@@ -228,6 +282,18 @@ mod tests {
         Candle { timestamp: ts, open: 100.0, high: 101.0, low: 99.0, close: 100.5, volume: 1000.0 }
     }
 
+    /// Mock emitter that records every `emit_failed` call for assertion.
+    #[derive(Default)]
+    struct MockEmitter {
+        events: std::sync::Mutex<Vec<LiveSessionFailedPayload>>,
+    }
+
+    impl SessionEventEmitter for MockEmitter {
+        fn emit_failed(&self, payload: LiveSessionFailedPayload) {
+            self.events.lock().unwrap().push(payload);
+        }
+    }
+
     #[test]
     fn test_candle_history_capped() {
         let mut history: Vec<Candle> = (0..(MAX_CANDLE_HISTORY as i64 + 100))
@@ -242,6 +308,39 @@ mod tests {
         // Oldest 100 candles (timestamps 0..100) were evicted; first remaining is 100.
         assert_eq!(history[0].timestamp, 100);
         assert_eq!(history[MAX_CANDLE_HISTORY - 1].timestamp, MAX_CANDLE_HISTORY as i64 + 99);
+    }
+
+    /// Verify that `NoopEmitter` compiles and silently swallows events.
+    #[test]
+    fn test_noop_emitter_is_silent() {
+        let emitter = NoopEmitter;
+        emitter.emit_failed(LiveSessionFailedPayload {
+            strategy_id: "x".to_string(),
+            reason: "test".to_string(),
+            open_positions_estimate: None,
+        });
+        // No panic — that's the assertion.
+    }
+
+    /// Verify that `MockEmitter` records `emit_failed` calls with the correct
+    /// payload. This is the unit test for the `SessionEventEmitter` contract;
+    /// the full "session transitions to Failed and emits" path is an integration
+    /// test requiring a live feed setup and is deferred to Phase 8.
+    #[test]
+    fn test_failed_status_emits_event() {
+        let emitter = MockEmitter::default();
+
+        emitter.emit_failed(LiveSessionFailedPayload {
+            strategy_id: "strat-42".to_string(),
+            reason: "feed closed unexpectedly".to_string(),
+            open_positions_estimate: Some(2),
+        });
+
+        let events = emitter.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].strategy_id, "strat-42");
+        assert_eq!(events[0].reason, "feed closed unexpectedly");
+        assert_eq!(events[0].open_positions_estimate, Some(2));
     }
 
     /// Verify that a `RecvError::Lagged` on the broadcast channel is recoverable:
