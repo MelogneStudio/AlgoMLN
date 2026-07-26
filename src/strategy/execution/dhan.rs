@@ -390,7 +390,7 @@ mod tests {
 
     use crate::{
         broker::dhan::{DhanAuth, DhanClient, DhanError},
-        live::trade_log::{TradeLog, TradeLogEntry},
+        live::trade_log::TradeLog,
         models::{Order, OrderResult, OrderSide, OrderStatus, OrderType, Position},
         strategy::execution::{ExecutionError, ExecutionErrorKind, ExecutionTarget},
     };

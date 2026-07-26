@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn index_hit_uses_display_name() {
-        let mut eq = HashMap::new();
+        let eq = HashMap::new();
         let entries = vec![entry("NIFTY 50")];
         let r = fuzzy_search("nifty 50", &eq, &entries, 5);
         assert_eq!(r.len(), 1);
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn index_hit_uses_keyword() {
-        let mut eq = HashMap::new();
+        let eq = HashMap::new();
         let entries = vec![entry("NIFTY 50")];
         let r = fuzzy_search("nifty_50", &eq, &entries, 5);
         assert_eq!(r.len(), 1);

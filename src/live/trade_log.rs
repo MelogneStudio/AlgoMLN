@@ -27,6 +27,7 @@ pub struct TradeLogEntry {
 }
 
 /// Append-only writer. The file is JSONL: one JSON object per line, never truncated.
+#[derive(Debug)]
 pub struct TradeLog {
     path: PathBuf,
     file: Mutex<std::fs::File>,
