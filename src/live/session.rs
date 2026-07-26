@@ -249,10 +249,12 @@ mod tests {
     /// This test demonstrates the channel contract that underpins that logic.
     #[tokio::test]
     async fn test_lag_error_does_not_break_loop() {
-        // Channel with capacity 1 — send two items before reading to force Lagged.
-        let (tx, mut rx) = tokio::sync::broadcast::channel::<i32>(1);
+        // Channel with capacity 2 — send 3 items before reading to overflow the buffer.
+        // Message 1 is dropped; the receiver lags by 1 but messages 2 and 3 survive.
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<i32>(2);
         let _ = tx.send(1);
-        let _ = tx.send(2); // overflows the buffer; receiver will see Lagged on next recv
+        let _ = tx.send(2);
+        let _ = tx.send(3); // drops message 1; receiver is now lagged by 1
 
         let first = rx.recv().await;
         assert!(
@@ -260,9 +262,8 @@ mod tests {
             "expected Lagged when receiver falls behind"
         );
 
-        // After Lagged the receiver is still valid — the loop `continue`s and
-        // picks up the next available tick without breaking the session.
-        let _ = tx.send(3);
+        // After Lagged the receiver is repositioned to the oldest surviving message
+        // (message 2). The loop `continue`s — the receiver must still be usable.
         assert!(
             rx.recv().await.is_ok(),
             "receiver must still work after a Lagged error"
