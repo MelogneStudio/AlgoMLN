@@ -232,7 +232,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 |---|---|
 | `ExecutionTarget` trait + `realized_loss` (used by `RISK MAX_DAILY_LOSS`) | `src/strategy/execution/target.rs` |
 | Paper broker (in-memory cash + positions) | `src/strategy/execution/paper.rs` |
-| Dhan live broker (`ExecutionTarget` backed by REST orders/positions) | `src/strategy/execution/dhan.rs` |
+| Dhan live broker (`ExecutionTarget`, `execute_with_meta`, `SessionContext`) | `src/strategy/execution/dhan.rs` |
 | `ActionNode` → `Order` builder | `src/strategy/execution/order_builder.rs` |
 | Live 1-minute candle assembler | `src/live/candle_assembler.rs` |
 | Live session manager (single active live strategy) | `src/live/session.rs` |

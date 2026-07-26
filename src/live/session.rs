@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -11,14 +11,13 @@ use crate::{
     feed::FeedManager,
     live::{
         candle_assembler::CandleAssembler,
-        trade_log::{TradeLog, TradeLogEntry},
+        trade_log::TradeLog,
     },
-    models::{Candle, Order, OrderResult, OrderSide},
+    models::Candle,
     plugin::api::events::EventBus,
     strategy::{
         dsl::StrategyNode,
-        execution::DhanBroker,
-        logging::{LogEntry, LogEntryKind},
+        execution::{DhanBroker, dhan::SessionContext},
         runtime::{StrategyEngine, StrategyInstance, StrategyStatus as EngineStatus},
     },
 };
@@ -60,6 +59,15 @@ impl LiveSession {
         event_bus: Arc<EventBus>,
         initial_candles: Vec<Candle>,
     ) -> Result<Arc<Self>, String> {
+        // Write session context onto the broker before the engine starts so
+        // every `execute`/`execute_with_meta` call during this session sees
+        // the correct strategy metadata in the trade log.
+        *broker.session_context.write() = Some(SessionContext {
+            strategy_id: strategy_id.clone(),
+            strategy_name: strategy_name.clone(),
+            mode: "live".to_string(),
+        });
+
         let execution_target = broker.clone();
         let mut engine = StrategyEngine::new(StrategyInstance {
             id: strategy_id.clone(),
@@ -131,12 +139,8 @@ impl LiveSession {
                             history.clone()
                         };
 
-                        let logs = {
-                            let mut engine = task_session.engine.lock().await;
-                            engine.on_candle(&candles).await
-                        };
-
-                        task_session.append_executed_orders(&logs, &candle).await;
+                        let mut engine = task_session.engine.lock().await;
+                        engine.on_candle(&candles).await;
                     }
                 }
             }
@@ -166,75 +170,13 @@ impl LiveSession {
                 eprintln!("[live_session] task join failed: {error}");
             }
         }
+        // Clear session context so the broker no longer attaches this
+        // strategy's metadata to any subsequent (unexpected) execute calls.
+        *self.broker.session_context.write() = None;
     }
 
     pub fn status(&self) -> SessionStatus {
         self.status.read().clone()
     }
 
-    async fn append_executed_orders(&self, logs: &[LogEntry], candle: &Candle) {
-        let mut submitted_by_rule: BTreeMap<String, Order> = BTreeMap::new();
-
-        for log in logs {
-            match &log.kind {
-                LogEntryKind::OrderSubmitted { rule_id, order } => {
-                    submitted_by_rule.insert(rule_id.clone(), order.clone());
-                }
-                LogEntryKind::OrderExecuted { rule_id, result } => {
-                    let Some(order) = submitted_by_rule.get(rule_id) else {
-                        eprintln!(
-                            "[live_session] executed order without submitted order for rule {rule_id}"
-                        );
-                        continue;
-                    };
-
-                    if let Err(error) = self
-                        .trade_log
-                        .append(self.trade_log_entry(log, rule_id, order, result, candle))
-                    {
-                        eprintln!("[live_session] failed to append trade log: {error}");
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn trade_log_entry(
-        &self,
-        log: &LogEntry,
-        rule_id: &str,
-        order: &Order,
-        result: &OrderResult,
-        candle: &Candle,
-    ) -> TradeLogEntry {
-        TradeLogEntry {
-            id: log.id.clone(),
-            timestamp: timestamp_to_rfc3339(result.timestamp.max(log.timestamp)),
-            strategy_id: self.strategy_id.clone(),
-            strategy_name: self.strategy_name.clone(),
-            symbol: order.symbol.clone(),
-            side: order_side(order.side).to_string(),
-            quantity: i64::from(order.quantity),
-            price: order.price.unwrap_or(candle.close),
-            order_id: result.order_id.clone(),
-            order_status: format!("{:?}", result.status),
-            mode: "live".to_string(),
-            rule_id: rule_id.to_string(),
-            notes: String::new(),
-        }
-    }
-}
-
-fn order_side(side: OrderSide) -> &'static str {
-    match side {
-        OrderSide::Buy => "BUY",
-        OrderSide::Sell => "SELL",
-    }
-}
-
-fn timestamp_to_rfc3339(timestamp: i64) -> String {
-    DateTime::<Utc>::from_timestamp_millis(timestamp)
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339()
 }

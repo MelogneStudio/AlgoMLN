@@ -7,16 +7,27 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use crate::{
     broker::{
         dhan::{DhanClient, DhanError},
         BrokerClient,
     },
-    models::{Order, OrderResult, Position},
+    live::trade_log::{TradeLog, TradeLogEntry},
+    models::{Order, OrderResult, OrderSide, Position},
 };
 
 use super::target::{ExecutionError, ExecutionErrorKind, ExecutionTarget};
+
+/// Immutable context set once per live session. Read by `execute_with_meta`
+/// to populate the trade log entry.
+#[derive(Debug, Clone)]
+pub struct SessionContext {
+    pub strategy_id: String,
+    pub strategy_name: String,
+    pub mode: String,
+}
 
 /// How often the background task refreshes the realized-loss cache.
 const REFRESH_INTERVAL_SECS: u64 = 10;
@@ -38,12 +49,30 @@ impl PositionsSource for DhanClient {
     }
 }
 
+/// Abstraction over "place an order" so `execute_with_meta` can be
+/// unit-tested without a live HTTP client. Production wires this to
+/// `Arc<DhanClient>`; tests inject a mock.
+#[async_trait]
+trait OrderPlacer: Send + Sync + std::fmt::Debug {
+    async fn place(&self, order: Order) -> anyhow::Result<OrderResult>;
+}
+
+#[async_trait]
+impl OrderPlacer for DhanClient {
+    async fn place(&self, order: Order) -> anyhow::Result<OrderResult> {
+        self.place_order(order).await
+    }
+}
+
 #[derive(Debug)]
 pub struct DhanBroker {
     client: Arc<DhanClient>,
     /// Positions source driving the realized-loss refresh. Same object as
     /// `client` in production; a mock in tests.
     positions_source: Arc<dyn PositionsSource>,
+    /// Order placer used by `execute_with_meta`. Same object as `client` in
+    /// production; a mock in tests.
+    order_placer: Arc<dyn OrderPlacer>,
     /// Cached realized-loss magnitude in rupees, always non-negative. See
     /// [`ExecutionTarget::realized_loss`] on this type for the exact
     /// definition. Refreshed by a background task every
@@ -61,17 +90,26 @@ pub struct DhanBroker {
     /// Handle to the background refresh task, aborted on drop so tests (and
     /// short-lived sessions) do not leak tasks.
     refresh_task: Mutex<Option<JoinHandle<()>>>,
+    /// Append-only trade log. Every successfully placed order is recorded here
+    /// regardless of which code path invoked `execute` or `execute_with_meta`.
+    pub trade_log: Arc<TradeLog>,
+    /// Per-session strategy context (id, name, mode). Set by `LiveSession::start`,
+    /// cleared on stop. `None` outside an active live session.
+    pub session_context: Arc<RwLock<Option<SessionContext>>>,
 }
 
 impl DhanBroker {
-    pub fn new(client: Arc<DhanClient>) -> Self {
+    pub fn new(client: Arc<DhanClient>, trade_log: Arc<TradeLog>) -> Self {
         let positions_source: Arc<dyn PositionsSource> = client.clone();
-        Self::spawn_with_source(client, positions_source)
+        let order_placer: Arc<dyn OrderPlacer> = client.clone();
+        Self::spawn_with_source(client, positions_source, order_placer, trade_log)
     }
 
     fn spawn_with_source(
         client: Arc<DhanClient>,
         positions_source: Arc<dyn PositionsSource>,
+        order_placer: Arc<dyn OrderPlacer>,
+        trade_log: Arc<TradeLog>,
     ) -> Self {
         let realized_loss = Arc::new(RwLock::new(0.0));
         let consecutive_failures = Arc::new(AtomicU32::new(0));
@@ -108,10 +146,13 @@ impl DhanBroker {
         Self {
             client,
             positions_source,
+            order_placer,
             realized_loss,
             consecutive_failures,
             stale,
             refresh_task: Mutex::new(refresh_task),
+            trade_log,
+            session_context: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -135,6 +176,77 @@ impl DhanBroker {
     /// while stale — the live session loop pauses instead.
     pub fn is_stale(&self) -> bool {
         self.stale.load(Ordering::Relaxed)
+    }
+
+    /// Place an order and record it in the trade log with caller-supplied
+    /// metadata. This is the primary execution path. The `ExecutionTarget::execute`
+    /// trait method delegates here with empty `rule_id`/`notes` so the audit log
+    /// is always written regardless of call path.
+    ///
+    /// If appending to the trade log fails, an error is printed but NOT returned —
+    /// the order has already been placed and we must not falsely signal failure.
+    pub async fn execute_with_meta(
+        &self,
+        order: Order,
+        rule_id: &str,
+        notes: &str,
+    ) -> Result<OrderResult, ExecutionError> {
+        let result = match self.order_placer.place(order.clone()).await {
+            Ok(result) => result,
+            Err(error) => return Err(map_place_order_error(error)),
+        };
+
+        // Refresh realized-loss cache immediately after placement.
+        self.refresh_realized_loss().await;
+
+        let classified = classify_result(result)?;
+
+        // Build and append the trade log entry. Log failures must not surface
+        // as order failures — the order is already through the broker.
+        let ctx = self.session_context.read().clone();
+        if ctx.is_none() {
+            eprintln!(
+                "[dhan_broker] execute_with_meta called with no active SessionContext — \
+                 order placed but session metadata will be empty in the trade log"
+            );
+        }
+        let (strategy_id, strategy_name, mode) = ctx
+            .map(|c| (c.strategy_id, c.strategy_name, c.mode))
+            .unwrap_or_else(|| (String::new(), String::new(), "live".to_string()));
+
+        let price = if classified.status.is_fill() {
+            order.price.unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        let entry = TradeLogEntry {
+            id: Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            strategy_id,
+            strategy_name,
+            symbol: order.symbol.clone(),
+            side: match order.side {
+                OrderSide::Buy => "BUY".to_string(),
+                OrderSide::Sell => "SELL".to_string(),
+            },
+            quantity: i64::from(order.quantity),
+            price,
+            order_id: classified.order_id.clone(),
+            order_status: format!("{:?}", classified.status),
+            mode,
+            rule_id: rule_id.to_string(),
+            notes: notes.to_string(),
+        };
+
+        if let Err(io_err) = self.trade_log.append(entry) {
+            eprintln!(
+                "[dhan_broker] WARN: failed to append trade log for order {}: {io_err}",
+                classified.order_id
+            );
+        }
+
+        Ok(classified)
     }
 }
 
@@ -184,18 +296,11 @@ async fn refresh_once(
 
 #[async_trait]
 impl ExecutionTarget for DhanBroker {
+    /// Delegates to [`DhanBroker::execute_with_meta`] with empty rule/notes so
+    /// every execution path — including plugins that call through the trait
+    /// object — still writes to the trade log.
     async fn execute(&self, order: Order) -> Result<OrderResult, ExecutionError> {
-        let result = match self.client.place_order(order).await {
-            Ok(result) => result,
-            Err(error) => return Err(map_place_order_error(error)),
-        };
-
-        // Refresh the realized-loss cache immediately so the risk gate sees the
-        // freshest number the broker can give us; the periodic task keeps it
-        // current between orders.
-        self.refresh_realized_loss().await;
-
-        classify_result(result)
+        self.execute_with_meta(order, "", "").await
     }
 
     async fn get_positions(&self) -> Result<Vec<Position>, ExecutionError> {
@@ -285,18 +390,29 @@ mod tests {
 
     use crate::{
         broker::dhan::{DhanAuth, DhanClient, DhanError},
-        models::{OrderResult, OrderStatus, Position},
+        live::trade_log::{TradeLog, TradeLogEntry},
+        models::{Order, OrderResult, OrderSide, OrderStatus, OrderType, Position},
         strategy::execution::{ExecutionError, ExecutionErrorKind, ExecutionTarget},
     };
 
     use super::{
-        classify_result, map_place_order_error, DhanBroker, PositionsSource,
-        MAX_CONSECUTIVE_FAILURES,
+        classify_result, map_place_order_error, DhanBroker, OrderPlacer, PositionsSource,
+        SessionContext, MAX_CONSECUTIVE_FAILURES,
     };
+
+    fn temp_trade_log() -> (Arc<TradeLog>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trade_log.jsonl");
+        let log = Arc::new(TradeLog::open(path).unwrap());
+        (log, dir)
+    }
 
     fn broker() -> DhanBroker {
         let auth = DhanAuth::new("test-token").unwrap();
-        DhanBroker::new(Arc::new(DhanClient::new(auth)))
+        let (log, _dir) = temp_trade_log();
+        // _dir intentionally leaked: the TempDir must outlive the broker in these tests.
+        // For simple property tests the log path doesn't matter.
+        DhanBroker::new(Arc::new(DhanClient::new(auth)), log)
     }
 
     #[derive(Debug)]
@@ -315,6 +431,19 @@ mod tests {
         }
     }
 
+    /// Mock `OrderPlacer` that always returns a fixed `OrderResult`.
+    #[derive(Debug)]
+    struct MockOrderPlacer {
+        result: OrderResult,
+    }
+
+    #[async_trait]
+    impl OrderPlacer for MockOrderPlacer {
+        async fn place(&self, _order: Order) -> anyhow::Result<OrderResult> {
+            Ok(self.result.clone())
+        }
+    }
+
     fn position_with_pnl(realized_pnl: f64) -> Position {
         Position {
             symbol: "TEST".to_string(),
@@ -330,13 +459,39 @@ mod tests {
     /// refresh task, so refresh timing in tests is fully explicit.
     fn broker_with_source(source: Arc<dyn PositionsSource>) -> DhanBroker {
         let client = Arc::new(DhanClient::new(DhanAuth::new("test-token").unwrap()));
+        let (log, _dir) = temp_trade_log();
         DhanBroker {
-            client,
+            client: client.clone(),
             positions_source: source,
+            order_placer: client,
             realized_loss: Arc::new(RwLock::new(0.0)),
             consecutive_failures: Arc::new(AtomicU32::new(0)),
             stale: Arc::new(AtomicBool::new(false)),
             refresh_task: Mutex::new(None),
+            trade_log: log,
+            session_context: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Build a broker with injectable positions + order sources and a real
+    /// temp-file `TradeLog`. Returns the `TempDir` guard so the caller keeps
+    /// the directory alive.
+    fn broker_with_mocks(
+        positions: Arc<dyn PositionsSource>,
+        orders: Arc<dyn OrderPlacer>,
+        trade_log: Arc<TradeLog>,
+    ) -> DhanBroker {
+        let client = Arc::new(DhanClient::new(DhanAuth::new("test-token").unwrap()));
+        DhanBroker {
+            client,
+            positions_source: positions,
+            order_placer: orders,
+            realized_loss: Arc::new(RwLock::new(0.0)),
+            consecutive_failures: Arc::new(AtomicU32::new(0)),
+            stale: Arc::new(AtomicBool::new(false)),
+            refresh_task: Mutex::new(None),
+            trade_log,
+            session_context: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -433,5 +588,69 @@ mod tests {
         ));
         assert!(mapped.message.contains("check broker app"));
         assert!(mapped.message.contains("algomln-abc"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_writes_trade_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("trade_log.jsonl");
+        let trade_log = Arc::new(TradeLog::open(log_path.clone()).unwrap());
+
+        let order_result = OrderResult {
+            order_id: "order-traded-1".to_string(),
+            status: OrderStatus::Traded,
+            timestamp: 0,
+            correlation_id: "algomln-test-trade".to_string(),
+        };
+
+        let positions_source = Arc::new(MockPositions {
+            positions: Vec::new(),
+            fail: false,
+        });
+        let order_placer = Arc::new(MockOrderPlacer {
+            result: order_result,
+        });
+
+        let broker = broker_with_mocks(positions_source, order_placer, trade_log);
+
+        // Set a SessionContext so the log entry carries real strategy metadata.
+        *broker.session_context.write() = Some(SessionContext {
+            strategy_id: "strat-42".to_string(),
+            strategy_name: "Momentum Cross".to_string(),
+            mode: "live".to_string(),
+        });
+
+        let order = Order {
+            symbol: "NIFTY".to_string(),
+            side: OrderSide::Buy,
+            quantity: 5,
+            order_type: OrderType::Market,
+            price: Some(22500.0),
+        };
+
+        let result = broker
+            .execute_with_meta(order, "rule-1", "stop_loss")
+            .await
+            .expect("execute_with_meta must succeed for a TRADED result");
+
+        assert!(result.status.is_fill());
+
+        // Read back and verify.
+        let entries = TradeLog::read_all(&log_path).unwrap();
+        assert_eq!(entries.len(), 1, "exactly one trade log entry expected");
+        let entry = &entries[0];
+        assert_eq!(entry.rule_id, "rule-1");
+        assert_eq!(entry.notes, "stop_loss");
+        assert_eq!(entry.strategy_id, "strat-42");
+        assert_eq!(entry.strategy_name, "Momentum Cross");
+        assert_eq!(entry.symbol, "NIFTY");
+        assert_eq!(entry.side, "BUY");
+        assert_eq!(entry.quantity, 5);
+        assert_eq!(entry.price, 22500.0);
+        assert_eq!(entry.order_id, "order-traded-1");
+        assert_eq!(entry.order_status, "Traded");
+        assert_eq!(entry.mode, "live");
+        // id must be a non-empty uuid string
+        assert!(!entry.id.is_empty());
     }
 }
