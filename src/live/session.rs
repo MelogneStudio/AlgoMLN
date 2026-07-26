@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
+/// Maximum number of completed candles kept in `candle_history`. Older candles
+/// are dropped from the front once this is exceeded. The engine only needs a
+/// bounded window; retaining the full day is dead weight over long sessions.
+const MAX_CANDLE_HISTORY: usize = 5000;
+
 use crate::{
     broker::Timeframe,
     feed::FeedManager,
@@ -125,10 +130,6 @@ impl LiveSession {
                             continue;
                         }
 
-                        if matches!(task_session.status(), SessionStatus::Paused) {
-                            continue;
-                        }
-
                         let Some(candle) = assembler.feed(&tick) else {
                             continue;
                         };
@@ -136,6 +137,12 @@ impl LiveSession {
                         let candles = {
                             let mut history = task_session.candle_history.lock().await;
                             history.push(candle.clone());
+                            // Keep only the most recent MAX_CANDLE_HISTORY candles; older
+                            // candles are dead weight once the indicator windows have slid past them.
+                            if history.len() > MAX_CANDLE_HISTORY {
+                                let excess = history.len() - MAX_CANDLE_HISTORY;
+                                history.drain(0..excess);
+                            }
                             history.clone()
                         };
 
@@ -155,11 +162,17 @@ impl LiveSession {
         Ok(session)
     }
 
+    /// Pause the session. Candle data continues to accumulate and the engine
+    /// still runs `on_candle` every minute — stop-loss, take-profit, and
+    /// risk-breach orders are **not** suppressed. Only new *entry* (BUY) orders
+    /// are blocked, via the broker's `paused_for_entries` flag.
     pub fn pause(&self) {
+        self.broker.set_paused_for_entries(true);
         *self.status.write() = SessionStatus::Paused;
     }
 
     pub fn resume(&self) {
+        self.broker.set_paused_for_entries(false);
         *self.status.write() = SessionStatus::Running;
     }
 
@@ -178,5 +191,30 @@ impl LiveSession {
     pub fn status(&self) -> SessionStatus {
         self.status.read().clone()
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Candle;
+
+    fn make_candle(ts: i64) -> Candle {
+        Candle { timestamp: ts, open: 100.0, high: 101.0, low: 99.0, close: 100.5, volume: 1000.0 }
+    }
+
+    #[test]
+    fn test_candle_history_capped() {
+        let mut history: Vec<Candle> = (0..(MAX_CANDLE_HISTORY as i64 + 100))
+            .map(make_candle)
+            .collect();
+        // Apply the same logic as the tick loop.
+        if history.len() > MAX_CANDLE_HISTORY {
+            let excess = history.len() - MAX_CANDLE_HISTORY;
+            history.drain(0..excess);
+        }
+        assert_eq!(history.len(), MAX_CANDLE_HISTORY);
+        // Oldest 100 candles (timestamps 0..100) were evicted; first remaining is 100.
+        assert_eq!(history[0].timestamp, 100);
+        assert_eq!(history[MAX_CANDLE_HISTORY - 1].timestamp, MAX_CANDLE_HISTORY as i64 + 99);
+    }
 }

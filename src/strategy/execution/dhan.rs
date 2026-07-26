@@ -96,6 +96,10 @@ pub struct DhanBroker {
     /// Per-session strategy context (id, name, mode). Set by `LiveSession::start`,
     /// cleared on stop. `None` outside an active live session.
     pub session_context: Arc<RwLock<Option<SessionContext>>>,
+    /// When true, BUY (entry) orders are suppressed in `execute_with_meta`.
+    /// SELL orders (stop-loss, take-profit, risk-breach closes) always execute.
+    /// Set by `LiveSession::pause`, cleared by `LiveSession::resume`.
+    paused_for_entries: Arc<AtomicBool>,
 }
 
 impl DhanBroker {
@@ -114,6 +118,7 @@ impl DhanBroker {
         let realized_loss = Arc::new(RwLock::new(0.0));
         let consecutive_failures = Arc::new(AtomicU32::new(0));
         let stale = Arc::new(AtomicBool::new(false));
+        let paused_for_entries = Arc::new(AtomicBool::new(false));
 
         // Spawn the periodic refresh only when a Tokio runtime is available.
         // Plain `#[test]` constructions (and any non-async caller) simply get
@@ -153,6 +158,7 @@ impl DhanBroker {
             refresh_task: Mutex::new(refresh_task),
             trade_log,
             session_context: Arc::new(RwLock::new(None)),
+            paused_for_entries,
         }
     }
 
@@ -178,6 +184,14 @@ impl DhanBroker {
         self.stale.load(Ordering::Relaxed)
     }
 
+    /// Enable or disable entry-order suppression. Called by `LiveSession::pause`
+    /// (set `true`) and `LiveSession::resume` (set `false`). When set, BUY orders
+    /// are rejected before reaching the broker; SELL orders (SL, TP, risk-breach
+    /// closes) always go through so open positions remain protected.
+    pub fn set_paused_for_entries(&self, paused: bool) {
+        self.paused_for_entries.store(paused, Ordering::Relaxed);
+    }
+
     /// Place an order and record it in the trade log with caller-supplied
     /// metadata. This is the primary execution path. The `ExecutionTarget::execute`
     /// trait method delegates here with empty `rule_id`/`notes` so the audit log
@@ -191,6 +205,21 @@ impl DhanBroker {
         rule_id: &str,
         notes: &str,
     ) -> Result<OrderResult, ExecutionError> {
+        // When the session is paused, entry (BUY) orders are suppressed so the
+        // user does not accidentally open new positions. SELL orders (stop-loss,
+        // take-profit, risk-breach closes) always execute to protect open positions.
+        if self.paused_for_entries.load(Ordering::Relaxed) && order.side == OrderSide::Buy {
+            eprintln!(
+                "[dhan_broker] session paused: skipping entry BUY order for {}",
+                order.symbol
+            );
+            let msg = format!("session paused: entry order for {} suppressed", order.symbol);
+            return Err(ExecutionError {
+                message: msg.clone(),
+                kind: ExecutionErrorKind::BrokerError(msg),
+            });
+        }
+
         let result = match self.order_placer.place(order.clone()).await {
             Ok(result) => result,
             Err(error) => return Err(map_place_order_error(error)),
@@ -470,6 +499,7 @@ mod tests {
             refresh_task: Mutex::new(None),
             trade_log: log,
             session_context: Arc::new(RwLock::new(None)),
+            paused_for_entries: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -492,6 +522,7 @@ mod tests {
             refresh_task: Mutex::new(None),
             trade_log,
             session_context: Arc::new(RwLock::new(None)),
+            paused_for_entries: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -588,6 +619,59 @@ mod tests {
         ));
         assert!(mapped.message.contains("check broker app"));
         assert!(mapped.message.contains("algomln-abc"));
+    }
+
+    #[tokio::test]
+    async fn test_paused_suppresses_buy_orders() {
+        let (log, _dir) = temp_trade_log();
+        let positions = Arc::new(MockPositions { positions: Vec::new(), fail: false });
+        let order_placer = Arc::new(MockOrderPlacer {
+            result: OrderResult {
+                order_id: "test-order".to_string(),
+                status: OrderStatus::Traded,
+                timestamp: 0,
+                correlation_id: "algomln-test".to_string(),
+            },
+        });
+        let broker = broker_with_mocks(positions, order_placer, log);
+        broker.set_paused_for_entries(true);
+
+        let buy_order = Order {
+            symbol: "RELIANCE".to_string(),
+            side: OrderSide::Buy,
+            quantity: 1,
+            order_type: OrderType::Market,
+            price: None,
+        };
+        let result = broker.execute_with_meta(buy_order, "", "").await;
+        assert!(result.is_err(), "BUY order must be suppressed when paused");
+        assert!(result.unwrap_err().message.contains("session paused"));
+    }
+
+    #[tokio::test]
+    async fn test_paused_allows_sell_orders() {
+        let (log, _dir) = temp_trade_log();
+        let positions = Arc::new(MockPositions { positions: Vec::new(), fail: false });
+        let order_placer = Arc::new(MockOrderPlacer {
+            result: OrderResult {
+                order_id: "test-sell".to_string(),
+                status: OrderStatus::Traded,
+                timestamp: 0,
+                correlation_id: "algomln-test".to_string(),
+            },
+        });
+        let broker = broker_with_mocks(positions, order_placer, log);
+        broker.set_paused_for_entries(true);
+
+        let sell_order = Order {
+            symbol: "RELIANCE".to_string(),
+            side: OrderSide::Sell,
+            quantity: 1,
+            order_type: OrderType::Market,
+            price: None,
+        };
+        let result = broker.execute_with_meta(sell_order, "", "").await;
+        assert!(result.is_ok(), "SELL order must go through when paused (exit orders always execute)");
     }
 
     #[tokio::test]
