@@ -16,14 +16,18 @@ use algomln::{
         strategy::{run_backtest_dsl, BacktestResultWire},
     },
     indices::{refresh_all_if_stale, IndexRegistry},
-    live::trade_log::{TradeLog, TradeLogEntry},
+    live::{
+        guard::LiveGuard,
+        holidays::NseHolidayCalendar,
+        trade_log::{TradeLog, TradeLogEntry},
+    },
     models::{Candle, Quote},
     plugin::{
         api::{
             analytics::SharedAnalyticsRegistry,
             dsl_extension::SharedDslExtensionRegistry,
             events::EventBus,
-                execution::NoopExecutionApi,
+            execution::{NoopExecutionApi, ReadOnlyLiveExecutionApi},
             indicator_registry::SharedIndicatorRegistry,
             log_file::RateLimitedFileLog,
             market_data::BrokerMarketDataApi,
@@ -179,6 +183,59 @@ async fn get_trade_log(state: State<'_, AppState>) -> Result<Vec<TradeLogEntry>,
     commands::live::get_trade_log(state).await
 }
 
+// ---------- Live session IPC ----------
+//
+// All Phase-7 live commands live here as thin wrappers. The actual
+// implementations live in `commands::live` because `#[tauri::command]`
+// generates module-private macro artifacts (`__cmd__name` etc.) that
+// `tauri::generate_handler!` resolves in the same scope.
+
+#[tauri::command]
+async fn request_live_start(
+    state: State<'_, AppState>,
+    strategy_id: String,
+) -> Result<commands::live::RequestLiveStartResult, String> {
+    commands::live::request_live_start(state, strategy_id).await
+}
+
+#[tauri::command]
+async fn confirm_live_start(
+    state: State<'_, AppState>,
+    strategy_id: String,
+    token: String,
+) -> Result<(), String> {
+    commands::live::confirm_live_start(state, strategy_id, token).await
+}
+
+#[tauri::command]
+async fn acknowledge_live_trading(state: State<'_, AppState>) -> Result<(), String> {
+    commands::live::acknowledge_live_trading(state).await
+}
+
+#[tauri::command]
+async fn pause_live_strategy(state: State<'_, AppState>) -> Result<(), String> {
+    commands::live::pause_live_strategy(state).await
+}
+
+#[tauri::command]
+async fn resume_live_strategy(state: State<'_, AppState>) -> Result<(), String> {
+    commands::live::resume_live_strategy(state).await
+}
+
+#[tauri::command]
+async fn stop_live_strategy(
+    state: State<'_, AppState>,
+) -> Result<commands::live::StopResult, String> {
+    commands::live::stop_live_strategy(state).await
+}
+
+#[tauri::command]
+async fn get_live_status(
+    state: State<'_, AppState>,
+) -> Result<Option<commands::live::LiveStatusWire>, String> {
+    commands::live::get_live_status(state).await
+}
+
 fn main() {
     load_dotenv();
 
@@ -245,9 +302,32 @@ fn main() {
             };
             let symbol_map = Arc::new(parking_lot::RwLock::new(symbol_map));
 
-            let data =
-                commands::data::DataState::dhan_from_env_with_symbol_map(symbol_map.clone())
-                    .expect("Set DHAN_ACCESS_TOKEN in .env before starting the Tauri app");
+            // Phase 7 — DhanBroker needs the trade log so it can persist
+            // every successful order placement. Construct it first so
+            // LiveGuard (which references the broker) can be built below.
+            // `DhanBroker::new` spawns a background realized-loss refresher
+            // on the multi-thread tokio runtime that Tauri 2 installs.
+            let dhan_client = algomln::broker::dhan::DhanClient::with_symbol_map(
+                algomln::broker::dhan::DhanAuth::from_env()
+                    .expect("Set DHAN_ACCESS_TOKEN in .env before starting the Tauri app"),
+                symbol_map.clone(),
+            );
+            let dhan_client = Arc::new(dhan_client);
+            let dhan_broker = Arc::new(algomln::strategy::execution::DhanBroker::new(
+                dhan_client.clone(),
+                trade_log.clone(),
+            ));
+            // DataState holds the trait-object view the rest of the app
+            // already uses for OHLCV/quote/subscribe calls, plus the
+            // shared DhanBroker and raw DhanClient so LiveGuard can be
+            // wired without duplicating construction.
+            let data = commands::data::DataState {
+                broker: dhan_client.clone(),
+                feed: Arc::new(Mutex::new(algomln::feed::FeedManager::new())),
+                dhan_broker: Some(dhan_broker.clone()),
+                dhan_client: Some(dhan_client.clone()),
+            };
+
             let store_path = store_dir.join("strategies.json");
             let registry = StrategyRegistry::open(store_path.clone())
                 .unwrap_or_else(|error| {
@@ -282,14 +362,47 @@ fn main() {
             let scheduler = CronScheduler::new();
 
             // The plugin's "market data" capability is backed by the same
-            // broker the rest of the app uses (Dhan in production). The
-            // "execution" capability is a no-op stub for now — see
-            // `src/plugin/api/execution.rs`.
+            // broker the rest of the app uses (Dhan in production).
+            //
+            // The "execution" capability is **read-only** in Phase 7:
+            // plugins can inspect positions during a live session but
+            // cannot submit orders. Live orders must originate from the
+            // strategy engine so `MAX_DAILY_LOSS`, market-hours, session
+            // pause, and trade-log context gates cover every real order.
+            // We swap from `NoopExecutionApi` to `ReadOnlyLiveExecutionApi`
+            // inside the `HostFactory` once a session is live.
             let broker_arc = data.broker.clone();
             let market_data_api: Arc<dyn algomln::plugin::api::MarketDataApi> =
                 Arc::new(BrokerMarketDataApi::new(broker_arc));
             let execution_api: Arc<dyn algomln::plugin::api::ExecutionApi> =
                 Arc::new(NoopExecutionApi);
+
+            // Phase 7 — live session machinery. The session slot is
+            // shared with the HostFactory closure so that plugin hosts
+            // constructed during an active session get a
+            // `ReadOnlyLiveExecutionApi` instead of the no-op.
+            let live_session_slot: Arc<tokio::sync::Mutex<Option<Arc<algomln::live::session::LiveSession>>>> =
+                Arc::new(tokio::sync::Mutex::new(None));
+            let pending_live_token: Arc<tokio::sync::Mutex<Option<algomln::live::guard::PendingLiveToken>>> =
+                Arc::new(tokio::sync::Mutex::new(None));
+
+            // Capture the multi-thread tokio runtime handle here so the
+            // factory can pass it into `ReadOnlyLiveExecutionApi::new`.
+            // The plugin callback may run on a non-tokio thread, so we
+            // must never call `Handle::current()` from inside a plugin.
+            let runtime_handle = tokio::runtime::Handle::current();
+
+            // LiveGuard construction must follow DhanBroker construction
+            // (the guard holds a clone of the broker and the client).
+            let ack_path = store_dir.join("live_ack.json");
+            let holiday_calendar = Arc::new(NseHolidayCalendar::new());
+            let live_guard = Arc::new(LiveGuard::new(
+                dhan_client.clone(),
+                symbol_map.clone(),
+                dhan_broker.clone(),
+                ack_path.clone(),
+                holiday_calendar,
+            ));
 
             // Per-plugin storage lives under `<app_data>/plugins/<plugin_id>/storage`.
             let plugins_dir = store_dir.join("plugins");
@@ -303,6 +416,11 @@ fn main() {
             let logs_dir = store_dir.join("logs");
             let _ = std::fs::create_dir_all(&logs_dir);
             let logs_dir_for_factory = logs_dir.clone();
+
+            // Clones used by the HostFactory closure below to pick a
+            // live execution API when a session is active.
+            let live_session_slot_for_factory = live_session_slot.clone();
+            let runtime_handle_for_factory = runtime_handle.clone();
 
             let host_factory: algomln::plugin::registry::HostFactory = Arc::new(
                 move |id: algomln::plugin::PluginId,
@@ -324,10 +442,42 @@ fn main() {
                         RateLimitedFileLog::open(&logs_dir_for_factory, id.clone())
                             .expect("plugin log file should be creatable"),
                     );
+                    // Phase 7 — pick the live or no-op execution API based
+                    // on whether a live session is currently running.
+                    // Plugins loaded mid-session get read-only access to
+                    // the same broker the engine is using; plugins loaded
+                    // outside a session get the no-op stub.
+                    let exec: Arc<dyn algomln::plugin::api::ExecutionApi> = {
+                        // Try to acquire the lock briefly. If a session
+                        // start is in flight we'll fall through to the
+                        // no-op; the next `scan_and_load` (or hot
+                        // reload) will re-evaluate. The lock is a
+                        // `tokio::sync::Mutex` so `.lock()` is async —
+                        // the host factory closure is sync, so we use
+                        // `try_lock` and accept the race. In practice
+                        // plugins load once at startup before any
+                        // session is started, so the race is benign.
+                        if let Ok(slot) = live_session_slot_for_factory.try_lock() {
+                            if let Some(session) = slot.as_ref() {
+                                Arc::new(ReadOnlyLiveExecutionApi::new(
+                                    session.broker.clone(),
+                                    runtime_handle_for_factory.clone(),
+                                ))
+                            } else {
+                                execution_api.clone()
+                            }
+                        } else {
+                            // Lock contended (very rare): a session is
+                            // starting right now. Default to the no-op
+                            // to keep the plugin host construction
+                            // deterministic.
+                            execution_api.clone()
+                        }
+                    };
                     algomln::plugin::host::PluginHostBuilder {
                         id: id.clone(),
                         market_data: market_data_api.clone(),
-                        execution: execution_api.clone(),
+                        execution: exec,
                         storage,
                         event_bus: event_bus.clone(),
                         indicators: indicator_registry.clone(),
@@ -479,7 +629,11 @@ fn main() {
                 symbol_map,
                 trade_log,
                 trade_log_path,
-                live_session: Arc::new(Mutex::new(None)),
+                live_session,
+                live_guard,
+                pending_live_token,
+                ack_path,
+                app_handle,
             });
             Ok(())
         })
@@ -501,6 +655,13 @@ fn main() {
             refresh_indices,
             search_symbols,
             get_trade_log,
+            request_live_start,
+            confirm_live_start,
+            acknowledge_live_trading,
+            pause_live_strategy,
+            resume_live_strategy,
+            stop_live_strategy,
+            get_live_status,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AlgoMLN");

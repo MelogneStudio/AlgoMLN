@@ -54,7 +54,7 @@ AlgoMLN/
 │   │   │   ├── analytics.rs    SharedAnalyticsRegistry (plugin-id dedup)
 │   │   │   ├── dsl_extension.rs  SharedDslExtensionRegistry (DSL keyword registration)
 │   │   │   ├── events.rs       EventBus + EventKind + EventFilter (pub/sub)
-│   │   │   ├── execution.rs    NoopExecutionApi — stub until wired into engine
+│   │   │   ├── execution.rs    NoopExecutionApi + ReadOnlyLiveExecutionApi — plugins can inspect positions in a live session but cannot submit orders in Phase 7
 │   │   │   ├── scheduler.rs    CronScheduler — cron + CancellationToken per task
 │   │   │   ├── log.rs          NamespacedLog — eprintln! gated by plugin_id (CLI)
 │   │   │   ├── log_file.rs     RateLimitedFileLog — token-bucket rate limit + 5MB rolling file per plugin
@@ -164,7 +164,7 @@ AlgoMLN/
 | Broadcast pub/sub for plugin subscribers (no engine coupling) | `src/plugin/api/events.rs` (`EventBus`, `EventKind`) |
 | Engine event-bus hook (publishes `RuleFired` / `TradeExecuted` / `CandleProcessed` from `on_candle`) | `src/strategy/runtime/engine.rs` (`StrategyEngine::event_bus`, `latest_paper_trade`) |
 | DSL keyword registration (plugin-extensible AST handlers) | `src/plugin/api/dsl_extension.rs` (`SharedDslExtensionRegistry`) |
-| Execution capability stub (rejects orders until wired into engine) | `src/plugin/api/execution.rs` (`NoopExecutionApi`) |
+| Execution capability (read-only in Phase 7; full order gateway deferred to Phase 8) | `src/plugin/api/execution.rs` (`NoopExecutionApi`, `ReadOnlyLiveExecutionApi`) |
 
 ### Plugin IPC (Tauri side)
 
@@ -185,7 +185,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
    | `TauriUiApi` | `register_panel` / `notify` / `emit_panel_data` (broadcast to the Tauri bus) |
    | `CronScheduler` | `schedule(cron, task)` / `cancel(handle)` |
    | `BrokerMarketDataApi` | wraps the same `DhanClient` the strategy layer uses |
-   | `NoopExecutionApi` | stub — `submit_order` returns `ApiError` until a future revision wires a real broker adapter |
+   | `NoopExecutionApi` / `ReadOnlyLiveExecutionApi` | `Noop` when no live session is active; `ReadOnly` swaps in once a session is running (plugins can call `positions()` but `submit_order`/`cancel_order` return `ApiError` in Phase 7) |
    | `PluginKvStore` | per-plugin sandboxed file KV under `<app_data>/plugins/<id>/storage` |
    | `NamespacedLog` | `eprintln!` gated by plugin id (CLI path) |
    | `RateLimitedFileLog` | per-plugin token-bucket (10/sec burst, 100/min) + 5MB rolling file under `<app_data>/logs/plugin-<id>.log` (Tauri path) |
@@ -241,7 +241,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | NSE trading-day holiday calendar | `src/live/holidays.rs` |
 | Live session manager (single active live strategy) | `src/live/session.rs` |
 | Immutable live trade log (append-only JSONL) | `src/live/trade_log.rs` |
-| Trade log IPC reader + `request_live_start` / `confirm_live_start` / `acknowledge_live_trading` | `src/commands/live.rs` |
+| Trade log IPC reader + live session IPC (`request_live_start` / `confirm_live_start` / `acknowledge_live_trading` / `pause_live_strategy` / `resume_live_strategy` / `stop_live_strategy` / `get_live_status`) | `src/commands/live.rs` |
 | BrokerClient trait (data fetch) | `src/broker/mod.rs` |
 | Dhan auth / REST orders, positions, market data / WebSocket | `src/broker/dhan/{auth,rest,websocket,models}.rs` |
 | Timeframe enum + Dhan interval strings | `src/broker/mod.rs` |
@@ -272,7 +272,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | Backtest orchestrator + wire types | `src/commands/strategy.rs` (`run_backtest_dsl`, `validate_dsl`, `BacktestResultWire`, `PaperTradeWire`) |
 | Strategy registry (deploy/list/set_status) | `src/commands/registry.rs` |
 | Index / symbol-map commands (list/get/refresh) | `src/commands/indices.rs` |
-| Active live session slot | `src/commands/state.rs` (`AppState.live_session`) |
+| Active live session slot + `DhanBroker` shared with the plugin execution API | `src/commands/state.rs` (`AppState.live_session`, `AppState.data.dhan_broker`) |
 | LiveGuard + pending token + ack file path + app handle | `src/commands/state.rs` (`AppState.live_guard`, `pending_live_token`, `ack_path`, `app_handle`) |
 | Registry persistence path | `%APPDATA%\com.algomln.app\strategies.json` on Windows (`app_data_dir` + `strategies.json`) |
 

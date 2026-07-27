@@ -294,3 +294,161 @@ async fn fetch_seed_candles(
         .await
         .map_err(|e| e.to_string())
 }
+
+// =============================================================================
+// Phase 7 — Pause / resume / stop / status
+// =============================================================================
+
+/// Pause the live session. New BUY orders are suppressed; SL/TP/risk-breach
+/// SELLs always execute. Idempotent — calling pause on an already-paused
+/// session is a no-op (the underlying broker flag is just set again).
+pub async fn pause_live_strategy(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let session = {
+        let slot = state.live_session.lock().await;
+        slot.as_ref()
+            .ok_or_else(|| "no live session".to_string())?
+            .clone()
+    };
+    session.pause();
+    Ok(())
+}
+
+/// Resume the live session. Only meaningful after a pause; calling resume on
+/// a non-paused session leaves it in `Running`.
+pub async fn resume_live_strategy(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let session = {
+        let slot = state.live_session.lock().await;
+        slot.as_ref()
+            .ok_or_else(|| "no live session".to_string())?
+            .clone()
+    };
+    session.resume();
+    Ok(())
+}
+
+/// Outcome of stopping the live session. `stopped` is always true on success;
+/// `open_positions_warning` carries a human-readable warning when the
+/// session left open positions or pending orders that the user must close
+/// manually in their broker app.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopResult {
+    pub stopped: bool,
+    /// Warning about state the user must handle manually.
+    /// e.g. "5 open positions and 2 pending orders remain in NIFTY —
+    /// close them manually in your broker app."
+    pub open_positions_warning: Option<String>,
+}
+
+/// Stop the live session, surface any open-position warning to the UI, and
+/// clear the session slot so a new one can be started.
+///
+/// Ordering matters: we take the session out of the slot, query positions,
+/// THEN stop the task. `LiveSession::stop` cancels the cancellation token
+/// and awaits the task — once `stop` returns the candle loop is gone and
+/// we must not hold any reference to it.
+pub async fn stop_live_strategy(
+    state: State<'_, AppState>,
+) -> Result<StopResult, String> {
+    // 1. Take the session out of the slot.
+    let session = state
+        .live_session
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| "no live session".to_string())?;
+
+    // 2. Query positions BEFORE stopping. We tolerate failure with an empty
+    //    list — better to surface "stopped cleanly" than to fail the stop
+    //    command because the broker was unreachable. The user can still see
+    //    open positions in their broker app.
+    let positions = session.broker.get_positions().await.unwrap_or_default();
+    let open_count = positions.iter().filter(|p| p.quantity != 0).count();
+
+    // 3. Stop the session (cancels tick loop, awaits task exit).
+    session.stop().await;
+
+    // 4. Emit an event so the UI toasts even if the user isn't looking at
+    //    the Live screen. The `app_handle` is `Option`-free — Tauri
+    //    always supplies one in the binary crate.
+    let warning = if open_count > 0 {
+        let msg = format!(
+            "WARNING: {} open position(s) remain — close them manually in your broker app. \
+             Pending limit orders are not auto-cancelled; please verify in your broker app.",
+            open_count
+        );
+        use tauri::Emitter;
+        let _ = state.app_handle.emit(
+            "live-session-stopped-with-positions",
+            serde_json::json!({ "warning": msg.clone() }),
+        );
+        Some(msg)
+    } else {
+        None
+    };
+
+    Ok(StopResult {
+        stopped: true,
+        open_positions_warning: warning,
+    })
+}
+
+/// Wire shape returned by `get_live_status`. `None` when no session is
+/// active — the UI distinguishes that from "session exists but idle" by
+/// absence alone (an idle strategy would still report a status).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveStatusWire {
+    pub strategy_id: String,
+    pub strategy_name: String,
+    pub symbol: String,
+    /// "Starting" | "Running" | "Paused" | "Stopped" | "Failed"
+    pub status: String,
+    pub fail_reason: Option<String>,
+    pub start_time: String,
+    pub position_count: i64,
+    /// Non-negative magnitude of session-realized losses in rupees.
+    pub realized_loss: f64,
+    /// True if the broker's loss-tracking refresh is failing.
+    pub loss_tracking_stale: bool,
+}
+
+/// Snapshot the current live session's status. Returns `Ok(None)` when no
+/// session is active so the UI can render an empty state.
+pub async fn get_live_status(
+    state: State<'_, AppState>,
+) -> Result<Option<LiveStatusWire>, String> {
+    let session = {
+        let slot = state.live_session.lock().await;
+        match slot.as_ref() {
+            Some(s) => s.clone(),
+            None => return Ok(None),
+        }
+    };
+    // Lock is released — we can await freely.
+
+    let positions = session.broker.get_positions().await.unwrap_or_default();
+    let (status_str, fail_reason) = match session.status() {
+        crate::live::session::SessionStatus::Starting => ("Starting".into(), None),
+        crate::live::session::SessionStatus::Running => ("Running".into(), None),
+        crate::live::session::SessionStatus::Paused => ("Paused".into(), None),
+        crate::live::session::SessionStatus::Stopped => ("Stopped".into(), None),
+        crate::live::session::SessionStatus::Failed(r) => ("Failed".into(), Some(r)),
+    };
+
+    Ok(Some(LiveStatusWire {
+        strategy_id: session.strategy_id.clone(),
+        strategy_name: session.strategy_name.clone(),
+        symbol: session.symbol.clone(),
+        status: status_str,
+        fail_reason,
+        start_time: session.start_time.to_rfc3339(),
+        position_count: positions.iter().filter(|p| p.quantity != 0).count() as i64,
+        realized_loss: session.broker.realized_loss(),
+        loss_tracking_stale: session.broker.is_stale(),
+    }))
+}
