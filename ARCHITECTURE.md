@@ -31,6 +31,8 @@ AlgoMLN/
 │   ├── live/                   Live strategy lifecycle + persistence helpers
 │   │   ├── mod.rs              module root
 │   │   ├── candle_assembler.rs Per-symbol 1-minute candles from live ticks
+│   │   ├── guard.rs            LiveGuard — 9 preflight safety gates (paper guard, broker reach, symbol/segment, market hours, risk controls, stale cache, ack file)
+│   │   ├── holidays.rs         NseHolidayCalendar — trading-day list (whole-day closures only; updated yearly)
 │   │   ├── session.rs          Single live session manager (engine + Dhan + feed task)
 │   │   └── trade_log.rs        Append-only JSONL live execution audit log
 │   ├── strategy/
@@ -235,9 +237,11 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | Dhan live broker (`ExecutionTarget`, `execute_with_meta`, `SessionContext`) | `src/strategy/execution/dhan.rs` |
 | `ActionNode` → `Order` builder | `src/strategy/execution/order_builder.rs` |
 | Live 1-minute candle assembler | `src/live/candle_assembler.rs` |
+| LiveGuard — 9-gate preflight + 90-second token + ack file | `src/live/guard.rs` |
+| NSE trading-day holiday calendar | `src/live/holidays.rs` |
 | Live session manager (single active live strategy) | `src/live/session.rs` |
 | Immutable live trade log (append-only JSONL) | `src/live/trade_log.rs` |
-| Trade log IPC reader (`get_trade_log`, newest first) | `src/commands/live.rs` |
+| Trade log IPC reader + `request_live_start` / `confirm_live_start` / `acknowledge_live_trading` | `src/commands/live.rs` |
 | BrokerClient trait (data fetch) | `src/broker/mod.rs` |
 | Dhan auth / REST orders, positions, market data / WebSocket | `src/broker/dhan/{auth,rest,websocket,models}.rs` |
 | Timeframe enum + Dhan interval strings | `src/broker/mod.rs` |
@@ -269,6 +273,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 | Strategy registry (deploy/list/set_status) | `src/commands/registry.rs` |
 | Index / symbol-map commands (list/get/refresh) | `src/commands/indices.rs` |
 | Active live session slot | `src/commands/state.rs` (`AppState.live_session`) |
+| LiveGuard + pending token + ack file path + app handle | `src/commands/state.rs` (`AppState.live_guard`, `pending_live_token`, `ack_path`, `app_handle`) |
 | Registry persistence path | `%APPDATA%\com.algomln.app\strategies.json` on Windows (`app_data_dir` + `strategies.json`) |
 
 ### Wire types & IPC contract

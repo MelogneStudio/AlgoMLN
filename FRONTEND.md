@@ -169,7 +169,7 @@ All IPC wrappers live in `src/types/tauri.ts` and are thin `invoke<T>(name, args
 
 The naming convention is camelCase on the TS side because that's what Tauri's invoke expects for argument keys.
 
-The Rust backend also registers `get_trade_log`, which returns immutable live execution log entries newest first from `<app_data>/trade_log.jsonl`. The backend now also stores a single active `LiveSession` slot in `AppState`, but start/pause/resume/stop IPC wrappers and UI consumers have not been added yet.
+The Rust backend also registers `get_trade_log`, which returns immutable live execution log entries newest first from `<app_data>/trade_log.jsonl`. The backend also stores a single active `LiveSession` slot in `AppState`, plus a `LiveGuard` safety-gate layer behind `request_live_start` / `confirm_live_start` / `acknowledge_live_trading` (Phase 7, Prompt 4). The preflight runs gates 1–8 (paper-default, broker reach, symbol/segment, market hours, risk controls, stale cache), issues a 90 s token, and either grants start or asks for one-time acknowledgment. Start/pause/resume/stop IPC wrappers and UI consumers are added in Phase 7 Prompt 5.
 
 ### Plugin UI messages
 

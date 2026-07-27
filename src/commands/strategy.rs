@@ -241,6 +241,29 @@ pub fn validate_dsl(dsl_source: &str) -> Vec<String> {
     errors
 }
 
+/// Lex + parse + validate, returning the parsed [`StrategyNode`] on success
+/// or the first error message as `Err`. Used by callers that need to inspect
+/// the AST (notably the live-start preflight, which reads `risk`).
+pub fn parse_and_validate_dsl(dsl_source: &str) -> Result<StrategyNode, String> {
+    let tokens = Lexer::tokenize(dsl_source)
+        .map_err(|error| format!("line {} col {}: {}", error.line, error.col, error.message))?;
+    let node = Parser::new(tokens)
+        .parse()
+        .map_err(|error| format!("line {} col {}: {}", error.line, error.col, error.message))?;
+
+    let validation_errors = AstValidator::validate(&node);
+    if !validation_errors.is_empty() {
+        let messages = validation_errors
+            .iter()
+            .map(|error| error.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("strategy validation failed: {messages}"));
+    }
+
+    Ok(node)
+}
+
 /// Orchestrates a full backtest from raw DSL text: lex/parse/validate, fetch
 /// candles (Dhan first, fallback CSV), run the engine, map to wire format.
 ///

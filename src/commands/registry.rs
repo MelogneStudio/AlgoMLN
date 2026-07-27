@@ -68,17 +68,20 @@ pub struct DeployedStrategy {
 /// On-disk shape. Identical fields to `DeployedStrategy` plus `deployed_at`
 /// (a millisecond timestamp used for stable ordering) and a single `mode`
 /// (since each record was deployed once with one mode).
+///
+/// `pub` so the live-start preflight (Phase 7) can use `StrategyRegistry::get`
+/// to access the `mode` and `dsl_source` of a single record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct DeployedStrategyRecord {
-    id: String,
-    name: String,
-    mode: StrategyMode,
-    status: StrategyStatus,
-    dsl_source: String,
-    description: String,
-    total_pnl: f64,
-    total_trades: usize,
-    deployed_at: i64,
+pub struct DeployedStrategyRecord {
+    pub id: String,
+    pub name: String,
+    pub mode: StrategyMode,
+    pub status: StrategyStatus,
+    pub dsl_source: String,
+    pub description: String,
+    pub total_pnl: f64,
+    pub total_trades: usize,
+    pub deployed_at: i64,
 }
 
 impl From<&DeployedStrategyRecord> for DeployedStrategy {
@@ -203,6 +206,16 @@ impl StrategyRegistry {
         let mut records = guard.values().cloned().collect::<Vec<_>>();
         records.sort_by_key(|record| record.deployed_at);
         Ok(records.iter().map(DeployedStrategy::from).collect())
+    }
+
+    /// Look up a single record by id. Returns `Ok(None)` if the id is
+    /// unknown; never errors for normal cases. Used by the live-start
+    /// preflight which needs the full `DeployedStrategyRecord` (including
+    /// `mode`, which the wire `DeployedStrategy` collapses into
+    /// `modes: Vec<StrategyMode>`).
+    pub async fn get(&self, id: &str) -> Result<Option<DeployedStrategyRecord>, String> {
+        let guard = self.inner.lock().await;
+        Ok(guard.get(id).cloned())
     }
 
     /// Flips the status of the matching strategy and persists.
