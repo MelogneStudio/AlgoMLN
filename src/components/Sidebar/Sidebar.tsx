@@ -83,6 +83,16 @@ const ITEMS: NavItem[] = [
     ),
   },
   {
+    id: 'live',
+    label: 'Live',
+    icon: (
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.8" />
+        <circle cx="12" cy="12" r="4" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
     id: 'settings',
     label: 'Settings',
     icon: (

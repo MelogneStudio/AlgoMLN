@@ -17,6 +17,7 @@ use crate::{
         trade_log::{TradeLog, TradeLogEntry},
     },
     strategy::dsl::TradeIn,
+    strategy::execution::target::ExecutionTarget,
 };
 
 /// Returns all entries from the trade log, newest first.

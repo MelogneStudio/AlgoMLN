@@ -8,6 +8,7 @@ interface StrategyCardProps {
   strategy: DeployedStrategy;
   onViewCode: (dsl: string, name: string) => void;
   onChanged: () => void;
+  onGoLive?: (id: string, name: string) => void;
 }
 
 function formatCurrency(value: number): string {
@@ -16,9 +17,10 @@ function formatCurrency(value: number): string {
   return `${sign}₹${abs.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
 
-export function StrategyCard({ strategy, onViewCode, onChanged }: StrategyCardProps) {
+export function StrategyCard({ strategy, onViewCode, onChanged, onGoLive }: StrategyCardProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isLiveMode = strategy.modes.includes('live');
 
   const handleToggle = async () => {
     setBusy(true);
@@ -34,6 +36,10 @@ export function StrategyCard({ strategy, onViewCode, onChanged }: StrategyCardPr
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleGoLive = () => {
+    onGoLive?.(strategy.id, strategy.name);
   };
 
   return (
@@ -115,6 +121,16 @@ export function StrategyCard({ strategy, onViewCode, onChanged }: StrategyCardPr
         >
           {strategy.status === 'running' ? 'Pause' : 'Resume'}
         </Button>
+        {strategy.status === 'running' && (
+          <p className={styles.pauseSubtitle}>
+            Pausing stops new entries only. Existing stops and risk rules continue to run.
+          </p>
+        )}
+        {isLiveMode && onGoLive && (
+          <Button variant="ghost" onClick={handleGoLive} className={styles.goLiveBtn}>
+            Go Live
+          </Button>
+        )}
         <Button
           variant="code"
           onClick={() => onViewCode(strategy.dslSource, strategy.name)}

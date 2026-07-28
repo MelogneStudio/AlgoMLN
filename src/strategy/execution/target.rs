@@ -28,6 +28,12 @@ pub struct ExecutionError {
     pub kind: ExecutionErrorKind,
 }
 
+impl std::fmt::Display for ExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub enum ExecutionErrorKind {
     InsufficientFunds,

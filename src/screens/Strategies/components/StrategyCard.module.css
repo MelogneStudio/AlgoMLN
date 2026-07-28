@@ -125,3 +125,22 @@
   font-family: var(--font-sansation);
   font-size: 13px;
 }
+
+.goLiveBtn {
+  color: #c47a4a;
+  border-color: #c47a4a;
+}
+
+.goLiveBtn:hover {
+  background: rgba(196, 122, 74, 0.1);
+  filter: none;
+}
+
+.pauseSubtitle {
+  font-family: var(--font-cascadia);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text-dim);
+  margin: 0;
+  white-space: nowrap;
+}

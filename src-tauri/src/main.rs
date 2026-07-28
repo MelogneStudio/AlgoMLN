@@ -1,8 +1,9 @@
 use std::{
     env, fs,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
+use tokio::sync::Mutex;
 
 use algomln::{
     broker::{
@@ -390,7 +391,11 @@ fn main() {
             // factory can pass it into `ReadOnlyLiveExecutionApi::new`.
             // The plugin callback may run on a non-tokio thread, so we
             // must never call `Handle::current()` from inside a plugin.
-            let runtime_handle = tokio::runtime::Handle::current();
+            // Tauri's setup closure runs synchronously, so we resolve the
+            // handle via the tauri async runtime (which wraps a tokio
+            // runtime under the hood) and unwrap to the underlying
+            // `tokio::runtime::Handle` the plugin API expects.
+            let runtime_handle = tauri::async_runtime::handle().inner().clone();
 
             // LiveGuard construction must follow DhanBroker construction
             // (the guard holds a clone of the broker and the client).
@@ -514,10 +519,11 @@ fn main() {
             // `"plugin-ui-message"` so the React app can subscribe to a single
             // channel and dispatch on the `UiMessage` variant.
             let app_handle = app.handle().clone();
+            let app_handle_for_spawn = app_handle.clone();
             let mut ui_rx = tauri_ui_api_concrete.receiver();
             tauri::async_runtime::spawn(async move {
                 while let Ok(msg) = ui_rx.recv().await {
-                    let _ = app_handle.emit("plugin-ui-message", &msg);
+                    let _ = app_handle_for_spawn.emit("plugin-ui-message", &msg);
                 }
             });
 
@@ -629,7 +635,7 @@ fn main() {
                 symbol_map,
                 trade_log,
                 trade_log_path,
-                live_session,
+                live_session: live_session_slot,
                 live_guard,
                 pending_live_token,
                 ack_path,

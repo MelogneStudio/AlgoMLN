@@ -8,6 +8,7 @@ interface StrategiesScreenProps {
   refreshKey: number;
   onViewCode: (dsl: string, name: string) => void;
   onChanged: () => void;
+  onGoLive: (id: string, name: string) => void;
 }
 
 const DEMO_STRATEGIES: DeployedStrategy[] = [
@@ -49,6 +50,7 @@ export function StrategiesScreen({
   refreshKey,
   onViewCode,
   onChanged,
+  onGoLive,
 }: StrategiesScreenProps) {
   const [strategies, setStrategies] = useState<DeployedStrategy[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +116,7 @@ export function StrategiesScreen({
               strategy={s}
               onViewCode={onViewCode}
               onChanged={onChanged}
+              onGoLive={onGoLive}
             />
           ))
         )}

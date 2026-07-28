@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { BacktestResult } from './backtest';
 import type { DeployedStrategy } from './strategy';
 import type { PluginListEntry } from './plugin';
@@ -8,6 +9,9 @@ import type {
   StopResult,
   TradeLogEntry,
 } from './live';
+
+export { listen };
+export type { UnlistenFn };
 
 // Run a backtest by passing raw DSL text
 export async function runBacktest(

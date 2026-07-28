@@ -8,6 +8,8 @@ import { StrategyUploaderScreen } from './screens/StrategyUploader/StrategyUploa
 import { StrategiesScreen } from './screens/Strategies/StrategiesScreen';
 import { SettingsScreen } from './screens/Settings/SettingsScreen';
 import { PluginsScreen } from './screens/Plugins/PluginsScreen';
+import { LiveScreen } from './screens/Live/LiveScreen';
+import { LiveConfirmModal } from './components/LiveConfirmModal/LiveConfirmModal';
 import { useStrategyBuilder } from './hooks/useStrategyBuilder';
 import { useBacktest } from './hooks/useBacktest';
 import { strategyToDsl, useDslSync } from './hooks/useDslSync';
@@ -18,11 +20,13 @@ import {
   loadSavedCapital,
   SIDEBAR_FORCE_COLLAPSE_THRESHOLD,
 } from './lib/scaling';
-import { isTauri, validateDsl } from './types/tauri';
+import { isTauri, validateDsl, listen } from './types/tauri';
 import type { BuilderRule } from './types/strategy';
+import type { LiveSessionFailedPayload, LiveSessionStoppedPayload } from './types/live';
+import { useToast } from './components/Toast/ToastContext';
 import styles from './App.module.css';
 
-export type Screen = 'builder' | 'strategies' | 'plugins' | 'settings';
+export type Screen = 'builder' | 'strategies' | 'plugins' | 'settings' | 'live';
 export type Modal = 'none' | 'uploader' | 'coder';
 
 export function App() {
@@ -79,6 +83,43 @@ export function App() {
   const bumpStrategies = useCallback(() => {
     setStrategiesRefreshKey((k) => k + 1);
   }, []);
+
+  // ----- Live confirm modal state -----
+  const [liveConfirmStrategyId, setLiveConfirmStrategyId] = useState<string | null>(null);
+  const [liveConfirmStrategyName, setLiveConfirmStrategyName] = useState<string>('');
+
+  // ----- Toast + Live event listeners -----
+  const { showToast } = useToast();
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const unlistenFail = listen<LiveSessionFailedPayload>(
+      'live_session_failed',
+      (event) => {
+        showToast({
+          kind: 'error',
+          title: 'Live session failed',
+          body: `${event.payload.reason}. Open positions may need manual attention.`,
+          sticky: true,
+        });
+      }
+    );
+    const unlistenStop = listen<LiveSessionStoppedPayload>(
+      'live_session_stopped_with_positions',
+      (event) => {
+        showToast({
+          kind: 'warning',
+          title: 'Session stopped',
+          body: event.payload.warning,
+          sticky: true,
+        });
+      }
+    );
+    return () => {
+      unlistenFail.then((f) => f());
+      unlistenStop.then((f) => f());
+    };
+  }, [showToast]);
 
   // ----- Coder open behaviour -----
   const openCoderFromBuilder = useCallback(() => {
@@ -151,6 +192,16 @@ export function App() {
     [openCoderReadOnly]
   );
 
+  const onGoLive = useCallback((id: string, name: string) => {
+    setLiveConfirmStrategyId(id);
+    setLiveConfirmStrategyName(name);
+  }, []);
+
+  const onNavigateToLive = useCallback(() => {
+    setScreen('live');
+    setLiveConfirmStrategyId(null);
+  }, []);
+
   const onRuleChange = useCallback(
     (side: 'entry' | 'exit', patch: Partial<BuilderRule>) => {
       if (side === 'entry') setEntryRule(patch);
@@ -197,10 +248,12 @@ export function App() {
               refreshKey={strategiesRefreshKey}
               onViewCode={onViewCodeFromStrategyCard}
               onChanged={bumpStrategies}
+              onGoLive={onGoLive}
             />
           )}
           {screen === 'plugins' && <PluginsScreen />}
           {screen === 'settings' && <SettingsScreen />}
+          {screen === 'live' && <LiveScreen />}
         </div>
       </div>
 
@@ -223,6 +276,18 @@ export function App() {
         }}
         onLoadSource={onLoadFromUploader}
       />
+
+      {liveConfirmStrategyId && (
+        <LiveConfirmModal
+          strategyId={liveConfirmStrategyId}
+          strategyName={liveConfirmStrategyName}
+          onSuccess={onNavigateToLive}
+          onCancel={() => {
+            setLiveConfirmStrategyId(null);
+            setLiveConfirmStrategyName('');
+          }}
+        />
+      )}
 
       {/* Visible when there are validation errors from the live DSL */}
       {validationErrors.length > 0 && screen === 'builder' && (
