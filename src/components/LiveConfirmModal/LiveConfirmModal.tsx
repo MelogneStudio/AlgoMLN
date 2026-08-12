@@ -153,6 +153,16 @@ export function LiveConfirmModal({
             Stopping the session does <strong>not</strong> auto-close positions or cancel pending orders — you must handle those in your broker app.
             Make sure you have reviewed your strategy's backtest.
           </div>
+          {/* L4 (audit): sessions that start in the last minute before close
+              may still place an order on the 15:30 candle boundary — NSE
+              rejects post-close orders, so the broker app will show the
+              rejection rather than the engine silently dropping it. */}
+          <div className={styles.warningText}>
+            <strong>Market-hours boundary.</strong> Live trading is allowed
+            09:15–15:30 IST on NSE trading days. Sessions started within the
+            last minute before close may still attempt to place an order on
+            the 15:30 candle, which the exchange will reject.
+          </div>
         </div>
         {error && <div className={styles.error}>{error}</div>}
       </div>

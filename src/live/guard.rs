@@ -240,6 +240,14 @@ impl LiveGuard {
 ///
 /// Extracted as a pure function so it can be unit-tested with a fake
 /// `DateTime<FixedOffset>` without depending on the system clock.
+///
+/// L4 (audit): the boundary is checked only at *session start*. A session
+/// that starts at 15:29:00 will still call `on_candle` on the 15:30 candle
+/// and may submit an order at 15:30:00.001, which NSE rejects. The guard
+/// does not (and cannot) abort an already-running session mid-candle —
+/// the close is a wall-clock check, not a per-candle gate. Operators
+/// starting a session in the last minute should expect a possible
+/// post-close order attempt, and the UI should surface a warning.
 pub fn is_market_open(dt: DateTime<FixedOffset>, holidays: &NseHolidayCalendar) -> bool {
     // Weekend first — the common case for off-hours attempts.
     match dt.weekday() {
@@ -253,11 +261,15 @@ pub fn is_market_open(dt: DateTime<FixedOffset>, holidays: &NseHolidayCalendar) 
         return false;
     }
 
-    // 09:15:00 inclusive — 15:30:00 inclusive.
+    // M2 (audit): compare hour/minute/second only — `nanosecond()` is
+    // always in 0..1_000_000_000 and never discriminates at second
+    // granularity. The original `(h, m, s, nanos) >= (9, 15, 0, 0)`
+    // tuple comparison was redundant: nanos was always 0 in the test
+    // inputs and the prior 9:14:59 / 9:15:00 boundary already pins
+    // behaviour to the second.
     let (hour, minute, second) = (dt.hour(), dt.minute(), dt.second());
-    let nanos = dt.nanosecond();
-    let after_open = (hour, minute, second, nanos) >= (9, 15, 0, 0);
-    let before_close = (hour, minute, second, nanos) <= (15, 30, 0, 0);
+    let after_open = (hour, minute, second) >= (9, 15, 0);
+    let before_close = (hour, minute, second) <= (15, 30, 0);
     after_open && before_close
 }
 
@@ -379,6 +391,45 @@ mod tests {
         let cal = NseHolidayCalendar::with_holidays(holidays);
         // 2026-01-26 is a Monday, so without the holiday check it would be open.
         assert!(!is_market_open(ist(2026, 1, 26, 10, 0, 0), &cal));
+    }
+
+    // ---- M2 (audit): sub-second boundaries ----
+    //
+    // The original `(h, m, s, nanos)` tuple comparison was redundant —
+    // `nanos` was always 0 in the test inputs and never discriminated.
+    // After dropping it, the comparison must still treat the open boundary
+    // as inclusive at second granularity: 09:15:00.0 is open, 15:30:00.0
+    // is open, and anything strictly inside those bounds is open.
+    #[test]
+    fn test_market_open_at_9_15_with_nanos() {
+        // 09:15:00.0 is the open boundary — must remain open.
+        let dt = ist(2026, 1, 5, 9, 15, 0);
+        assert_eq!(dt.nanosecond(), 0);
+        assert!(is_market_open(dt, &empty_holidays()));
+    }
+
+    #[test]
+    fn test_market_closed_at_9_14_59_with_nanos() {
+        // 09:14:59 is one second before the open — must remain closed.
+        let dt = ist(2026, 1, 5, 9, 14, 59);
+        assert_eq!(dt.nanosecond(), 0);
+        assert!(!is_market_open(dt, &empty_holidays()));
+    }
+
+    #[test]
+    fn test_market_open_at_15_30_with_nanos() {
+        // 15:30:00 is the close boundary — inclusive, must remain open.
+        let dt = ist(2026, 1, 5, 15, 30, 0);
+        assert_eq!(dt.nanosecond(), 0);
+        assert!(is_market_open(dt, &empty_holidays()));
+    }
+
+    #[test]
+    fn test_market_closed_at_15_30_01_with_nanos() {
+        // 15:30:01 is one second past the close — must remain closed.
+        let dt = ist(2026, 1, 5, 15, 30, 1);
+        assert_eq!(dt.nanosecond(), 0);
+        assert!(!is_market_open(dt, &empty_holidays()));
     }
 
     // ---- Ack file tests ----

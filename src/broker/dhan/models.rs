@@ -97,6 +97,34 @@ pub struct PlaceOrderResponse {
     pub order_status: String,
 }
 
+/// Response payload from Dhan's `GET /funds/limit` endpoint. The field we
+/// actually consume is `available_balance` — used by `DhanBroker` to size
+/// `PercentCapital` orders safely instead of trusting `f64::MAX`. The other
+/// fields are deserialized for forward compatibility (and so a malformed
+/// shape surfaces as a JSON parse error rather than a silently-zeroed
+/// number).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DhanFundsLimit {
+    /// Available balance for intraday equity trading, in INR. This is the
+    /// value `DhanBroker::available_cash` returns after it has been fetched
+    /// and cached.
+    #[serde(alias = "availablebalance")]
+    pub available_balance: f64,
+    #[serde(default)]
+    pub sod_limit: f64,
+    #[serde(default)]
+    pub collateral_amount: f64,
+    #[serde(default)]
+    pub receiveable_amount: f64,
+    #[serde(default)]
+    pub utilized_amount: f64,
+    #[serde(default)]
+    pub withdrawable_balance: f64,
+    #[serde(default)]
+    pub blocked_payout_amount: f64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DhanPosition {

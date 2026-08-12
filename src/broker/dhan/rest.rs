@@ -18,8 +18,8 @@ use crate::{
 use super::{
     auth::DhanAuth,
     models::{
-        DhanPosition, DhanQuoteValue, DhanSymbol, HistoricalResponse, IntradayRequest,
-        PlaceOrderRequest, PlaceOrderResponse,
+        DhanFundsLimit, DhanPosition, DhanQuoteValue, DhanSymbol, HistoricalResponse,
+        IntradayRequest, PlaceOrderRequest, PlaceOrderResponse,
     },
 };
 
@@ -395,6 +395,16 @@ impl DhanClient {
         all_candles.dedup_by_key(|c| c.timestamp);
 
         Ok(all_candles)
+    }
+
+    /// Fetch the current available balance (in INR) from Dhan's
+    /// `GET /funds/limit` endpoint. Consumed by `DhanBroker::available_cash`
+    /// so `PercentCapital` order sizing reflects the user's real buying power
+    /// instead of trusting a hard-coded sentinel. The endpoint has no body
+    /// and no rate-limit cost worth special-casing — a single GET per refresh
+    /// tick is well below the documented limits.
+    pub async fn get_funds_limit(&self) -> Result<DhanFundsLimit> {
+        self.get::<DhanFundsLimit>("/funds/limit").await
     }
 }
 

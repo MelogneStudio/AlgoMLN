@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -220,12 +221,15 @@ impl LiveSession {
                             history.clone()
                         }; // history guard dropped here — no lock held across the awaits below.
 
-                        // NOTE: the engine lock (tokio::sync::Mutex) is held across
-                        // on_candle's await, which includes the broker HTTP call. This is
-                        // safe (no UB, Send) but serialises candles if multiple tasks ever
-                        // compete for the lock. Phase 7 is single-session so this is
-                        // acceptable; Phase 8 should return OrderIntents from on_candle and
-                        // execute them outside the lock.
+                        // C2 (audit): the engine lock (tokio::sync::Mutex) is held
+                        // across `on_candle`'s await, which includes the broker
+                        // HTTP call. This is safe (no UB, Send) but serialises
+                        // candles if multiple tasks ever compete for the lock.
+                        // Phase 7 is single-session so this is acceptable;
+                        // Phase 8 should refactor `StrategyEngine::on_candle`
+                        // to return `Vec<OrderIntent>` and execute them
+                        // outside the lock. The audit item C2 is owned by the
+                        // Phase 8 work; no fix here.
                         let mut engine = task_session.engine.lock().await;
                         engine.on_candle(&candles).await;
                     }
@@ -256,13 +260,47 @@ impl LiveSession {
         *self.status.write() = SessionStatus::Running;
     }
 
+    /// How long `stop()` waits for the tick task to finish before logging a
+    /// warning that an order may still be in flight. The HTTP `place_order`
+    /// call inside `on_candle` does not respect the cancellation token
+    /// (see H3 in the live execution audit) — if it is mid-flight when
+    /// `stop()` is called, we cannot abort it. The 5-second wait is a
+    /// pragmatic bound: real broker round-trips on NSE are typically
+    /// 300–800 ms, so anything past 5 s is almost certainly hung.
+    const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Stop the session. Cancels the cancellation token (the tick loop's
+    /// `select!` will break on the next iteration boundary) and awaits the
+    /// task with a bounded timeout. If the task does not finish within
+    /// `STOP_DRAIN_TIMEOUT`, the order in flight inside `on_candle` is
+    /// assumed to still be running at the broker — `stop()` returns and
+    /// logs a warning so the caller can surface it to the UI.
     pub async fn stop(&self) {
         self.cancel.cancel();
-        if let Some(task) = self.task.lock().await.take() {
-            if let Err(error) = task.await {
-                eprintln!("[live_session] task join failed: {error}");
+        let mut task_slot = self.task.lock().await;
+        if let Some(task) = task_slot.take() {
+            match tokio::time::timeout(Self::STOP_DRAIN_TIMEOUT, task).await {
+                Ok(Ok(())) => {
+                    // Clean exit — tick loop broke on cancel.
+                }
+                Ok(Err(join_error)) => {
+                    eprintln!("[live_session] task join failed: {join_error}");
+                }
+                Err(_timeout) => {
+                    // The tick loop is stuck inside `on_candle` — almost
+                    // certainly blocked on a `place_order` HTTP call. The
+                    // order may or may not have reached the broker; the user
+                    // must verify in their broker app.
+                    eprintln!(
+                        "[live_session] WARN: tick task did not stop within \
+                         {secs}s — an order may still be in flight at the broker; \
+                         please verify your open orders in the broker app",
+                        secs = Self::STOP_DRAIN_TIMEOUT.as_secs(),
+                    );
+                }
             }
         }
+        drop(task_slot);
         // Clear session context so the broker no longer attaches this
         // strategy's metadata to any subsequent (unexpected) execute calls.
         *self.broker.session_context.write() = None;

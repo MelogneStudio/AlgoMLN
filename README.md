@@ -29,11 +29,11 @@ Data → Indicators → Strategy Engine → Backtesting → Execution → UI
 Phase 1 (Data) · Phase 2 (Indicators) · Phase 2.5–2.9 (Strategy Engine) ✅
 Phase 3–5 UI (Builder / Strategies / Coder / Uploader / Settings) ✅
 Phase 6 (Plugin System — Rhai + WASM runtimes, capability gating) ✅
-Phase 7 (Live Trading) — in progress (single live session manager + trade log)
+Phase 7 (Live Trading) — single live-session manager, trade log, 9-gate preflight ✅
 ```
 
 Run `cargo test --workspace` for the current test count
-Current count: `220 passing | 1 ignored | 0 failed`.
+Current count: `311 passing | 1 ignored | 0 failed`.
 
 ### ✅ Phase 1 — Data Layer
 - Broker abstraction trait (`BrokerClient`)
@@ -224,8 +224,6 @@ cargo run --release --bin behavioral_backtest -- --help
 
 ## Running the Desktop App
 
-> 🚨 **DO NOT RUN THE APP AS OF NOW**. The app has no commands connected to the UI, no live trading, and will not do anything. Use CLI right now.
-
 ```powershell
 # Install JS deps (first time only)
 npm install
@@ -240,7 +238,9 @@ npm run dev
 npm run build
 ```
 
-The Tauri app requires `DHAN_ACCESS_TOKEN` in `.env` (see `.env.example`) for live data; the CLI loads `.env` automatically via `dotenvy`.
+The Tauri app requires `DHAN_ACCESS_TOKEN` *and* `DHAN_CLIENT_ID` in `.env` (see `.env.example`). Live data, live order placement, and the funds-limit cache all need the access token; the client id is only required for `POST /orders`. The CLI loads `.env` automatically via `dotenvy`. Backtests work without a token — the CLI falls back to the bundled sample CSV and emits a stderr warning.
+
+The live runner is **single-session** by design (Phase 7). The desktop app's **Live** screen shows status, open positions, pause/resume/stop controls, and the immutable trade log; the **Plugins** screen lists, enables, disables, and reloads loaded plugins. The browser fallback (`npm run dev`) renders the backtest flow but throws on every live command — you must use the Tauri window for live trading.
 
 ---
 
@@ -314,11 +314,18 @@ src/
     execution/
       target.rs        ExecutionTarget trait
       paper.rs         PaperBroker
+      dhan.rs          DhanBroker (live execution + realized-loss / available-cash cache)
       order_builder.rs Builds Order from ActionNode
     logging/
       log.rs           StrategyLog, LogEntry, LogEntryKind
     analytics.rs      Backtest result metrics
     tests/            Integration tests (backtest_integration.rs)
+  live/                Live session manager + safety gate layer
+    session.rs         LiveSession — single-session tick loop, engine, lifecycle
+    guard.rs          LiveGuard — 9-gate preflight + PendingLiveToken
+    trade_log.rs      Append-only JSONL trade log
+    candle_assembler.rs CandleAssembler — tick → 1-minute candle
+    holidays.rs       NSE holiday calendar
   plugin/
     api/              Capability trait defs + per-capability impls (market data, storage,
                       indicator/analytics/DSL-extension registries, event bus, scheduler,
@@ -338,10 +345,13 @@ src/
     registry.rs       StrategyRegistry — JSON-persisted deploy/list/status
     state.rs          AppState — struct held by Tauri::manage
     plugins.rs        list/enable/disable/reload plugin command bodies
+    live.rs           request_live_start / confirm_live_start / acknowledge_live_trading / pause_live_strategy / resume_live_strategy / stop_live_strategy / get_live_status / get_trade_log
+    indices.rs        list_indices / get_index_symbols / refresh_indices
   bin/
     behavioral_backtest.rs  CLI backtest runner (calls commands::strategy::run_backtest_internal)
 src-tauri/
-  src/main.rs         Tauri app entrypoint — registers commands, loads .env, sets up DataState
+  src/main.rs         Tauri app entrypoint — registers commands, loads .env, sets up DataState,
+                      wires plugin HostFactory, opens the trade log, starts index + symbol-map refreshes
 ```
 
 ### Frontend Layout
@@ -350,32 +360,37 @@ The React app lives at `src/` (the project root's `src/` — separate from the R
 
 ```
 src/                       React frontend root (TypeScript, Vite, React 19)
-  App.tsx                  Top-level orchestrator — screen/modal state, builder state, scale
+  App.tsx                  Top-level orchestrator — screen/modal state, builder state, scale,
+                           live_session_failed / live_session_stopped_with_positions toasts
   main.tsx                 Mounts <App /> into #root, loads global CSS tokens/fonts
   components/
     AppWindow/             Root shell; injects --ui-scale CSS variable
     TitleBar/              Custom title bar (data-tauri-drag-region)
-    Sidebar/               Builder / Strategies / Settings nav; force-collapsed below scale 0.75
+    Sidebar/               Builder / Strategies / Live / Plugins / Settings nav; force-collapsed below scale 0.75
     Button/                Button primitive (primary | ghost | code variants)
     RuleRow/               One row of the visual strategy builder
     IndicatorPicker/       IndicatorKind dropdown
     NumberInput/           Numeric input control
     OptionSlider/          Reusable slider
     ScaleSlider/           Settings slider for --ui-scale
+    LiveConfirmModal/      Three-step preflight → ack → confirm modal for `request_live_start`
+    Toast/                 ToastContext — failure / open-positions notifications
   screens/
     Builder/               Main visual strategy builder + BacktestPanel
     Strategies/            List of deployed strategies (Tauri IPC: list_strategies)
     StrategyCoder/         Modal .algomln source editor
     StrategyUploader/      Modal .algomln file loader
-    Settings/              UI scale, default capital, about
+    Settings/              UI scale, default capital, about; index refresh trigger
     Plugins/               List/enable/disable/reload loaded plugins
+    Live/                  LiveScreen — status, open positions, pause/resume/stop, trade log table
   hooks/
     useStrategyBuilder     Builder state + loadFromDsl() round-trip
     useDslSync             Derives live DSL from builder state, debounced validate
     useBacktest            Runs runBacktest IPC; browser fallback synthesizes empty result
     usePlugins             list/enable/disable/reload plugin IPC + "plugin-ui-message" listener
+    useLiveStatus          Polls get_live_status every 5 s — only place that polls the live IPC
   lib/scaling.ts           DESIGN_WIDTH/HEIGHT (1550x757), computeFitScale(), applyScale()
-  types/                   tauri.ts (IPC wrappers + isTauri()), strategy.ts, backtest.ts
+  types/                   tauri.ts (IPC wrappers + isTauri()), strategy.ts, backtest.ts, live.ts
 ```
 
 ---
@@ -409,20 +424,27 @@ Plugin manifest → PluginLoader → Rhai / WASM runtime → capability-gated Pl
 - Broadcast event bus (`RuleFired` / `TradeExecuted` / `CandleProcessed`) — wired for paper/live only, never for backtests
 - Desktop Plugins screen: list / enable / disable / reload
 
-### Phase 6.5 — Advanced Strategy Features (pending)
-- Position sizing rules
-- Stop loss / take profit
-- Risk controls
-- Multi-symbol strategies
+### ✅ Phase 6.5 — Advanced Strategy Features (partial)
+- **Stop-loss / take-profit** — strategy-level `STOP_LOSS` / `TAKE_PROFIT` declarations on `StrategyNode` (not `RuleNode`s); bypass `TriggerStateMap` deliberately and run *after* the rule loop. Stop-loss wins on a gap candle.
+- **Risk controls** — `RISK MAX_ORDERS`, `RISK MAX_POSITIONS`, `RISK MAX_DAILY_LOSS` strategy-level declarations; `check_risk_breach` runs before every order in `submit_action`. `MAX_DAILY_LOSS` is a hard non-negotiable for live trading (gate 7 of `LiveGuard`).
+- **Position sizing** — `OrderBuilder::resolve_quantity` supports `QuantitySpec::Fixed` and `QuantitySpec::PercentCapital` (the latter is fed by `DhanBroker::available_cash`).
+- **Multi-symbol strategies** — Phase 7 single-symbol only; the DSL `TRADE_IN Symbols` / `TRADE_IN NIFTY_*` clauses exist but the live runner rejects multi-symbol with a clear error.
 
-### Phase 7 — Live Trading (in progress)
-- Live broker execution via `ExecutionTarget`
-- Single active `LiveSession` manager for tick subscription, candle assembly, engine evaluation, cancellation, and immutable trade logging
-- Wire the plugin `Execution` capability to a real broker-agnostic facade (currently a no-op stub)
-- Two hard confirmation steps required
-- User-defined risk limits (max loss, max orders)
-- Immutable trade log
-- Risk acknowledgment on first live trade
+### ✅ Phase 7 — Live Trading
+
+- `DhanBroker` wraps `DhanClient` and implements `ExecutionTarget` — same engine drives backtests, paper, and live
+- Single active `LiveSession` slot in `AppState` (tokio `Mutex<Option<Arc<LiveSession>>>`) — tick subscription via shared `FeedManager`, 1-minute candles via `CandleAssembler`, `StrategyEngine::on_candle` reused
+- `LiveGuard::run_preflight` — 9-gate safety layer (paper-default, broker reach, symbol map, segment, market hours, risk controls, `MAX_DAILY_LOSS`, broker freshness, ack file) with a 90 s single-use `PendingLiveToken`
+- Three-step UX: `request_live_start` → `acknowledge_live_trading` (one-time consent) → `confirm_live_start`
+- `GET /funds/limit` cached every 60 s for `PercentCapital` order sizing (`DEFAULT_AVAILABLE_CASH_CAP` = 1 lakh INR on a cold cache); `get_positions`-backed realized-loss cache; **3 consecutive failures** mark stale → session auto-pauses
+- `resume_live_strategy` is refused while the broker cache is stale (audit H2) — error cites the elapsed time since the last successful refresh
+- Immutable append-only trade log (`<app_data>/trade_log.jsonl`) — only **fill** results are written; `Transit`/`Pending` orders are returned with status intact but no phantom row
+- `pause_live_strategy` / `resume_live_strategy` / `stop_live_strategy` / `get_live_status` — session lifecycle IPC; `stop` cancels the tick task under a 5 s drain timeout and queries open positions *after* stop
+- Loud failure signalling — `SessionEventEmitter` trait + `live-session-failed` Tauri event
+- Plugin `Execution` capability is **read-only** in Phase 7 (`ReadOnlyLiveExecutionApi`) — order submission is Phase 8
+- Browser fallback: every live command throws `"live trading is not available in the browser"`; the modal swaps Step 1 for a "live trading is only available in the desktop app" notice
+
+Full audit of the live-execution path lives in `plans/live_execution/live_execution_audit.md`. As of the latest resolution pass: C1 (cash cap), C3 (start lock), H1 (Transit not a trade), H2 (resume-during-stale), H4 (positions after stop), M2 (nanosecond), L4 (market-hours docs) are fixed; C2 (`OrderIntents` refactor) and H3 (cancel in-flight HTTP) await the Phase 8 engine refactor.
 
 ---
 

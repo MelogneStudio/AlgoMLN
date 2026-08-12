@@ -223,7 +223,7 @@ Registered commands:
 - `confirm_live_start(strategy_id, token)` — validates the token (consuming it), fetches ~500 seed candles, calls `LiveSession::start`. Holds the `live_session` lock across the session insert.
 - `acknowledge_live_trading` — writes `{ "acknowledged": true, "timestamp": … }` to `<app_data>/live_ack.json`. One-time consent; subsequent `request_live_start` returns `requiresAck: false`.
 - `pause_live_strategy` — flips the broker's `paused_for_entries` flag on the active `LiveSession`. BUY (entry) orders are suppressed; SL/TP/risk-breach SELL orders always execute.
-- `resume_live_strategy` — clears the paused-for-entries flag and flips `SessionStatus` back to `Running`.
+- `resume_live_strategy` — clears the paused-for-entries flag and flips `SessionStatus` back to `Running`. **H2 audit guard:** the resume is rejected with an error if `broker.is_stale()` is still true — the error includes the elapsed time since the last successful `realized_loss` / `available_cash` refresh (via `DhanBroker::time_since_last_success`, `None` until the first refresh has succeeded) so the user can decide whether to retry immediately or wait for connectivity to recover.
 - `stop_live_strategy` — takes the session out of the slot, queries positions, calls `LiveSession::stop` (cancels the tick loop and awaits task exit), and emits a `live-session-stopped-with-positions` Tauri event with a human-readable warning when open positions remain. Returns `StopResult { stopped, openPositionsWarning }`.
 - `get_live_status` — snapshots `SessionStatus` plus broker positions, realized loss, and the loss-tracking staleness flag into `LiveStatusWire`. Returns `Ok(None)` when no session is active.
 

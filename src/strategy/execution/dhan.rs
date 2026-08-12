@@ -2,7 +2,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
@@ -14,6 +14,7 @@ use crate::{
         dhan::{DhanClient, DhanError},
         BrokerClient,
     },
+    broker::dhan::models::DhanFundsLimit,
     live::trade_log::{TradeLog, TradeLogEntry},
     models::{Order, OrderResult, OrderSide, Position},
 };
@@ -31,8 +32,17 @@ pub struct SessionContext {
 
 /// How often the background task refreshes the realized-loss cache.
 const REFRESH_INTERVAL_SECS: u64 = 10;
+/// How often the background task refreshes the available-funds cache. Funds
+/// change more slowly than realized loss, so a 60s tick is plenty.
+const FUNDS_REFRESH_INTERVAL_SECS: u64 = 60;
 /// After this many consecutive refresh failures the cache is marked stale.
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+/// Hard cap on `available_cash` until the first successful `/funds/limit`
+/// fetch lands. Defends against sizing orders against a `f64::MAX` while the
+/// cache is still warming — see audit item C1. Conservative default for an
+/// Indian retail equity account; the user can always deploy with
+/// `QuantitySpec::Fixed` if they actually have more.
+const DEFAULT_AVAILABLE_CASH_CAP: f64 = 1_000_000.0;
 
 /// Abstraction over "fetch current positions" so the realized-loss refresh can
 /// be unit-tested without a live HTTP client. Production wires this to
@@ -64,6 +74,21 @@ impl OrderPlacer for DhanClient {
     }
 }
 
+/// Abstraction over "fetch the funds limit" so `available_cash` can be
+/// unit-tested without a live HTTP client. Production wires this to
+/// `Arc<DhanClient>`; tests inject a mock.
+#[async_trait]
+trait FundsSource: Send + Sync + std::fmt::Debug {
+    async fn fetch(&self) -> anyhow::Result<DhanFundsLimit>;
+}
+
+#[async_trait]
+impl FundsSource for DhanClient {
+    async fn fetch(&self) -> anyhow::Result<DhanFundsLimit> {
+        self.get_funds_limit().await
+    }
+}
+
 #[derive(Debug)]
 pub struct DhanBroker {
     client: Arc<DhanClient>,
@@ -73,20 +98,41 @@ pub struct DhanBroker {
     /// Order placer used by `execute_with_meta`. Same object as `client` in
     /// production; a mock in tests.
     order_placer: Arc<dyn OrderPlacer>,
+    /// Funds source driving the available-cash refresh. Same object as
+    /// `client` in production; a mock in tests.
+    funds_source: Arc<dyn FundsSource>,
     /// Cached realized-loss magnitude in rupees, always non-negative. See
     /// [`ExecutionTarget::realized_loss`] on this type for the exact
     /// definition. Refreshed by a background task every
     /// `REFRESH_INTERVAL_SECS` and immediately after every successful order
     /// placement.
     realized_loss: Arc<RwLock<f64>>,
+    /// Cached available cash in INR. Initialized to `DEFAULT_AVAILABLE_CASH_CAP`
+    /// so order sizing is bounded on a cold cache, and replaced with the
+    /// `/funds/limit` response as soon as the first successful refresh lands.
+    /// Refreshed by a background task every `FUNDS_REFRESH_INTERVAL_SECS`.
+    available_cash: Arc<RwLock<f64>>,
+    /// True when either the realized-loss or available-cash cache has gone
+    /// stale. The live session loop reads this via [`DhanBroker::is_stale`]
+    /// and pauses rather than trusting a stale value.
+    funds_stale: Arc<AtomicBool>,
     /// Consecutive `refresh_realized_loss` failures. Reset to 0 on any
     /// success; when it reaches `MAX_CONSECUTIVE_FAILURES` the cache is marked
     /// stale.
     consecutive_failures: Arc<AtomicU32>,
+    /// Consecutive `refresh_funds` failures. Reset to 0 on any success; when
+    /// it reaches `MAX_CONSECUTIVE_FAILURES` the funds cache is marked stale.
+    funds_failures: Arc<AtomicU32>,
     /// True once the realized-loss cache is unreliable (too many consecutive
     /// refresh failures). The live session loop reads this via
     /// [`DhanBroker::is_stale`] and pauses rather than trusting a stale zero.
     stale: Arc<AtomicBool>,
+    /// Wall-clock instant of the most recent successful refresh of either
+    /// cache. `None` until at least one refresh has succeeded. Used by
+    /// `time_since_last_success` so the resume IPC can show the user how
+    /// stale the cache really is. Updated by [`refresh_once`] /
+    /// [`refresh_funds_once`] on every success.
+    last_success: Arc<RwLock<Option<Instant>>>,
     /// Handle to the background refresh task, aborted on drop so tests (and
     /// short-lived sessions) do not leak tasks.
     refresh_task: Mutex<Option<JoinHandle<()>>>,
@@ -106,42 +152,91 @@ impl DhanBroker {
     pub fn new(client: Arc<DhanClient>, trade_log: Arc<TradeLog>) -> Self {
         let positions_source: Arc<dyn PositionsSource> = client.clone();
         let order_placer: Arc<dyn OrderPlacer> = client.clone();
-        Self::spawn_with_source(client, positions_source, order_placer, trade_log)
+        let funds_source: Arc<dyn FundsSource> = client.clone();
+        Self::spawn_with_source(
+            client,
+            positions_source,
+            order_placer,
+            funds_source,
+            trade_log,
+        )
     }
 
     fn spawn_with_source(
         client: Arc<DhanClient>,
         positions_source: Arc<dyn PositionsSource>,
         order_placer: Arc<dyn OrderPlacer>,
+        funds_source: Arc<dyn FundsSource>,
         trade_log: Arc<TradeLog>,
     ) -> Self {
         let realized_loss = Arc::new(RwLock::new(0.0));
+        // Start at the hard cap, not zero, so a `PercentCapital` rule that
+        // fires before the first `/funds/limit` refresh lands is sized against
+        // a sane upper bound (1 lakh INR by default), not `f64::MAX`.
+        let available_cash = Arc::new(RwLock::new(DEFAULT_AVAILABLE_CASH_CAP));
+        let funds_stale = Arc::new(AtomicBool::new(false));
         let consecutive_failures = Arc::new(AtomicU32::new(0));
+        let funds_failures = Arc::new(AtomicU32::new(0));
         let stale = Arc::new(AtomicBool::new(false));
         let paused_for_entries = Arc::new(AtomicBool::new(false));
+        // No refresh has succeeded yet — drives the resume-during-stale error
+        // message ("broker refresh has never succeeded") and gates the
+        // optional error in `time_since_last_success`.
+        let last_success: Arc<RwLock<Option<Instant>>> = Arc::new(RwLock::new(None));
 
         // Spawn the periodic refresh only when a Tokio runtime is available.
         // Plain `#[test]` constructions (and any non-async caller) simply get
-        // no background task; the cache stays at its initial 0.0 until an
-        // explicit `refresh_realized_loss`.
+        // no background task; the cache stays at its initial values until an
+        // explicit `refresh_realized_loss` / `refresh_funds`.
+        //
+        // Both refreshes share one ticker so the failure counters advance on
+        // a single 10s beat. Funds have their own slower interval
+        // (`FUNDS_REFRESH_INTERVAL_SECS`) — every 6th tick fires a funds
+        // refresh instead of realized-loss.
         let refresh_task = match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let positions_source = positions_source.clone();
+                let funds_source = funds_source.clone();
                 let realized_loss = realized_loss.clone();
+                let available_cash = available_cash.clone();
                 let consecutive_failures = consecutive_failures.clone();
+                let funds_failures = funds_failures.clone();
                 let stale = stale.clone();
+                let funds_stale = funds_stale.clone();
+                let last_success = last_success.clone();
                 Some(handle.spawn(async move {
                     let mut ticker =
                         tokio::time::interval(Duration::from_secs(REFRESH_INTERVAL_SECS));
+                    // Skip the immediate first tick so the cache can warm up
+                    // out-of-band (the live session calls `refresh_*` after
+                    // subscribing, but for safety we don't want a thundering
+                    // herd at t=0).
+                    ticker.tick().await;
+                    let mut tick_count: u64 = 0;
                     loop {
                         ticker.tick().await;
+                        tick_count += 1;
                         refresh_once(
                             &positions_source,
                             &realized_loss,
                             &consecutive_failures,
                             &stale,
+                            &last_success,
                         )
                         .await;
+                        // Funds refresh every 60s (= every 6th 10s tick).
+                        if tick_count % (FUNDS_REFRESH_INTERVAL_SECS / REFRESH_INTERVAL_SECS)
+                            == 0
+                        {
+                            refresh_funds_once(
+                                &funds_source,
+                                &available_cash,
+                                &funds_failures,
+                                &funds_stale,
+                                &last_success,
+                            )
+                            .await;
+                        }
                     }
                 }))
             }
@@ -152,9 +247,14 @@ impl DhanBroker {
             client,
             positions_source,
             order_placer,
+            funds_source,
             realized_loss,
+            available_cash,
+            funds_stale,
             consecutive_failures,
+            funds_failures,
             stale,
+            last_success,
             refresh_task: Mutex::new(refresh_task),
             trade_log,
             session_context: Arc::new(RwLock::new(None)),
@@ -173,15 +273,44 @@ impl DhanBroker {
             &self.realized_loss,
             &self.consecutive_failures,
             &self.stale,
+            &self.last_success,
         )
         .await;
     }
 
-    /// True once the realized-loss cache is stale (too many consecutive
-    /// refresh failures). The safety metric must not be trusted as a zero
-    /// while stale — the live session loop pauses instead.
+    /// Refresh the cached available-balance value from the funds source.
+    /// Driven by the background task. On failure the cache is left at its
+    /// last good value (or `DEFAULT_AVAILABLE_CASH_CAP` on a cold cache) so
+    /// order sizing never inflates past a sane bound.
+    pub async fn refresh_funds(&self) {
+        refresh_funds_once(
+            &self.funds_source,
+            &self.available_cash,
+            &self.funds_failures,
+            &self.funds_stale,
+            &self.last_success,
+        )
+        .await;
+    }
+
+    /// True once either the realized-loss or available-cash cache is stale
+    /// (too many consecutive refresh failures). The safety metrics must not
+    /// be trusted as zeros while stale — the live session loop pauses
+    /// instead. See `H2` in the live execution audit for the realized-loss
+    /// case; the funds case applies the same policy because
+    /// `available_cash` directly sizes `PercentCapital` orders.
     pub fn is_stale(&self) -> bool {
-        self.stale.load(Ordering::Relaxed)
+        self.stale.load(Ordering::Relaxed) || self.funds_stale.load(Ordering::Relaxed)
+    }
+
+    /// Wall-clock duration since the most recent successful refresh of
+    /// either cache, or `None` if neither cache has ever refreshed. Drives
+    /// the resume-during-stale error message (H2) so the user can see how
+    /// long the broker has been unreachable instead of getting a bare
+    /// "stale" string.
+    pub fn time_since_last_success(&self) -> Option<Duration> {
+        let guard = self.last_success.read();
+        guard.as_ref().map(|instant| instant.elapsed())
     }
 
     /// Enable or disable entry-order suppression. Called by `LiveSession::pause`
@@ -222,13 +351,31 @@ impl DhanBroker {
 
         let result = match self.order_placer.place(order.clone()).await {
             Ok(result) => result,
-            Err(error) => return Err(map_place_order_error(error)),
+            Err(error) => {
+                // Surface a single-line trail for the failed attempt so the
+                // engine log can correlate the symbol/quantity with the
+                // broker error (the trade log intentionally only records
+                // fills — see H1 below).
+                eprintln!("[dhan_broker] order placement failed for {}: {error}", order.symbol);
+                return Err(map_place_order_error(error));
+            }
         };
 
         // Refresh realized-loss cache immediately after placement.
         self.refresh_realized_loss().await;
 
         let classified = classify_result(result)?;
+
+        // H1 (audit): only FILL results (Traded / Filled) belong in the trade
+        // log — the wire shape represents a "trade". Non-terminal statuses
+        // (Transit / Pending) and no-fills still carry an `order_id` but
+        // writing a row with `price = 0.0` and `order_status = "Transit"`
+        // pollutes the UI's trade log with phantom lines. Terminal non-fills
+        // (Rejected / Cancelled / Expired) were already turned into an `Err`
+        // by `classify_result` so they never reach here.
+        if !classified.status.is_fill() {
+            return Ok(classified);
+        }
 
         // Build and append the trade log entry. Log failures must not surface
         // as order failures — the order is already through the broker.
@@ -243,12 +390,6 @@ impl DhanBroker {
             .map(|c| (c.strategy_id, c.strategy_name, c.mode))
             .unwrap_or_else(|| (String::new(), String::new(), "live".to_string()));
 
-        let price = if classified.status.is_fill() {
-            order.price.unwrap_or(0.0)
-        } else {
-            0.0
-        };
-
         let entry = TradeLogEntry {
             id: Uuid::new_v4().to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -260,7 +401,7 @@ impl DhanBroker {
                 OrderSide::Sell => "SELL".to_string(),
             },
             quantity: i64::from(order.quantity),
-            price,
+            price: order.price.unwrap_or(0.0),
             order_id: classified.order_id.clone(),
             order_status: format!("{:?}", classified.status),
             mode,
@@ -295,6 +436,7 @@ async fn refresh_once(
     realized_loss: &Arc<RwLock<f64>>,
     consecutive_failures: &Arc<AtomicU32>,
     stale: &Arc<AtomicBool>,
+    last_success: &Arc<RwLock<Option<Instant>>>,
 ) {
     match positions_source.fetch().await {
         Ok(positions) => {
@@ -309,6 +451,10 @@ async fn refresh_once(
             *realized_loss.write() = magnitude;
             consecutive_failures.store(0, Ordering::Relaxed);
             stale.store(false, Ordering::Relaxed);
+            // H2 (audit): record the wall-clock instant of every successful
+            // refresh so the resume IPC can show the user how stale the
+            // cache has gone.
+            *last_success.write() = Some(Instant::now());
         }
         Err(error) => {
             let failures = consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
@@ -317,6 +463,48 @@ async fn refresh_once(
                 stale.store(true, Ordering::Relaxed);
                 eprintln!(
                     "dhan_broker: realized_loss stale after {failures} failures — session should pause"
+                );
+            }
+        }
+    }
+}
+
+/// Fetch the funds limit and update the available-cash cache. On success
+/// resets the failure counter and clears staleness; on failure advances the
+/// counter (toward `MAX_CONSECUTIVE_FAILURES`) and, past the threshold,
+/// marks the funds cache stale. The cache is **never** reset on failure —
+/// the last good value stays in place so order sizing stays bounded. A
+/// negative or non-finite `available_balance` from the broker is treated
+/// as zero (should never happen, but defends against garbage responses).
+async fn refresh_funds_once(
+    funds_source: &Arc<dyn FundsSource>,
+    available_cash: &Arc<RwLock<f64>>,
+    funds_failures: &Arc<AtomicU32>,
+    funds_stale: &Arc<AtomicBool>,
+    last_success: &Arc<RwLock<Option<Instant>>>,
+) {
+    match funds_source.fetch().await {
+        Ok(limit) => {
+            let value = if limit.available_balance.is_finite() && limit.available_balance >= 0.0
+            {
+                limit.available_balance
+            } else {
+                0.0
+            };
+            *available_cash.write() = value;
+            funds_failures.store(0, Ordering::Relaxed);
+            funds_stale.store(false, Ordering::Relaxed);
+            // H2 (audit): same success timestamp as the realized-loss
+            // path — either refresh counts as "broker reachable."
+            *last_success.write() = Some(Instant::now());
+        }
+        Err(error) => {
+            let failures = funds_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("dhan_broker: available_cash refresh failed: {error}");
+            if failures >= MAX_CONSECUTIVE_FAILURES {
+                funds_stale.store(true, Ordering::Relaxed);
+                eprintln!(
+                    "dhan_broker: available_cash stale after {failures} failures — session should pause"
                 );
             }
         }
@@ -349,7 +537,14 @@ impl ExecutionTarget for DhanBroker {
     }
 
     fn available_cash(&self) -> f64 {
-        f64::MAX
+        // Returns the cached value from `GET /funds/limit`, never `f64::MAX`.
+        // On a cold cache (no refresh has succeeded yet) the cache holds
+        // `DEFAULT_AVAILABLE_CASH_CAP` so `PercentCapital` orders are sized
+        // against a sane upper bound rather than a u64-overflowing sentinel.
+        // If the cache has gone stale (3+ consecutive failures), this still
+        // returns the last good value — `is_stale()` is the signal callers
+        // should consult before trusting this number.
+        *self.available_cash.read()
     }
 
     fn is_paper(&self) -> bool {
@@ -413,20 +608,22 @@ mod tests {
         atomic::{AtomicBool, AtomicU32},
         Arc,
     };
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use parking_lot::{Mutex, RwLock};
 
     use crate::{
         broker::dhan::{DhanAuth, DhanClient, DhanError},
+        broker::dhan::models::DhanFundsLimit,
         live::trade_log::TradeLog,
         models::{Order, OrderResult, OrderSide, OrderStatus, OrderType, Position},
         strategy::execution::{ExecutionError, ExecutionErrorKind, ExecutionTarget},
     };
 
     use super::{
-        classify_result, map_place_order_error, DhanBroker, OrderPlacer, PositionsSource,
-        SessionContext, MAX_CONSECUTIVE_FAILURES,
+        classify_result, map_place_order_error, DhanBroker, FundsSource, OrderPlacer,
+        PositionsSource, SessionContext, DEFAULT_AVAILABLE_CASH_CAP, MAX_CONSECUTIVE_FAILURES,
     };
 
     fn temp_trade_log() -> (Arc<TradeLog>, tempfile::TempDir) {
@@ -473,6 +670,39 @@ mod tests {
         }
     }
 
+    /// Mock `FundsSource` for tests. `fail=true` returns an error on every
+    /// fetch; otherwise returns the configured `available_balance`.
+    #[derive(Debug)]
+    struct MockFunds {
+        available_balance: f64,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl FundsSource for MockFunds {
+        async fn fetch(&self) -> anyhow::Result<DhanFundsLimit> {
+            if self.fail {
+                anyhow::bail!("mock funds failure");
+            }
+            Ok(DhanFundsLimit {
+                available_balance: self.available_balance,
+                sod_limit: 0.0,
+                collateral_amount: 0.0,
+                receiveable_amount: 0.0,
+                utilized_amount: 0.0,
+                withdrawable_balance: 0.0,
+                blocked_payout_amount: 0.0,
+            })
+        }
+    }
+
+    fn never_failing_funds() -> Arc<dyn FundsSource> {
+        Arc::new(MockFunds {
+            available_balance: 0.0,
+            fail: false,
+        })
+    }
+
     fn position_with_pnl(realized_pnl: f64) -> Position {
         Position {
             symbol: "TEST".to_string(),
@@ -485,7 +715,8 @@ mod tests {
     }
 
     /// Build a broker wired to a mock positions source with NO background
-    /// refresh task, so refresh timing in tests is fully explicit.
+    /// refresh task, so refresh timing in tests is fully explicit. Funds
+    /// source defaults to a never-failing mock that returns 0.
     fn broker_with_source(source: Arc<dyn PositionsSource>) -> DhanBroker {
         let client = Arc::new(DhanClient::new(DhanAuth::new("test-token").unwrap()));
         let (log, _dir) = temp_trade_log();
@@ -493,9 +724,14 @@ mod tests {
             client: client.clone(),
             positions_source: source,
             order_placer: client,
+            funds_source: never_failing_funds(),
             realized_loss: Arc::new(RwLock::new(0.0)),
+            available_cash: Arc::new(RwLock::new(DEFAULT_AVAILABLE_CASH_CAP)),
+            funds_stale: Arc::new(AtomicBool::new(false)),
             consecutive_failures: Arc::new(AtomicU32::new(0)),
+            funds_failures: Arc::new(AtomicU32::new(0)),
             stale: Arc::new(AtomicBool::new(false)),
+            last_success: Arc::new(RwLock::new(None)),
             refresh_task: Mutex::new(None),
             trade_log: log,
             session_context: Arc::new(RwLock::new(None)),
@@ -503,12 +739,12 @@ mod tests {
         }
     }
 
-    /// Build a broker with injectable positions + order sources and a real
-    /// temp-file `TradeLog`. Returns the `TempDir` guard so the caller keeps
-    /// the directory alive.
+    /// Build a broker with injectable positions, orders, and funds sources
+    /// and a real temp-file `TradeLog`.
     fn broker_with_mocks(
         positions: Arc<dyn PositionsSource>,
         orders: Arc<dyn OrderPlacer>,
+        funds: Arc<dyn FundsSource>,
         trade_log: Arc<TradeLog>,
     ) -> DhanBroker {
         let client = Arc::new(DhanClient::new(DhanAuth::new("test-token").unwrap()));
@@ -516,9 +752,14 @@ mod tests {
             client,
             positions_source: positions,
             order_placer: orders,
+            funds_source: funds,
             realized_loss: Arc::new(RwLock::new(0.0)),
+            available_cash: Arc::new(RwLock::new(DEFAULT_AVAILABLE_CASH_CAP)),
+            funds_stale: Arc::new(AtomicBool::new(false)),
             consecutive_failures: Arc::new(AtomicU32::new(0)),
+            funds_failures: Arc::new(AtomicU32::new(0)),
             stale: Arc::new(AtomicBool::new(false)),
+            last_success: Arc::new(RwLock::new(None)),
             refresh_task: Mutex::new(None),
             trade_log,
             session_context: Arc::new(RwLock::new(None)),
@@ -565,6 +806,139 @@ mod tests {
             broker.refresh_realized_loss().await;
         }
         assert!(broker.is_stale());
+    }
+
+    /// C1: On a cold cache, `available_cash` must NOT be `f64::MAX` — it must
+    /// return the bounded default so `PercentCapital` orders cannot
+    /// oversize to u64 overflow.
+    #[test]
+    fn test_available_cash_starts_at_bounded_default() {
+        assert_eq!(broker().available_cash(), DEFAULT_AVAILABLE_CASH_CAP);
+        assert!(broker().available_cash().is_finite());
+    }
+
+    /// C1: A successful `/funds/limit` refresh replaces the default with the
+    /// reported balance.
+    #[tokio::test]
+    async fn test_available_cash_refreshes_from_funds_source() {
+        let funds: Arc<dyn FundsSource> = Arc::new(MockFunds {
+            available_balance: 250_000.0,
+            fail: false,
+        });
+        let positions: Arc<dyn PositionsSource> = Arc::new(MockPositions {
+            positions: Vec::new(),
+            fail: false,
+        });
+        let (log, _dir) = temp_trade_log();
+        let broker = DhanBroker {
+            client: Arc::new(DhanClient::new(DhanAuth::new("test-token").unwrap())),
+            positions_source: positions,
+            order_placer: Arc::new(DhanClient::new(DhanAuth::new("test-token").unwrap())),
+            funds_source: funds,
+            realized_loss: Arc::new(RwLock::new(0.0)),
+            available_cash: Arc::new(RwLock::new(DEFAULT_AVAILABLE_CASH_CAP)),
+            funds_stale: Arc::new(AtomicBool::new(false)),
+            consecutive_failures: Arc::new(AtomicU32::new(0)),
+            funds_failures: Arc::new(AtomicU32::new(0)),
+            stale: Arc::new(AtomicBool::new(false)),
+            last_success: Arc::new(RwLock::new(None)),
+            refresh_task: Mutex::new(None),
+            trade_log: log,
+            session_context: Arc::new(RwLock::new(None)),
+            paused_for_entries: Arc::new(AtomicBool::new(false)),
+        };
+        broker.refresh_funds().await;
+        assert_eq!(broker.available_cash(), 250_000.0);
+    }
+
+    /// C1: A failed refresh leaves the cache at its last good value (does
+    /// not reset to zero and does not poison with `f64::MAX`). Three
+    /// consecutive failures mark the broker stale.
+    #[tokio::test]
+    async fn test_available_cash_stale_keeps_last_good_value() {
+        let failing_funds: Arc<dyn FundsSource> = Arc::new(MockFunds {
+            available_balance: 0.0,
+            fail: true,
+        });
+        let positions: Arc<dyn PositionsSource> = Arc::new(MockPositions {
+            positions: Vec::new(),
+            fail: false,
+        });
+        let (log, _dir) = temp_trade_log();
+        let broker = DhanBroker {
+            client: Arc::new(DhanClient::new(DhanAuth::new("test-token").unwrap())),
+            positions_source: positions,
+            order_placer: Arc::new(DhanClient::new(DhanAuth::new("test-token").unwrap())),
+            funds_source: failing_funds,
+            realized_loss: Arc::new(RwLock::new(0.0)),
+            available_cash: Arc::new(RwLock::new(42_000.0)),
+            funds_stale: Arc::new(AtomicBool::new(false)),
+            consecutive_failures: Arc::new(AtomicU32::new(0)),
+            funds_failures: Arc::new(AtomicU32::new(0)),
+            stale: Arc::new(AtomicBool::new(false)),
+            last_success: Arc::new(RwLock::new(None)),
+            refresh_task: Mutex::new(None),
+            trade_log: log,
+            session_context: Arc::new(RwLock::new(None)),
+            paused_for_entries: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(!broker.is_stale());
+        for _ in 0..MAX_CONSECUTIVE_FAILURES {
+            broker.refresh_funds().await;
+        }
+        assert!(broker.is_stale());
+        assert_eq!(
+            broker.available_cash(),
+            42_000.0,
+            "stale funds must not reset to zero or inflate to f64::MAX"
+        );
+    }
+
+    /// H2: `time_since_last_success` returns `None` before any refresh
+    /// has succeeded; after a successful refresh it returns a duration
+    /// since that instant. Drives the user-facing message that the resume
+    /// IPC returns when the broker is stale.
+    #[tokio::test]
+    async fn test_time_since_last_success_none_before_refresh() {
+        let broker = broker();
+        assert!(
+            broker.time_since_last_success().is_none(),
+            "no refresh has happened yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_time_since_last_success_after_refresh() {
+        let source = Arc::new(MockPositions {
+            positions: Vec::new(),
+            fail: false,
+        });
+        let broker = broker_with_source(source);
+        broker.refresh_realized_loss().await;
+        let elapsed = broker
+            .time_since_last_success()
+            .expect("last_success must be set after a successful refresh");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "elapsed must be near-zero, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_time_since_last_success_unchanged_on_failure() {
+        // A failed refresh must NOT advance `last_success` — the field
+        // tracks "last successful refresh," not "last attempted."
+        let source = Arc::new(MockPositions {
+            positions: Vec::new(),
+            fail: true,
+        });
+        let broker = broker_with_source(source);
+        assert!(broker.time_since_last_success().is_none());
+        broker.refresh_realized_loss().await;
+        assert!(
+            broker.time_since_last_success().is_none(),
+            "failed refresh must not stamp last_success"
+        );
     }
 
     fn order_result(status: OrderStatus) -> OrderResult {
@@ -633,7 +1007,7 @@ mod tests {
                 correlation_id: "algomln-test".to_string(),
             },
         });
-        let broker = broker_with_mocks(positions, order_placer, log);
+        let broker = broker_with_mocks(positions, order_placer, never_failing_funds(), log);
         broker.set_paused_for_entries(true);
 
         let buy_order = Order {
@@ -660,7 +1034,7 @@ mod tests {
                 correlation_id: "algomln-test".to_string(),
             },
         });
-        let broker = broker_with_mocks(positions, order_placer, log);
+        let broker = broker_with_mocks(positions, order_placer, never_failing_funds(), log);
         broker.set_paused_for_entries(true);
 
         let sell_order = Order {
@@ -695,7 +1069,12 @@ mod tests {
             result: order_result,
         });
 
-        let broker = broker_with_mocks(positions_source, order_placer, trade_log);
+        let broker = broker_with_mocks(
+            positions_source,
+            order_placer,
+            never_failing_funds(),
+            trade_log,
+        );
 
         // Set a SessionContext so the log entry carries real strategy metadata.
         *broker.session_context.write() = Some(SessionContext {

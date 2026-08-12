@@ -58,15 +58,17 @@ pub async fn request_live_start(
     state: State<'_, AppState>,
     strategy_id: String,
 ) -> Result<RequestLiveStartResult, String> {
-    // Reject if a session is already active. We hold the slot lock across
-    // the whole call so two simultaneous requests cannot both pass.
-    let session = state.live_session.lock().await;
-    if session.is_some() {
+    // C3 (audit): hold the session lock across the entire call. Two
+    // concurrent `request_live_start`s (e.g. a UI double-click) must not
+    // both pass the `is_some()` check and both run preflight — the second
+    // would overwrite the first's token and leak the slot for 90 s. Holding
+    // the lock until the token is stored atomically closes that race.
+    let session_slot = state.live_session.lock().await;
+    if session_slot.is_some() {
         return Err(
             "a live session is already active; stop it before starting another".to_string(),
         );
     }
-    drop(session);
 
     // Look up the deployed strategy record. The wire `DeployedStrategy`
     // collapses `mode` into `modes: Vec<StrategyMode>`; we want the
@@ -123,7 +125,8 @@ pub async fn request_live_start(
         }
     };
 
-    // Run gates 1–8 via the guard. The guard issues the token itself.
+    // Run gates 1–8 via the guard. The guard issues the token itself. We
+    // still hold the `live_session` lock so no concurrent caller can race.
     let result = state
         .live_guard
         .run_preflight(&symbol, &strategy_id, &strategy_node)
@@ -135,9 +138,15 @@ pub async fn request_live_start(
     };
     let token_string = token.token.clone();
 
-    // Store the token in the slot. A new request overwrites any prior
-    // pending token — the newer request wins; older token is invalidated.
+    // Store the token in the slot under the parking_lot guard pattern:
+    // take the (separate) pending-token mutex briefly, but never release
+    // the session lock until we are done with this whole call.
     *state.pending_live_token.lock().await = Some(token);
+
+    // Note: `session_slot` is dropped at function exit (no other call can
+    // touch the slot in the meantime because we held the tokio::Mutex
+    // throughout). Drop order: `session_slot` first, then `state` is freed
+    // by Tauri.
 
     Ok(RequestLiveStartResult {
         token: token_string,
@@ -318,6 +327,14 @@ pub async fn pause_live_strategy(
 
 /// Resume the live session. Only meaningful after a pause; calling resume on
 /// a non-paused session leaves it in `Running`.
+///
+/// H2 (audit): refuse to resume when the broker's safety cache (realized-loss
+/// and available-cash) is still stale. The tick loop auto-pauses when the
+/// cache goes stale; if the user clicks Resume before the next successful
+/// background refresh, the session would resume with an unreliable safety
+/// metric — the very thing the pause was protecting. The error includes the
+/// elapsed time since the last successful refresh (when known) so the user
+/// knows whether to retry immediately or wait for connectivity to recover.
 pub async fn resume_live_strategy(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -327,6 +344,22 @@ pub async fn resume_live_strategy(
             .ok_or_else(|| "no live session".to_string())?
             .clone()
     };
+
+    if session.broker.is_stale() {
+        let staleness = match session.broker.time_since_last_success() {
+            None => "the broker refresh has never succeeded since this session started"
+                .to_string(),
+            Some(elapsed) => format!(
+                "the last successful broker refresh was {elapsed:?} ago"
+            ),
+        };
+        return Err(format!(
+            "broker cache is stale — cannot resume a live session while the realized-loss or \
+             available-cash tracker is unreliable. The auto-pause was correct; please wait for \
+             the next successful refresh and try again. {staleness}."
+        ));
+    }
+
     session.resume();
     Ok(())
 }
@@ -348,10 +381,12 @@ pub struct StopResult {
 /// Stop the live session, surface any open-position warning to the UI, and
 /// clear the session slot so a new one can be started.
 ///
-/// Ordering matters: we take the session out of the slot, query positions,
-/// THEN stop the task. `LiveSession::stop` cancels the cancellation token
-/// and awaits the task — once `stop` returns the candle loop is gone and
-/// we must not hold any reference to it.
+/// Ordering matters: we take the session out of the slot, STOP the task
+/// first (cancels the cancellation token and awaits the tick loop), and
+/// ONLY THEN query positions. Querying before `stop()` races the tick loop
+/// — a SELL that closes a position could land between the snapshot and the
+/// loop's exit, hiding the close from the warning. With `stop()` first, the
+/// position snapshot is the final state of the session.
 pub async fn stop_live_strategy(
     state: State<'_, AppState>,
 ) -> Result<StopResult, String> {
@@ -363,15 +398,17 @@ pub async fn stop_live_strategy(
         .take()
         .ok_or_else(|| "no live session".to_string())?;
 
-    // 2. Query positions BEFORE stopping. We tolerate failure with an empty
-    //    list — better to surface "stopped cleanly" than to fail the stop
-    //    command because the broker was unreachable. The user can still see
-    //    open positions in their broker app.
+    // 2. Stop the session (cancels tick loop, awaits task exit). Once this
+    //    returns, no further orders can land — `execute_with_meta` is only
+    //    reachable from the engine tick loop, and the loop is gone.
+    session.stop().await;
+
+    // 3. Query positions AFTER the loop has stopped. We tolerate failure
+    //    with an empty list — better to surface "stopped cleanly" than to
+    //    fail the stop command because the broker was unreachable. The user
+    //    can still see open positions in their broker app.
     let positions = session.broker.get_positions().await.unwrap_or_default();
     let open_count = positions.iter().filter(|p| p.quantity != 0).count();
-
-    // 3. Stop the session (cancels tick loop, awaits task exit).
-    session.stop().await;
 
     // 4. Emit an event so the UI toasts even if the user isn't looking at
     //    the Live screen. The `app_handle` is `Option`-free — Tauri

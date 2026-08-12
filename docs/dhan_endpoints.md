@@ -13,12 +13,13 @@
 | 3 | POST | `/marketfeed/quote` | LTP/snapshot for one or more symbols. Body is segment-keyed: `{ "NSE_EQ": ["2885"] }`. | `DhanClient::get_quote` |
 | 4 | POST | `/charts/intraday` | Intraday candles (1/5/15/25/60 min). Auto-chunked into 89-day windows. Timestamps = Unix seconds → ms. | `DhanClient::get_ohlcv_intraday` |
 | 5 | POST | `/charts/historical` | Daily/weekly candles. Body uses date strings (`YYYY-MM-DD`). Timestamps use 1980-01-01 epoch offset. | `DhanClient::get_ohlcv` (non-intraday) |
+| 6 | GET | `/funds/limit` | Account funds limit (returns `availablebalance` + collateral / utilized / withdrawable figures). Consumed by `DhanBroker::available_cash` so `PercentCapital` order sizing reflects real buying power, capped at `DEFAULT_AVAILABLE_CASH_CAP` (1 lakh INR) until the first successful refresh. Refreshed every `FUNDS_REFRESH_INTERVAL_SECS` (60 s). | `DhanClient::get_funds_limit` |
 
 ## Static data
 
 | # | URL | Purpose | Caller |
 |---|---|---|---|
-| 6 | GET `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` | NSE scrip master (no auth). Refreshes `<app_data>/sec_id_cache.csv` if older than 7 days. User-Agent: `AlgoMLN/1.0`. | `refresh_symbol_map` |
+| 7 | GET `https://images.dhan.co/api-data/api-scrip-master-detailed.csv` | NSE scrip master (no auth). Refreshes `<app_data>/sec_id_cache.csv` if older than 7 days. User-Agent: `AlgoMLN/1.0`. | `refresh_symbol_map` |
 
 ## Notes
 
