@@ -8,7 +8,8 @@ pub mod trigger_state;
 pub use context::EvalContext;
 pub use cross::CrossDetector;
 pub use engine::{
-    EvalError, StrategyEngine, StrategyEngineProfile, StrategyInstance, StrategyStatus,
+    EvalError, OrderIntent, OrderIntentKind, StrategyEngine, StrategyEngineProfile,
+    StrategyInstance, StrategyStatus,
 };
 pub use incremental_provider::BoundedWindowProvider;
 pub use indicator_provider::{FullRecomputeProvider, IndicatorProvider};

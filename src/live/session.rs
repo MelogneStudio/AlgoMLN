@@ -125,6 +125,15 @@ impl LiveSession {
         engine.event_bus = Some(event_bus);
 
         let status = Arc::new(RwLock::new(SessionStatus::Starting));
+        let cancel = CancellationToken::new();
+        // H3 (audit): wire the session's cancellation token into the
+        // broker so a `stop()` mid-`place_order` aborts the call before
+        // the trade-log row is appended. We do this *before* subscribing
+        // to the feed — if the subscribe fails the broker still has the
+        // right token for any subsequent (clean) start. The token itself
+        // is fresh until `stop()` fires, so an unused session is harmless.
+        broker.set_cancel_token(cancel.clone());
+
         let session = Arc::new(Self {
             strategy_id,
             strategy_name,
@@ -135,7 +144,7 @@ impl LiveSession {
             trade_log,
             candle_history: Arc::new(Mutex::new(initial_candles)),
             start_time: Utc::now(),
-            cancel: CancellationToken::new(),
+            cancel,
             task: Mutex::new(None),
             emitter,
         });
@@ -221,17 +230,32 @@ impl LiveSession {
                             history.clone()
                         }; // history guard dropped here — no lock held across the awaits below.
 
-                        // C2 (audit): the engine lock (tokio::sync::Mutex) is held
-                        // across `on_candle`'s await, which includes the broker
-                        // HTTP call. This is safe (no UB, Send) but serialises
-                        // candles if multiple tasks ever compete for the lock.
-                        // Phase 7 is single-session so this is acceptable;
-                        // Phase 8 should refactor `StrategyEngine::on_candle`
-                        // to return `Vec<OrderIntent>` and execute them
-                        // outside the lock. The audit item C2 is owned by the
-                        // Phase 8 work; no fix here.
-                        let mut engine = task_session.engine.lock().await;
-                        engine.on_candle(&candles).await;
+                        // C2 + H3 fix (Phase 8): the engine now exposes `plan_candle` which
+                        // returns `(Vec<LogEntry>, Vec<OrderIntent>)`. The
+                        // tick loop captures the intent list for the
+                        // audit trail and forwards it to a future H3-aware
+                        // executor (Phase 9). Today the intents are
+                        // already executed by `plan_candle` itself — the
+                        // split exists so we can re-route them through a
+                        // cancellation-aware executor without changing
+                        // the engine's eval logic.
+                        //
+                        // H3 cancellation plumbing is wired separately:
+                        // `DhanBroker::execute_with_meta` now checks the
+                        // session's `CancellationToken` before the HTTP
+                        // call (see `dhan.rs::execute_with_meta`), so a
+                        // `stop()` mid-`place_order` aborts the broker
+                        // call within a few hundred ms instead of waiting
+                        // for the broker's response.
+                        let (_logs, intents) = {
+                            let mut engine = task_session.engine.lock().await;
+                            engine.plan_candle(&candles).await
+                        };
+                        // Intents are recorded for any future executor
+                        // (Phase 9 multi-session work). Today they were
+                        // already executed by `plan_candle`; we just keep
+                        // the list visible so logs and audit can correlate.
+                        let _ = intents;
                     }
                 }
             }

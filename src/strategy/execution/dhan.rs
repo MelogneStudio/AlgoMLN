@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
@@ -146,6 +147,18 @@ pub struct DhanBroker {
     /// SELL orders (stop-loss, take-profit, risk-breach closes) always execute.
     /// Set by `LiveSession::pause`, cleared by `LiveSession::resume`.
     paused_for_entries: Arc<AtomicBool>,
+    /// H3 (audit): cancellation token shared with the owning `LiveSession`.
+    /// `execute_with_meta` returns an error before any broker HTTP call
+    /// when the token is cancelled, so a `stop()` that fires
+    /// mid-`place_order` aborts within a few hundred ms instead of
+    /// waiting for the broker's response and writing a phantom trade-log
+    /// row. `LiveSession::start` wires its own `cancel` token via
+    /// [`DhanBroker::set_cancel_token`]; `DhanBroker::new` defaults to a
+    /// fresh token so standalone tests (and any caller that never sees
+    /// a session) keep working. Stored behind a `parking_lot::RwLock`
+    /// so the broker is shared through `Arc<DhanBroker>` without
+    /// requiring exclusive ownership of the Arc.
+    cancel_token: parking_lot::RwLock<CancellationToken>,
 }
 
 impl DhanBroker {
@@ -259,6 +272,7 @@ impl DhanBroker {
             trade_log,
             session_context: Arc::new(RwLock::new(None)),
             paused_for_entries,
+            cancel_token: parking_lot::RwLock::new(CancellationToken::new()),
         }
     }
 
@@ -321,6 +335,26 @@ impl DhanBroker {
         self.paused_for_entries.store(paused, Ordering::Relaxed);
     }
 
+    /// H3 (audit): wire the owning `LiveSession`'s cancellation token into
+    /// the broker so a `stop()` mid-`place_order` aborts the call before
+    /// the trade-log row is appended. `LiveSession::start` is the only
+    /// expected caller; tests can ignore this and rely on the default
+    /// fresh token from `DhanBroker::new`. Takes `&self` because the
+    /// broker is `Arc`-shared and we don't want callers to have to
+    /// reach inside the Arc to swap the token.
+    pub fn set_cancel_token(&self, token: CancellationToken) {
+        *self.cancel_token.write() = token;
+    }
+
+    /// H3 (audit): returns the currently-wired cancellation token so the
+    /// caller can clone it (e.g. a future plugin execution API that
+    /// threads its own tasks onto the same cancellation hook). Rarely
+    /// used — most callers should construct the token and call
+    /// `set_cancel_token` instead.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.read().clone()
+    }
+
     /// Place an order and record it in the trade log with caller-supplied
     /// metadata. This is the primary execution path. The `ExecutionTarget::execute`
     /// trait method delegates here with empty `rule_id`/`notes` so the audit log
@@ -334,6 +368,25 @@ impl DhanBroker {
         rule_id: &str,
         notes: &str,
     ) -> Result<OrderResult, ExecutionError> {
+        // H3 (audit): check the cancellation token before any broker work.
+        // The owning `LiveSession` cancels its token on `stop()`; doing this
+        // check first guarantees we never reach the broker HTTP call after
+        // a stop, and the trade-log append is never reached either (the
+        // append is downstream of the broker call). Returning the same
+        // `ExecutionError` shape as a regular broker failure keeps the
+        // engine log consistent — `OrderFailed { rule_id, error }` still
+        // surfaces the cancellation reason to the strategy log.
+        if self.cancel_token.read().is_cancelled() {
+            let msg = format!(
+                "session cancelled before order for {} could be placed",
+                order.symbol
+            );
+            return Err(ExecutionError {
+                message: msg.clone(),
+                kind: ExecutionErrorKind::BrokerError(msg),
+            });
+        }
+
         // When the session is paused, entry (BUY) orders are suppressed so the
         // user does not accidentally open new positions. SELL orders (stop-loss,
         // take-profit, risk-breach closes) always execute to protect open positions.
@@ -623,7 +676,8 @@ mod tests {
 
     use super::{
         classify_result, map_place_order_error, DhanBroker, FundsSource, OrderPlacer,
-        PositionsSource, SessionContext, DEFAULT_AVAILABLE_CASH_CAP, MAX_CONSECUTIVE_FAILURES,
+        PositionsSource, SessionContext, CancellationToken, DEFAULT_AVAILABLE_CASH_CAP,
+        MAX_CONSECUTIVE_FAILURES,
     };
 
     fn temp_trade_log() -> (Arc<TradeLog>, tempfile::TempDir) {
@@ -736,6 +790,7 @@ mod tests {
             trade_log: log,
             session_context: Arc::new(RwLock::new(None)),
             paused_for_entries: Arc::new(AtomicBool::new(false)),
+            cancel_token: parking_lot::RwLock::new(CancellationToken::new()),
         }
     }
 
@@ -764,6 +819,7 @@ mod tests {
             trade_log,
             session_context: Arc::new(RwLock::new(None)),
             paused_for_entries: Arc::new(AtomicBool::new(false)),
+            cancel_token: parking_lot::RwLock::new(CancellationToken::new()),
         }
     }
 
@@ -846,6 +902,7 @@ mod tests {
             trade_log: log,
             session_context: Arc::new(RwLock::new(None)),
             paused_for_entries: Arc::new(AtomicBool::new(false)),
+            cancel_token: parking_lot::RwLock::new(CancellationToken::new()),
         };
         broker.refresh_funds().await;
         assert_eq!(broker.available_cash(), 250_000.0);
@@ -881,6 +938,7 @@ mod tests {
             trade_log: log,
             session_context: Arc::new(RwLock::new(None)),
             paused_for_entries: Arc::new(AtomicBool::new(false)),
+            cancel_token: parking_lot::RwLock::new(CancellationToken::new()),
         };
         assert!(!broker.is_stale());
         for _ in 0..MAX_CONSECUTIVE_FAILURES {
@@ -1115,5 +1173,104 @@ mod tests {
         assert_eq!(entry.mode, "live");
         // id must be a non-empty uuid string
         assert!(!entry.id.is_empty());
+    }
+
+    /// H3 (audit): a pre-cancelled `CancellationToken` must abort
+    /// `execute_with_meta` before any broker call or trade-log append.
+    /// This guards the safety net a `stop()` mid-`place_order` relies on:
+    /// without this check, `execute_with_meta` would (a) issue an HTTP
+    /// call after the user has been told the session is stopped and
+    /// (b) write a phantom trade-log row for an order the user no
+    /// longer consented to.
+    #[tokio::test]
+    async fn test_cancel_token_aborts_execute_with_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("trade_log.jsonl");
+        let trade_log = Arc::new(TradeLog::open(log_path.clone()).unwrap());
+
+        let order_placer = Arc::new(MockOrderPlacer {
+            result: OrderResult {
+                order_id: "should-never-place".to_string(),
+                status: OrderStatus::Traded,
+                timestamp: 0,
+                correlation_id: "algomln-cancel".to_string(),
+            },
+        });
+        let positions = Arc::new(MockPositions {
+            positions: Vec::new(),
+            fail: false,
+        });
+
+        let mut broker = broker_with_mocks(
+            positions,
+            order_placer.clone(),
+            never_failing_funds(),
+            trade_log.clone(),
+        );
+
+        // Pre-cancel the token before the first order is ever placed.
+        let token = CancellationToken::new();
+        token.cancel();
+        broker.set_cancel_token(token);
+        // Note: `set_cancel_token(&self)` doesn't actually need `&mut`,
+        // we just keep `mut broker` so `execute_with_meta` is callable
+        // through the trait object (`Arc<dyn ExecutionTarget>::execute`
+        // requires `&self` — we're calling through concrete type, fine).
+
+        let order = Order {
+            symbol: "NIFTY".to_string(),
+            side: OrderSide::Buy,
+            quantity: 1,
+            order_type: OrderType::Market,
+            price: Some(22000.0),
+        };
+        let err = broker
+            .execute_with_meta(order, "rule-1", "")
+            .await
+            .expect_err("execute_with_meta must error on a pre-cancelled token");
+        assert!(err.message.contains("session cancelled"), "got: {}", err.message);
+
+        // The trade log must NOT carry a row for the cancelled attempt —
+        // no place_order means no entry, by construction.
+        let entries = TradeLog::read_all(&log_path).unwrap();
+        assert!(
+            entries.is_empty(),
+            "cancelled order must not write to the trade log; got {:?}",
+            entries
+        );
+    }
+
+    /// H3 (audit): when the token is cancelled *after* the function has
+    /// already returned (i.e. never observed), the broker behaves as
+    /// before — the check is a snapshot, not a future. This guards the
+    /// "session is stable, no cancel yet" path so we don't accidentally
+    /// add an unexpected block.
+    #[tokio::test]
+    async fn test_cancel_token_does_not_block_when_unset() {
+        let (log, _dir) = temp_trade_log();
+        let positions = Arc::new(MockPositions {
+            positions: Vec::new(),
+            fail: false,
+        });
+        let order_placer = Arc::new(MockOrderPlacer {
+            result: OrderResult {
+                order_id: "ok".to_string(),
+                status: OrderStatus::Traded,
+                timestamp: 0,
+                correlation_id: "algomln-fresh-token".to_string(),
+            },
+        });
+        let broker = broker_with_mocks(positions, order_placer, never_failing_funds(), log);
+
+        // Default token from spawn_with_source — never cancelled.
+        let order = Order {
+            symbol: "NIFTY".to_string(),
+            side: OrderSide::Buy,
+            quantity: 1,
+            order_type: OrderType::Market,
+            price: Some(22000.0),
+        };
+        let result = broker.execute_with_meta(order, "", "").await;
+        assert!(result.is_ok(), "fresh token must not block");
     }
 }

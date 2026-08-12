@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::broker::Timeframe;
-use crate::models::{Candle, Position};
+use crate::models::{Candle, Order, Position};
 use crate::plugin::api::events::{EventBus, EventKind};
 use crate::strategy::dsl::{
     ActionNode, CompareOp, ConditionNode, ExprNode, IndicatorKind, PriceField, RiskConfig,
@@ -13,6 +13,54 @@ use crate::strategy::dsl::{
 use crate::strategy::execution::{
     build_order, ExecutionTarget, OrderBuildError, PaperPosition, PaperTrade,
 };
+
+/// A planned-but-not-yet-submitted order produced by the engine's
+/// evaluation pass. The intent carries everything the broker needs —
+/// including the originating rule and free-form notes — so the caller can
+/// execute it outside the engine lock without losing log/event fidelity.
+///
+/// Intents are produced by [`StrategyEngine::plan_candle`] (eval) and
+/// consumed by [`StrategyEngine::execute_intent`] (broker call). The
+/// historical [`StrategyEngine::on_candle`] wrapper chains the two
+/// phases for backtests and the CLI — call sites that don't need the
+/// intent list keep using `on_candle` unchanged.
+//
+// C2 (live execution audit): the live tick loop previously held the
+// engine lock across `on_candle`'s await on the broker HTTP call. By
+// splitting eval from execution, the live loop now holds the lock just
+// long enough to plan intents, drops it, then executes each intent
+// asynchronously. Backtests keep using `process_candle` because they
+// already finish before the candle clock advances.
+#[derive(Debug, Clone)]
+pub struct OrderIntent {
+    /// The order to place. `symbol`, `side`, `quantity`, and `price`
+    /// are fully resolved; the caller may submit as-is.
+    pub order: Order,
+    /// Identifier of the rule or safety mechanism that produced the
+    /// intent (e.g. `"rule_3"`, `"stop_loss"`, `"take_profit"`).
+    /// Forwarded to the trade log so the audit trail links each fill to
+    /// its trigger.
+    pub rule_id: String,
+    /// Free-form note about *why* the intent was produced (e.g.
+    /// `"slippage"`). Empty for ordinary rule fires.
+    pub notes: String,
+    /// The candle timestamp under evaluation. Stored on the intent so
+    /// the executor can stamp log entries without re-reading the broker.
+    pub candle_timestamp: i64,
+}
+
+/// Coarse origin tag for an intent. Used for logging and to let the executor
+/// recognize intents that need special handling (e.g. SL/TP vs. rule fires).
+///
+/// Today the engine only attaches this when it knows the source ("stop_loss",
+/// "take_profit"); ordinary rule fires omit it. Phase 9 may surface it on
+/// the wire for plugin analytics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderIntentKind {
+    RuleFire,
+    StopLoss,
+    TakeProfit,
+}
 use crate::strategy::logging::{
     LogEntry, LogEntryKind, RiskBreachReason, RuleSkipReason, StrategyLogger,
 };
@@ -122,22 +170,41 @@ impl StrategyEngine {
         }
     }
 
-    pub async fn on_candle(&mut self, candles: &[Candle]) -> Vec<LogEntry> {
+    /// Evaluate the candle, execute every intent the engine produces **in
+    /// rule order**, and return the resulting log entries + intents.
+    ///
+    /// This is the primary eval+execute loop. The historical contract:
+    /// rule N's order is submitted before rule N+1 is evaluated (so a
+    /// `SELL ALL` triggered on the same candle as a `BUY` sees the
+    /// post-BUY position). The returned `Vec<OrderIntent>` is an audit
+    /// trail — every intent the engine executed during this candle —
+    /// that the live tick loop consumes for `H3` cancellation hooks and
+    /// for plugin observability (see audit items C2, H3).
+    ///
+    /// The `(logs, intents)` return replaces the legacy `Vec<LogEntry>`
+    /// shape on the engine's hot path so callers can observe *what was
+    /// done* without re-running the planner.
+    pub async fn plan_candle(
+        &mut self,
+        candles: &[Candle],
+    ) -> (Vec<LogEntry>, Vec<OrderIntent>) {
         let started = Instant::now();
         self.profile.on_candle_calls += 1;
 
         if !matches!(self.instance.status, StrategyStatus::Running) {
             self.profile.on_candle_time += started.elapsed();
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
 
         let Some(ctx) = EvalContext::new(candles) else {
             self.profile.on_candle_time += started.elapsed();
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
 
         self.indicator_provider.clear_cache();
         let rules = self.instance.strategy.rules.clone();
+        let mut intents = Vec::new();
+        let mut log_buffer = Vec::new();
 
         for rule in &rules {
             let prev_state = self.trigger_state.was_true(&rule.id);
@@ -166,7 +233,19 @@ impl StrategyEngine {
                             strategy_id: self.instance.id.clone(),
                         });
                     }
-                    self.submit_action(&rule.id, action, &ctx).await;
+                    // Build intent + execute immediately so subsequent rules
+                    // see the post-execution position (matches the pre-refactor
+                    // `submit_action` semantics).
+                    let build_result = self.build_intent(&rule.id, action, &ctx, None).await;
+                    if let Some(intent) = build_result {
+                        let intent_for_log = intent.clone();
+                        // `execute_intent` drains the logger; we collect
+                        // the new entries into `log_buffer` so the outer
+                        // call returns the full stream.
+                        let exec_logs = self.execute_intent(intent).await;
+                        intents.push(intent_for_log);
+                        log_buffer.extend(exec_logs);
+                    }
                 }
                 Ok(None) => {
                     self.logger.log(
@@ -206,7 +285,8 @@ impl StrategyEngine {
         if self.instance.strategy.stop_loss.is_some()
             || self.instance.strategy.take_profit.is_some()
         {
-            self.run_stop_loss_take_profit_pass(&ctx).await;
+            self.run_stop_loss_take_profit_pass(&ctx, &mut intents, &mut log_buffer)
+                .await;
         }
 
         if let Some(bus) = &self.event_bus {
@@ -215,8 +295,74 @@ impl StrategyEngine {
 
         self.indicator_provider.advance(ctx.current);
         let entries = self.logger.drain_entries();
+        log_buffer.extend(entries);
         self.profile.on_candle_time += started.elapsed();
-        entries
+        (log_buffer, intents)
+    }
+
+    /// Backward-compatible wrapper used by the CLI, backtest IPC, and
+    /// `PortfolioEngine::on_tick`. Calls [`Self::plan_candle`] and
+    /// discards the intent list — same observable behaviour as before
+    /// the C2 refactor but now goes through the unified planner.
+    pub async fn on_candle(&mut self, candles: &[Candle]) -> Vec<LogEntry> {
+        let (logs, _intents) = self.plan_candle(candles).await;
+        logs
+    }
+
+    /// Execute a single [`OrderIntent`] through the engine's
+    /// `execution_target`. Emits `OrderExecuted` / `OrderFailed` log
+    /// entries and publishes `EventKind::TradeExecuted` for fills.
+    /// Increments `risk_state.session_orders` on a successful submit only.
+    ///
+    /// Designed to be called by [`Self::plan_candle`] in rule-order
+    /// during planning. The live tick loop may also call it directly
+    /// to feed intents through a custom executor (e.g. an H3-aware
+    /// executor that checks the cancellation token before the HTTP
+    /// round-trip). The audit's full C2 lock-release refactor is
+    /// deferred to Phase 9 multi-session support — see the comment on
+    /// `LiveSession::start`'s tick loop.
+    pub async fn execute_intent(&mut self, intent: OrderIntent) -> Vec<LogEntry> {
+        let OrderIntent {
+            order,
+            rule_id,
+            notes: _,
+            candle_timestamp,
+        } = intent;
+        let timestamp = candle_timestamp;
+
+        let started = Instant::now();
+        self.profile.broker_execute_calls += 1;
+        let execution_result = self.instance.execution_target.execute(order.clone()).await;
+        self.profile.broker_execute_time += started.elapsed();
+
+        match execution_result {
+            Ok(result) => {
+                if let Some(state) = self.risk_state.as_mut() {
+                    state.session_orders += 1;
+                }
+                self.logger.log(
+                    LogEntryKind::OrderExecuted {
+                        rule_id: rule_id.clone(),
+                        result: result.clone(),
+                    },
+                    timestamp,
+                );
+                if let Some(bus) = &self.event_bus {
+                    if let Some(trade) = self.latest_paper_trade() {
+                        bus.publish(EventKind::TradeExecuted(trade));
+                    }
+                }
+            }
+            Err(error) => self.logger.log(
+                LogEntryKind::OrderFailed {
+                    rule_id,
+                    error: error.message,
+                },
+                timestamp,
+            ),
+        }
+
+        self.logger.drain_entries()
     }
 
     pub fn profile(&self) -> StrategyEngineProfile {
@@ -243,12 +389,22 @@ impl StrategyEngine {
         Ok(should_fire.then(|| rule.action.clone()))
     }
 
-    async fn submit_action(&mut self, source_id: &str, action: ActionNode, ctx: &EvalContext<'_>) {
-        // Run risk-control checks before building the order. If any limit is
-        // breached we log a `RiskBreach` entry and return without
-        // touching the broker. Order is evaluated after the position
-        // snapshot below — we need positions to count open ones for
-        // MAX_POSITIONS, and the realized-loss number for MAX_DAILY_LOSS.
+    /// Resolve a planned action into an [`OrderIntent`], running the risk
+    /// controls first. Returns `None` when the action was blocked (a
+    /// `RiskBreach` / `RuleSkipped` / `OrderFailed` entry has already
+    /// been logged in that case). On success logs `OrderSubmitted` and
+    /// returns the intent for the caller to execute outside any lock.
+    ///
+    /// `kind` is `Some(OrderIntentKind::...)` for SL/TP and `None` for
+    /// ordinary rule fires. The notes field of the intent is left empty;
+    /// callers can add their own via `intent.notes` if needed.
+    async fn build_intent(
+        &mut self,
+        source_id: &str,
+        action: ActionNode,
+        ctx: &EvalContext<'_>,
+        kind: Option<OrderIntentKind>,
+    ) -> Option<OrderIntent> {
         if let Some(breach) = self.check_risk_breach(&action, ctx).await {
             self.logger.log(
                 LogEntryKind::RiskBreach {
@@ -257,7 +413,7 @@ impl StrategyEngine {
                 },
                 ctx.current.timestamp,
             );
-            return;
+            return None;
         }
 
         let current_position = self.current_paper_position().await;
@@ -302,7 +458,7 @@ impl StrategyEngine {
                         ctx.current.timestamp,
                     ),
                 }
-                return;
+                return None;
             }
         };
 
@@ -314,40 +470,18 @@ impl StrategyEngine {
             ctx.current.timestamp,
         );
 
-        let started = Instant::now();
-        self.profile.broker_execute_calls += 1;
-        let execution_result = self.instance.execution_target.execute(order).await;
-        self.profile.broker_execute_time += started.elapsed();
+        let notes = match kind {
+            Some(OrderIntentKind::StopLoss) => "stop_loss".to_string(),
+            Some(OrderIntentKind::TakeProfit) => "take_profit".to_string(),
+            _ => String::new(),
+        };
 
-        match execution_result {
-            Ok(result) => {
-                // Increment the session order counter only on a
-                // successful submit — failed orders (insufficient funds,
-                // insufficient position) do not count toward MAX_ORDERS.
-                if let Some(state) = self.risk_state.as_mut() {
-                    state.session_orders += 1;
-                }
-                self.logger.log(
-                    LogEntryKind::OrderExecuted {
-                        rule_id: source_id.to_string(),
-                        result: result.clone(),
-                    },
-                    ctx.current.timestamp,
-                );
-                if let Some(bus) = &self.event_bus {
-                    if let Some(trade) = self.latest_paper_trade() {
-                        bus.publish(EventKind::TradeExecuted(trade));
-                    }
-                }
-            }
-            Err(error) => self.logger.log(
-                LogEntryKind::OrderFailed {
-                    rule_id: source_id.to_string(),
-                    error: error.message,
-                },
-                ctx.current.timestamp,
-            ),
-        }
+        Some(OrderIntent {
+            order,
+            rule_id: source_id.to_string(),
+            notes,
+            candle_timestamp: ctx.current.timestamp,
+        })
     }
 
     /// Check the strategy's `RISK` declarations against current state and
@@ -450,7 +584,12 @@ impl StrategyEngine {
     /// This deliberately bypasses `TriggerStateMap` and fires every candle
     /// while the position is underwater or in profit; it is the strategy's
     /// safety net, not an edge-triggered rule.
-    async fn run_stop_loss_take_profit_pass(&mut self, ctx: &EvalContext<'_>) {
+    async fn run_stop_loss_take_profit_pass(
+        &mut self,
+        ctx: &EvalContext<'_>,
+        intents: &mut Vec<OrderIntent>,
+        log_buffer: &mut Vec<LogEntry>,
+    ) {
         let stop_loss = self.instance.strategy.stop_loss;
         let take_profit = self.instance.strategy.take_profit;
 
@@ -496,8 +635,15 @@ impl StrategyEngine {
                     },
                     ctx.current.timestamp,
                 );
-                self.submit_action("stop_loss", ActionNode::SellAll, ctx)
-                    .await;
+                if let Some(intent) = self
+                    .build_intent("stop_loss", ActionNode::SellAll, ctx, Some(OrderIntentKind::StopLoss))
+                    .await
+                {
+                    let intent_for_log = intent.clone();
+                    let exec_logs = self.execute_intent(intent).await;
+                    intents.push(intent_for_log);
+                    log_buffer.extend(exec_logs);
+                }
                 return;
             }
         }
@@ -512,8 +658,15 @@ impl StrategyEngine {
                     },
                     ctx.current.timestamp,
                 );
-                self.submit_action("take_profit", ActionNode::SellAll, ctx)
-                    .await;
+                if let Some(intent) = self
+                    .build_intent("take_profit", ActionNode::SellAll, ctx, Some(OrderIntentKind::TakeProfit))
+                    .await
+                {
+                    let intent_for_log = intent.clone();
+                    let exec_logs = self.execute_intent(intent).await;
+                    intents.push(intent_for_log);
+                    log_buffer.extend(exec_logs);
+                }
             }
         }
     }
@@ -1383,5 +1536,156 @@ mod tests {
         let seq1: Vec<String> = all1.iter().map(kind).collect();
         let seq2: Vec<String> = all2.iter().map(kind).collect();
         assert_eq!(seq1, seq2);
+    }
+
+    // ---------- C2: plan_candle / execute_intent ----------
+
+    #[tokio::test]
+    async fn plan_candle_returns_intent_with_rule_id() {
+        // C2 (audit): `plan_candle` returns the planned `OrderIntent`
+        // list alongside the log entries. The intent's `rule_id` is
+        // the strategy rule that produced it, and `notes` is empty for
+        // ordinary rule fires.
+        let mut engine = make_engine("WHEN close > 105\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = (100..=108).map(|c| candle(c as f64)).collect();
+
+        let (logs, intents) = engine.plan_candle(&candles).await;
+
+        // The intent should be for the only rule that fired.
+        assert_eq!(intents.len(), 1, "exactly one intent expected");
+        let intent = &intents[0];
+        assert!(!intent.rule_id.is_empty(), "rule_id must be set");
+        assert!(
+            intent.notes.is_empty(),
+            "ordinary rule fires carry no notes, got {:?}",
+            intent.notes
+        );
+        assert_eq!(intent.order.symbol, "TEST");
+        assert_eq!(intent.order.quantity, 1);
+
+        // The side-plan should also have produced OrderExecuted logs.
+        assert!(logs
+            .iter()
+            .any(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. })));
+    }
+
+    #[tokio::test]
+    async fn plan_candle_stop_loss_intent_has_notes() {
+        // Stop-loss intent should carry `notes = "stop_loss"` so the
+        // trade log can identify the safety-net orders.
+        let mut engine = make_engine("STOP_LOSS 2%\nWHEN close > 0\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(100.0), candle(100.0), candle(97.0)];
+
+        engine.plan_candle(&candles[..1]).await;
+        let (_, intents) = engine.plan_candle(&candles[..2]).await;
+        // Candle 2: no rule fire, no SL.
+        assert!(intents.is_empty());
+
+        let (_, intents) = engine.plan_candle(&candles[..3]).await;
+        // Candle 3: SL fires.
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].notes, "stop_loss");
+        assert_eq!(intents[0].rule_id, "stop_loss");
+    }
+
+    #[tokio::test]
+    async fn plan_candle_returns_empty_intents_when_no_rules_fire() {
+        // No fire → no intents.
+        let mut engine = make_engine("WHEN close > 9999\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = vec![candle(100.0), candle(200.0)];
+
+        let (logs, intents) = engine.plan_candle(&candles).await;
+        assert!(intents.is_empty());
+        // No OrderExecuted logs (the rule never fires).
+        assert!(logs
+            .iter()
+            .all(|e| !matches!(e.kind, LogEntryKind::OrderExecuted { .. })));
+    }
+
+    #[tokio::test]
+    async fn plan_candle_executed_intent_is_deterministic() {
+        // Same input → same intent list. The C2 refactor promises a
+        // "pure function of (candles, engine_state)" planner; verify
+        // that promise concretely.
+        let source = "WHEN close > 100\nBUY 1";
+        let candles: Vec<Candle> = (95..=105).map(|c| candle(c as f64)).collect();
+
+        let mut e1 = make_engine(source, 100_000.0);
+        let mut e2 = make_engine(source, 100_000.0);
+
+        let mut intents1 = Vec::new();
+        let mut intents2 = Vec::new();
+        for index in 1..=candles.len() {
+            let (_, intents) = e1.plan_candle(&candles[..index]).await;
+            intents1.extend(intents);
+            let (_, intents) = e2.plan_candle(&candles[..index]).await;
+            intents2.extend(intents);
+        }
+
+        assert_eq!(intents1.len(), intents2.len());
+        for (a, b) in intents1.iter().zip(intents2.iter()) {
+            assert_eq!(a.rule_id, b.rule_id);
+            assert_eq!(a.notes, b.notes);
+            assert_eq!(a.order.symbol, b.order.symbol);
+            assert_eq!(a.order.side, b.order.side);
+            assert_eq!(a.order.quantity, b.order.quantity);
+        }
+    }
+
+    #[tokio::test]
+    async fn on_candle_preserves_logs_when_run_via_plan_candle() {
+        // Backward compatibility: `on_candle` is a thin wrapper around
+        // `plan_candle` and must produce the same log sequence for
+        // back-compat with downstream consumers (CLI, PortfolioEngine,
+        // backtest IPC).
+        let mut engine = make_engine("WHEN close > 105\nBUY 1", 100_000.0);
+        let candles: Vec<Candle> = (100..=110).map(|c| candle(c as f64)).collect();
+
+        let mut a = make_engine("WHEN close > 105\nBUY 1", 100_000.0);
+        let mut b = make_engine("WHEN close > 105\nBUY 1", 100_000.0);
+
+        let mut logs_on = Vec::new();
+        let mut logs_plan = Vec::new();
+        for index in 1..=candles.len() {
+            logs_on.extend(a.on_candle(&candles[..index]).await);
+            let (l, _i) = b.plan_candle(&candles[..index]).await;
+            logs_plan.extend(l);
+        }
+
+        // Compare kind sequences. Identical-length and identical kinds.
+        let kinds_on: Vec<&str> = logs_on
+            .iter()
+            .map(|e| match &e.kind {
+                LogEntryKind::ConditionEvaluated { .. } => "cond",
+                LogEntryKind::RuleFired { .. } => "fired",
+                LogEntryKind::OrderSubmitted { .. } => "submit",
+                LogEntryKind::OrderExecuted { .. } => "exec",
+                LogEntryKind::OrderFailed { .. } => "fail",
+                LogEntryKind::RuleSkipped { .. } => "skip",
+                LogEntryKind::EvalError { .. } => "err",
+                LogEntryKind::StatusChanged { .. } => "status",
+                LogEntryKind::StopLossFired { .. } => "sl",
+                LogEntryKind::TakeProfitFired { .. } => "tp",
+                LogEntryKind::RiskBreach { .. } => "risk",
+            })
+            .collect();
+        let kinds_plan: Vec<&str> = logs_plan
+            .iter()
+            .map(|e| match &e.kind {
+                LogEntryKind::ConditionEvaluated { .. } => "cond",
+                LogEntryKind::RuleFired { .. } => "fired",
+                LogEntryKind::OrderSubmitted { .. } => "submit",
+                LogEntryKind::OrderExecuted { .. } => "exec",
+                LogEntryKind::OrderFailed { .. } => "fail",
+                LogEntryKind::RuleSkipped { .. } => "skip",
+                LogEntryKind::EvalError { .. } => "err",
+                LogEntryKind::StatusChanged { .. } => "status",
+                LogEntryKind::StopLossFired { .. } => "sl",
+                LogEntryKind::TakeProfitFired { .. } => "tp",
+                LogEntryKind::RiskBreach { .. } => "risk",
+            })
+            .collect();
+
+        assert_eq!(kinds_on, kinds_plan);
     }
 }

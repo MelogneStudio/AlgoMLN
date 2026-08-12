@@ -54,7 +54,7 @@ AlgoMLN/
 │   │   │   ├── analytics.rs    SharedAnalyticsRegistry (plugin-id dedup)
 │   │   │   ├── dsl_extension.rs  SharedDslExtensionRegistry (DSL keyword registration)
 │   │   │   ├── events.rs       EventBus + EventKind + EventFilter (pub/sub)
-│   │   │   ├── execution.rs    NoopExecutionApi + ReadOnlyLiveExecutionApi — plugins can inspect positions in a live session but cannot submit orders in Phase 7
+│   │   │   ├── execution.rs    NoopExecutionApi + ReadOnlyLiveExecutionApi + GatedLiveExecutionApi (Phase 8) — plugins can inspect positions in a live session; submit_order is gated through the engine's gate stack in Phase 8
 │   │   │   ├── scheduler.rs    CronScheduler — cron + CancellationToken per task
 │   │   │   ├── log.rs          NamespacedLog — eprintln! gated by plugin_id (CLI)
 │   │   │   ├── log_file.rs     RateLimitedFileLog — token-bucket rate limit + 5MB rolling file per plugin
@@ -125,7 +125,7 @@ AlgoMLN/
 
 | Concern | File |
 |---|---|
-| Candle-by-candle evaluation loop | `src/strategy/runtime/engine.rs` (`StrategyEngine::on_candle`) |
+| Candle-by-candle evaluation loop + eval/execute split (C2 Phase 8) | `src/strategy/runtime/engine.rs` (`StrategyEngine::on_candle`, `plan_candle`, `execute_intent`, `OrderIntent`, `OrderIntentKind`) |
 | Per-rule evaluation context | `src/strategy/runtime/context.rs` (`EvalContext`) |
 | Trigger state machine (false → true) | `src/strategy/runtime/trigger_state.rs` (`TriggerStateMap`) |
 | Crossover detection | `src/strategy/runtime/cross.rs` (`CrossDetector`) |
@@ -164,7 +164,7 @@ AlgoMLN/
 | Broadcast pub/sub for plugin subscribers (no engine coupling) | `src/plugin/api/events.rs` (`EventBus`, `EventKind`) |
 | Engine event-bus hook (publishes `RuleFired` / `TradeExecuted` / `CandleProcessed` from `on_candle`) | `src/strategy/runtime/engine.rs` (`StrategyEngine::event_bus`, `latest_paper_trade`) |
 | DSL keyword registration (plugin-extensible AST handlers) | `src/plugin/api/dsl_extension.rs` (`SharedDslExtensionRegistry`) |
-| Execution capability (read-only in Phase 7; full order gateway deferred to Phase 8) | `src/plugin/api/execution.rs` (`NoopExecutionApi`, `ReadOnlyLiveExecutionApi`) |
+| Execution capability (read-only in Phase 7; `GatedLiveExecutionApi` is Phase 8 Task #4) | `src/plugin/api/execution.rs` (`NoopExecutionApi`, `ReadOnlyLiveExecutionApi`, `GatedLiveExecutionApi`) |
 
 ### Plugin IPC (Tauri side)
 
@@ -185,7 +185,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
    | `TauriUiApi` | `register_panel` / `notify` / `emit_panel_data` (broadcast to the Tauri bus) |
    | `CronScheduler` | `schedule(cron, task)` / `cancel(handle)` |
    | `BrokerMarketDataApi` | wraps the same `DhanClient` the strategy layer uses |
-   | `NoopExecutionApi` / `ReadOnlyLiveExecutionApi` | `Noop` when no live session is active; `ReadOnly` swaps in once a session is running (plugins can call `positions()` but `submit_order`/`cancel_order` return `ApiError` in Phase 7) |
+   | `NoopExecutionApi` / `ReadOnlyLiveExecutionApi` / `GatedLiveExecutionApi` | `Noop` when no live session is active; `ReadOnly` swaps in once a session is running (plugins can call `positions()` but `submit_order`/`cancel_order` return `ApiError` in Phase 7); `Gated` is the Phase 8 swap-in that re-runs every engine gate per submit and routes through the same `execute_intent` path |
    | `PluginKvStore` | per-plugin sandboxed file KV under `<app_data>/plugins/<id>/storage` |
    | `NamespacedLog` | `eprintln!` gated by plugin id (CLI path) |
    | `RateLimitedFileLog` | per-plugin token-bucket (10/sec burst, 100/min) + 5MB rolling file under `<app_data>/logs/plugin-<id>.log` (Tauri path) |
@@ -234,7 +234,7 @@ The Tauri binary wires the plugin layer to the desktop shell at startup
 |---|---|
 | `ExecutionTarget` trait + `realized_loss` (used by `RISK MAX_DAILY_LOSS`) | `src/strategy/execution/target.rs` |
 | Paper broker (in-memory cash + positions) | `src/strategy/execution/paper.rs` |
-| Dhan live broker (`ExecutionTarget`, `execute_with_meta`, `SessionContext`) | `src/strategy/execution/dhan.rs` |
+| Dhan live broker (`ExecutionTarget`, `execute_with_meta`, `SessionContext`, `CancellationToken`) | `src/strategy/execution/dhan.rs` |
 | `ActionNode` → `Order` builder | `src/strategy/execution/order_builder.rs` |
 | Live 1-minute candle assembler | `src/live/candle_assembler.rs` |
 | LiveGuard — 9-gate preflight + 90-second token + ack file | `src/live/guard.rs` |
