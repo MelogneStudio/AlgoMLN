@@ -1,0 +1,62 @@
+ Confirmed anomalies (I read the code myself)
+
+  A1 — MAX_DAILY_LOSS is a silent no-op in live trading. engine.rs:540-574
+  check_risk_breach divides realized loss by broker_initial_cash(), which returns 0.0 for any non-PaperBroker target. The if initial
+  > 0.0 guard then skips the check entirely for DhanBroker. So the one risk control CLAUDE.md invariant 9d calls "hard,
+  non-negotiable" for going live never actually fires at runtime. The live gate (guard.rs) requires it to be declared, but it's never
+  enforced. Highest-impact finding.
+
+  A2 — MAX_ORDERS can block stop-loss / take-profit exits. engine.rs:507-516
+  session_orders is incremented on every successful execute (BUY, SELL, and SL/TP SELL ALL), and the max_orders check sits at the top
+  of check_risk_breach before the action type is inspected. Once the cap is hit, a stop-loss SELL is rejected with MaxOrdersReached,
+  leaving a position open with its safety net disabled. Contradicts the spirit of invariant 12 ("SL/TP is a safety net"). Exits
+  should be exempt from the order cap.
+
+  A3 — == / != use f64::EPSILON as an absolute tolerance. engine.rs:825-826
+  (left - right).abs() <= f64::EPSILON is only meaningful for operands near 1.0. For prices/indicators (~20000), the gap between
+  adjacent doubles dwarfs f64::EPSILON (~2.2e-16), so Eq degrades to bitwise equality and Neq is effectively always true. Any DSL
+  rule using ==/!= against a computed value misbehaves. Should be a relative/ULP tolerance.
+
+  A4 — enable/disable error path permanently loses the plugin. registry.rs:178-206 (same at :218+)
+  The real plugin is mem::replaced out with EmptyPlugin before on_enable().await?. If on_enable returns Err, ? returns early and the
+  moved-out plugin is dropped — the registry slot keeps EmptyPlugin with status Loaded forever, while the UI still lists it. A plugin
+  that errors on enable effectively unloads itself silently. Needs the plugin restored to the slot on the error path.
+
+  A5 — daily_realized_loss is a dead write. engine.rs:549-556
+  Written on every call with a comment claiming it avoids recomputation, but check_risk_breach always recomputes realized_loss() from
+  the broker. The field is never read. Harmless, but the comment is misleading and the "daily" name implies a reset that never
+  happens.
+
+  Reported by subagents, plausible but lower-confidence
+
+  B1 — No per-candle market-hours gate in the live tick loop. session.rs / guard.rs
+  is_market_open is checked only at preflight. A session started at 15:29 keeps assembling candles and can attempt orders after
+  15:30. Flagged as known limitation "L4" but it's a real post-close order hazard.
+
+  B2 — Candle assembler drops gap-minutes and never flushes the final candle. candle_assembler.rs:28-60
+  On a feed gap (minute N → N+3) only candle N is emitted; N+1/N+2 vanish, giving the engine a non-contiguous series that corrupts
+  time-based indicators. The last minute's candle before stop/close is never flushed.
+
+  B3 — WASM CPU cap is armed but never driven. wasm_runtime.rs:150-160
+  set_epoch_deadline(1) is set but nothing calls increment_epoch() (no watchdog), and there's no fuel and async_support(false). An
+  infinite loop in a plugin lifecycle export hangs the host thread. The primary containment mechanism doesn't contain.
+
+  B4 — GatedLiveExecutionApi gate-5/6 read broker-global state, not the fetched session. execution.rs:282-294
+  Gate 1 pulls session from the slot, but gate 5 checks self.broker.cancel_token() and gate 4 self.broker.is_stale(). In
+  single-session Phase 8 the broker token is the active session's, so not currently exploitable — but it's a latent inconsistency
+  that breaks the moment multi-session lands, and gate 6 already reads session.broker while 4/5 read self.broker.
+
+  B5 — Trade-log durability + poison. trade_log.rs:52-60
+  Append uses flush() not fsync (a crash can lose the last audited trades), and a panic while holding the mutex poisons it, disabling
+  all further logging for the session. For an immutable audit log of real orders, both are worth hardening.
+
+  Clean / no issue found
+
+  - DSL parser/validator/lexer: no panics on malformed input, ranges (0,100] correct, wire boundary
+  (BacktestResultWire/PaperTradeWire) fully aligned with the TS contract — no missing/renamed fields.
+  - Lock discipline in commands/live.rs: no parking_lot guard held across .await (all await-spanning locks are tokio::sync::Mutex).
+  Clean.
+  - on_candle/plan_candle equivalence, determinism (BTreeMap usage), and SL/TP bypass-of-trigger-state are all correct.
+
+  I recommend fixing A1, A2, A3, A4 first — each is verified and contradicts a stated invariant. I made no code edits. Want me to fix
+  any of these?
