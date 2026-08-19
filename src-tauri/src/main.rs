@@ -28,7 +28,7 @@ use algomln::{
             analytics::SharedAnalyticsRegistry,
             dsl_extension::SharedDslExtensionRegistry,
             events::EventBus,
-            execution::{NoopExecutionApi, ReadOnlyLiveExecutionApi},
+            execution::{GatedLiveExecutionApi, NoopExecutionApi},
             indicator_registry::SharedIndicatorRegistry,
             log_file::RateLimitedFileLog,
             market_data::BrokerMarketDataApi,
@@ -365,13 +365,17 @@ fn main() {
             // The plugin's "market data" capability is backed by the same
             // broker the rest of the app uses (Dhan in production).
             //
-            // The "execution" capability is **read-only** in Phase 7:
-            // plugins can inspect positions during a live session but
-            // cannot submit orders. Live orders must originate from the
-            // strategy engine so `MAX_DAILY_LOSS`, market-hours, session
-            // pause, and trade-log context gates cover every real order.
-            // We swap from `NoopExecutionApi` to `ReadOnlyLiveExecutionApi`
-            // inside the `HostFactory` once a session is live.
+            // The "execution" capability is **gated** in Phase 8:
+            // plugins loaded outside a live session get the no-op
+            // stub; plugins loaded during an active live session get a
+            // `GatedLiveExecutionApi` that re-runs market-hours, broker
+            // staleness, symbol/segment, pause, and cancellation gates
+            // on every `submit_order` and proxies through
+            // `DhanBroker::execute_with_meta` so the trade-log row and
+            // H3 cancellation cover plugin orders too. The session
+            // slot is captured at host-factory construction time; a
+            // session that starts *after* a plugin is loaded will be
+            // picked up on the next `scan_and_load` (hot reload).
             let broker_arc = data.broker.clone();
             let market_data_api: Arc<dyn algomln::plugin::api::MarketDataApi> =
                 Arc::new(BrokerMarketDataApi::new(broker_arc));
@@ -381,14 +385,14 @@ fn main() {
             // Phase 7 — live session machinery. The session slot is
             // shared with the HostFactory closure so that plugin hosts
             // constructed during an active session get a
-            // `ReadOnlyLiveExecutionApi` instead of the no-op.
+            // `GatedLiveExecutionApi` instead of the no-op.
             let live_session_slot: Arc<tokio::sync::Mutex<Option<Arc<algomln::live::session::LiveSession>>>> =
                 Arc::new(tokio::sync::Mutex::new(None));
             let pending_live_token: Arc<tokio::sync::Mutex<Option<algomln::live::guard::PendingLiveToken>>> =
                 Arc::new(tokio::sync::Mutex::new(None));
 
             // Capture the multi-thread tokio runtime handle here so the
-            // factory can pass it into `ReadOnlyLiveExecutionApi::new`.
+            // factory can pass it into `GatedLiveExecutionApi::new`.
             // The plugin callback may run on a non-tokio thread, so we
             // must never call `Handle::current()` from inside a plugin.
             // Tauri's setup closure runs synchronously, so we resolve the
@@ -399,6 +403,9 @@ fn main() {
 
             // LiveGuard construction must follow DhanBroker construction
             // (the guard holds a clone of the broker and the client).
+            // The `holiday_calendar` is shared with the gated plugin
+            // execution API so plugin orders re-use the same market-hours
+            // predicate as `LiveGuard::run_preflight`.
             let ack_path = store_dir.join("live_ack.json");
             let holiday_calendar = Arc::new(NseHolidayCalendar::new());
             let live_guard = Arc::new(LiveGuard::new(
@@ -406,7 +413,7 @@ fn main() {
                 symbol_map.clone(),
                 dhan_broker.clone(),
                 ack_path.clone(),
-                holiday_calendar,
+                holiday_calendar.clone(),
             ));
 
             // Per-plugin storage lives under `<app_data>/plugins/<plugin_id>/storage`.
@@ -423,9 +430,15 @@ fn main() {
             let logs_dir_for_factory = logs_dir.clone();
 
             // Clones used by the HostFactory closure below to pick a
-            // live execution API when a session is active.
+            // live execution API when a session is active. The
+            // `symbol_map` + `holiday_calendar` clones are needed by
+            // `GatedLiveExecutionApi::new` (it re-runs the symbol and
+            // market-hours gates on every `submit_order` call).
             let live_session_slot_for_factory = live_session_slot.clone();
             let runtime_handle_for_factory = runtime_handle.clone();
+            let symbol_map_for_factory = symbol_map.clone();
+            let holidays_for_factory = holiday_calendar.clone();
+            let dhan_broker_for_factory = dhan_broker.clone();
 
             let host_factory: algomln::plugin::registry::HostFactory = Arc::new(
                 move |id: algomln::plugin::PluginId,
@@ -447,11 +460,14 @@ fn main() {
                         RateLimitedFileLog::open(&logs_dir_for_factory, id.clone())
                             .expect("plugin log file should be creatable"),
                     );
-                    // Phase 7 — pick the live or no-op execution API based
-                    // on whether a live session is currently running.
-                    // Plugins loaded mid-session get read-only access to
-                    // the same broker the engine is using; plugins loaded
-                    // outside a session get the no-op stub.
+                    // Phase 8 — pick the gated or no-op execution API
+                    // based on whether a live session is currently
+                    // running. Plugins loaded mid-session get a
+                    // `GatedLiveExecutionApi` that re-runs every engine
+                    // gate on each `submit_order` and proxies through
+                    // the same `DhanBroker::execute_with_meta` the
+                    // engine uses; plugins loaded outside a session get
+                    // the no-op stub.
                     let exec: Arc<dyn algomln::plugin::api::ExecutionApi> = {
                         // Try to acquire the lock briefly. If a session
                         // start is in flight we'll fall through to the
@@ -463,9 +479,12 @@ fn main() {
                         // plugins load once at startup before any
                         // session is started, so the race is benign.
                         if let Ok(slot) = live_session_slot_for_factory.try_lock() {
-                            if let Some(session) = slot.as_ref() {
-                                Arc::new(ReadOnlyLiveExecutionApi::new(
-                                    session.broker.clone(),
+                            if let Some(_session) = slot.as_ref() {
+                                Arc::new(GatedLiveExecutionApi::new(
+                                    dhan_broker_for_factory.clone(),
+                                    live_session_slot_for_factory.clone(),
+                                    symbol_map_for_factory.clone(),
+                                    holidays_for_factory.clone(),
                                     runtime_handle_for_factory.clone(),
                                 ))
                             } else {

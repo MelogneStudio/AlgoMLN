@@ -345,8 +345,8 @@ pub async fn resume_live_strategy(
             .clone()
     };
 
-    if session.broker.is_stale() {
-        let staleness = match session.broker.time_since_last_success() {
+    if session.broker_is_stale() {
+        let staleness = match session.broker_time_since_last_success() {
             None => "the broker refresh has never succeeded since this session started"
                 .to_string(),
             Some(elapsed) => format!(
@@ -407,7 +407,7 @@ pub async fn stop_live_strategy(
     //    with an empty list — better to surface "stopped cleanly" than to
     //    fail the stop command because the broker was unreachable. The user
     //    can still see open positions in their broker app.
-    let positions = session.broker.get_positions().await.unwrap_or_default();
+    let positions = session.broker_positions().await;
     let open_count = positions.iter().filter(|p| p.quantity != 0).count();
 
     // 4. Emit an event so the UI toasts even if the user isn't looking at
@@ -469,7 +469,7 @@ pub async fn get_live_status(
     };
     // Lock is released — we can await freely.
 
-    let positions = session.broker.get_positions().await.unwrap_or_default();
+    let positions = session.broker_positions().await;
     let (status_str, fail_reason) = match session.status() {
         crate::live::session::SessionStatus::Starting => ("Starting".into(), None),
         crate::live::session::SessionStatus::Running => ("Running".into(), None),
@@ -486,7 +486,7 @@ pub async fn get_live_status(
         fail_reason,
         start_time: session.start_time.to_rfc3339(),
         position_count: positions.iter().filter(|p| p.quantity != 0).count() as i64,
-        realized_loss: session.broker.realized_loss(),
-        loss_tracking_stale: session.broker.is_stale(),
+        realized_loss: session.broker_realized_loss(),
+        loss_tracking_stale: session.broker_is_stale(),
     }))
 }

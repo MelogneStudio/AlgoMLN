@@ -38,6 +38,15 @@ const REFRESH_INTERVAL_SECS: u64 = 10;
 const FUNDS_REFRESH_INTERVAL_SECS: u64 = 60;
 /// After this many consecutive refresh failures the cache is marked stale.
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+/// Per-order realized-loss refresh throttle (audit W5). `execute_with_meta`
+/// fires an HTTP `GET /positions` after every successful place; without a
+/// throttle, a 5-rule strategy that fires 5 orders on the same candle pays
+/// 5 GETs back-to-back. The session tick loop already coalesces one refresh
+/// per candle boundary via the 10s background ticker; this constant caps
+/// how often the per-order refresh can compound that cost. Picked > 5s so
+/// a multi-rule candle still gets a single refresh, but a burst of orders
+/// across candles does not pile up.
+const PER_ORDER_REFRESH_MIN_INTERVAL_SECS: u64 = 5;
 /// Hard cap on `available_cash` until the first successful `/funds/limit`
 /// fetch lands. Defends against sizing orders against a `f64::MAX` while the
 /// cache is still warming — see audit item C1. Conservative default for an
@@ -134,6 +143,13 @@ pub struct DhanBroker {
     /// stale the cache really is. Updated by [`refresh_once`] /
     /// [`refresh_funds_once`] on every success.
     last_success: Arc<RwLock<Option<Instant>>>,
+    /// W5 (audit): wall-clock instant of the most recent **attempted**
+    /// realized-loss refresh, success or not. The per-order refresh inside
+    /// `execute_with_meta` short-circuits when this is younger than
+    /// `PER_ORDER_REFRESH_MIN_INTERVAL_SECS`, so a burst of orders within
+    /// one candle issues at most one HTTP `GET /positions`. The 10s
+    /// background ticker still drives a refresh on every candle boundary.
+    last_realized_loss_refresh: Arc<RwLock<Instant>>,
     /// Handle to the background refresh task, aborted on drop so tests (and
     /// short-lived sessions) do not leak tasks.
     refresh_task: Mutex<Option<JoinHandle<()>>>,
@@ -146,7 +162,18 @@ pub struct DhanBroker {
     /// When true, BUY (entry) orders are suppressed in `execute_with_meta`.
     /// SELL orders (stop-loss, take-profit, risk-breach closes) always execute.
     /// Set by `LiveSession::pause`, cleared by `LiveSession::resume`.
-    paused_for_entries: Arc<AtomicBool>,
+    ///
+    /// L2 (audit): the field is `pub(crate)` so only `LiveSession` (and
+    /// anything else inside the `algomln` crate) can read or write it
+    /// directly. External callers — including the Tauri binary — must
+    /// go through the typed snapshot getter
+    /// [`DhanBroker::paused_for_entries_snapshot`] and the gated setter
+    /// [`DhanBroker::set_paused_for_entries`], which both refuse to
+    /// operate when no `SessionContext` is set (i.e. no live session is
+    /// in flight). The previous `pub` field was a one-line tripwire that
+    /// any future `Arc<DhanBroker>` clone could have used to flip the
+    /// flag without going through `LiveSession::pause`.
+    pub(crate) paused_for_entries: Arc<AtomicBool>,
     /// H3 (audit): cancellation token shared with the owning `LiveSession`.
     /// `execute_with_meta` returns an error before any broker HTTP call
     /// when the token is cancelled, so a `stop()` that fires
@@ -196,6 +223,13 @@ impl DhanBroker {
         // message ("broker refresh has never succeeded") and gates the
         // optional error in `time_since_last_success`.
         let last_success: Arc<RwLock<Option<Instant>>> = Arc::new(RwLock::new(None));
+        // W5: stamp the throttle instant far in the past so the first
+        // post-`place_order` refresh actually fires (a fresh broker must
+        // warm the cache immediately, not wait 5s).
+        let last_realized_loss_refresh: Arc<RwLock<Instant>> =
+            Arc::new(RwLock::new(Instant::now() - Duration::from_secs(
+                PER_ORDER_REFRESH_MIN_INTERVAL_SECS + 1,
+            )));
 
         // Spawn the periodic refresh only when a Tokio runtime is available.
         // Plain `#[test]` constructions (and any non-async caller) simply get
@@ -268,6 +302,7 @@ impl DhanBroker {
             funds_failures,
             stale,
             last_success,
+            last_realized_loss_refresh,
             refresh_task: Mutex::new(refresh_task),
             trade_log,
             session_context: Arc::new(RwLock::new(None)),
@@ -281,7 +316,42 @@ impl DhanBroker {
     /// successful order placement. On failure the cache is left untouched
     /// (never reset to zero) and the failure counter advances toward
     /// staleness.
+    ///
+    /// W5 (audit): when called from `execute_with_meta` after a successful
+    /// order, the call short-circuits if a refresh was attempted within the
+    /// last `PER_ORDER_REFRESH_MIN_INTERVAL_SECS`. The 10s background
+    /// ticker already coalesces a refresh on every candle boundary, so
+    /// the per-order path is only useful for "many orders on the same
+    /// candle" — and that case is precisely the one where the throttle
+    /// saves N HTTP GETs. Tests that call `refresh_realized_loss`
+    /// directly bypass the throttle (`force = true` overload below) so
+    /// deterministic assertions still work.
     pub async fn refresh_realized_loss(&self) {
+        // Throttle: skip when the previous attempt was recent. The first
+        // call on a fresh broker always passes (the field was stamped
+        // far in the past at construction time).
+        {
+            let last = *self.last_realized_loss_refresh.read();
+            if last.elapsed() < Duration::from_secs(PER_ORDER_REFRESH_MIN_INTERVAL_SECS) {
+                return;
+            }
+            *self.last_realized_loss_refresh.write() = Instant::now();
+        }
+        refresh_once(
+            &self.positions_source,
+            &self.realized_loss,
+            &self.consecutive_failures,
+            &self.stale,
+            &self.last_success,
+        )
+        .await;
+    }
+
+    /// W5 (audit): bypass the per-order throttle. Used by the background
+    /// ticker (which already runs on its own cadence) and by tests that
+    /// need to assert a refresh happened synchronously.
+    pub async fn refresh_realized_loss_unchecked(&self) {
+        *self.last_realized_loss_refresh.write() = Instant::now();
         refresh_once(
             &self.positions_source,
             &self.realized_loss,
@@ -331,8 +401,30 @@ impl DhanBroker {
     /// (set `true`) and `LiveSession::resume` (set `false`). When set, BUY orders
     /// are rejected before reaching the broker; SELL orders (SL, TP, risk-breach
     /// closes) always go through so open positions remain protected.
-    pub fn set_paused_for_entries(&self, paused: bool) {
+    ///
+    /// L2 (audit): the setter is gated on a live `SessionContext` being set
+    /// on the broker. If no session is active, the call is a silent no-op
+    /// (returning `false`) — the broker must not flip the flag outside an
+    /// active session because there is no caller that should be reaching
+    /// for it. The previous `pub` setter could have been called with an
+    /// `Arc<DhanBroker>` clone by anyone who could reach the field.
+    /// Returns `true` when the flag was actually changed, `false` when the
+    /// call was rejected.
+    pub fn set_paused_for_entries(&self, paused: bool) -> bool {
+        if self.session_context.read().is_none() {
+            return false;
+        }
         self.paused_for_entries.store(paused, Ordering::Relaxed);
+        true
+    }
+
+    /// Snapshot of the entry-suppression flag. Read-only so the gated
+    /// plugin execution API can re-run the pause gate without exposing
+    /// the underlying `AtomicBool` (L2 in the live execution audit —
+    /// `paused_for_entries` stays `pub(crate)` and the public surface
+    /// is a typed setter plus a snapshot getter).
+    pub fn paused_for_entries_snapshot(&self) -> bool {
+        self.paused_for_entries.load(Ordering::Relaxed)
     }
 
     /// H3 (audit): wire the owning `LiveSession`'s cancellation token into
@@ -661,7 +753,7 @@ mod tests {
         atomic::{AtomicBool, AtomicU32},
         Arc,
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use async_trait::async_trait;
     use parking_lot::{Mutex, RwLock};
@@ -786,6 +878,13 @@ mod tests {
             funds_failures: Arc::new(AtomicU32::new(0)),
             stale: Arc::new(AtomicBool::new(false)),
             last_success: Arc::new(RwLock::new(None)),
+            // W5: stamp the throttle instant far in the past so tests
+            // that call `refresh_realized_loss()` repeatedly see every
+            // attempt fire (otherwise the staleness-after-N-failures test
+            // would silently be a no-op).
+            last_realized_loss_refresh: Arc::new(RwLock::new(
+                Instant::now() - Duration::from_secs(PER_ORDER_REFRESH_MIN_INTERVAL_SECS + 1),
+            )),
             refresh_task: Mutex::new(None),
             trade_log: log,
             session_context: Arc::new(RwLock::new(None)),
@@ -815,6 +914,9 @@ mod tests {
             funds_failures: Arc::new(AtomicU32::new(0)),
             stale: Arc::new(AtomicBool::new(false)),
             last_success: Arc::new(RwLock::new(None)),
+            last_realized_loss_refresh: Arc::new(RwLock::new(
+                Instant::now() - Duration::from_secs(PER_ORDER_REFRESH_MIN_INTERVAL_SECS + 1),
+            )),
             refresh_task: Mutex::new(None),
             trade_log,
             session_context: Arc::new(RwLock::new(None)),
@@ -898,6 +1000,9 @@ mod tests {
             funds_failures: Arc::new(AtomicU32::new(0)),
             stale: Arc::new(AtomicBool::new(false)),
             last_success: Arc::new(RwLock::new(None)),
+            last_realized_loss_refresh: Arc::new(RwLock::new(
+                Instant::now() - Duration::from_secs(PER_ORDER_REFRESH_MIN_INTERVAL_SECS + 1),
+            )),
             refresh_task: Mutex::new(None),
             trade_log: log,
             session_context: Arc::new(RwLock::new(None)),
@@ -934,6 +1039,9 @@ mod tests {
             funds_failures: Arc::new(AtomicU32::new(0)),
             stale: Arc::new(AtomicBool::new(false)),
             last_success: Arc::new(RwLock::new(None)),
+            last_realized_loss_refresh: Arc::new(RwLock::new(
+                Instant::now() - Duration::from_secs(PER_ORDER_REFRESH_MIN_INTERVAL_SECS + 1),
+            )),
             refresh_task: Mutex::new(None),
             trade_log: log,
             session_context: Arc::new(RwLock::new(None)),
@@ -1066,7 +1174,18 @@ mod tests {
             },
         });
         let broker = broker_with_mocks(positions, order_placer, never_failing_funds(), log);
-        broker.set_paused_for_entries(true);
+        // L2 (audit): the setter is gated on a SessionContext. Stand one
+        // up so the flag actually flips — this is what `LiveSession::start`
+        // does in production before `pause`/`resume` ever runs.
+        *broker.session_context.write() = Some(SessionContext {
+            strategy_id: "strat-pause-test".to_string(),
+            strategy_name: "Pause Test".to_string(),
+            mode: "live".to_string(),
+        });
+        assert!(
+            broker.set_paused_for_entries(true),
+            "set_paused_for_entries must succeed when a SessionContext is set"
+        );
 
         let buy_order = Order {
             symbol: "RELIANCE".to_string(),
@@ -1093,6 +1212,11 @@ mod tests {
             },
         });
         let broker = broker_with_mocks(positions, order_placer, never_failing_funds(), log);
+        *broker.session_context.write() = Some(SessionContext {
+            strategy_id: "strat-pause-test".to_string(),
+            strategy_name: "Pause Test".to_string(),
+            mode: "live".to_string(),
+        });
         broker.set_paused_for_entries(true);
 
         let sell_order = Order {
@@ -1272,5 +1396,111 @@ mod tests {
         };
         let result = broker.execute_with_meta(order, "", "").await;
         assert!(result.is_ok(), "fresh token must not block");
+    }
+
+    /// L2 (audit): `set_paused_for_entries` must reject any call when no
+    /// `SessionContext` is set on the broker. The flag stays at whatever
+    /// value the broker was constructed with (default `false`), so a
+    /// rogue `Arc<DhanBroker>` clone cannot pause a non-existent session.
+    #[test]
+    fn test_set_paused_for_entries_rejected_without_session_context() {
+        let (log, _dir) = temp_trade_log();
+        let positions = Arc::new(MockPositions { positions: Vec::new(), fail: false });
+        let order_placer = Arc::new(MockOrderPlacer {
+            result: OrderResult {
+                order_id: "unused".to_string(),
+                status: OrderStatus::Traded,
+                timestamp: 0,
+                correlation_id: "algomln-no-session".to_string(),
+            },
+        });
+        let broker = broker_with_mocks(positions, order_placer, never_failing_funds(), log);
+        assert!(broker.session_context.read().is_none());
+
+        // No session context: setter returns false and the flag stays false.
+        assert!(
+            !broker.set_paused_for_entries(true),
+            "setter must reject when no SessionContext is set"
+        );
+        assert!(
+            !broker.paused_for_entries_snapshot(),
+            "flag must not flip when the setter rejects the call"
+        );
+        assert!(
+            !broker.set_paused_for_entries(false),
+            "clear path must also be gated"
+        );
+    }
+
+    /// W5 (audit): a `refresh_realized_loss` call within the throttle
+    /// window must short-circuit so a burst of orders on the same candle
+    /// does not pile up N HTTP `GET /positions` calls. We assert this
+    /// with an `AtomicUsize` fetch counter on the mock positions source —
+    /// the second call inside the window must NOT touch the source.
+    #[tokio::test]
+    async fn test_refresh_realized_loss_throttles_within_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+
+        #[derive(Debug)]
+        struct CountingPositions {
+            positions: Vec<Position>,
+            fetch_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl PositionsSource for CountingPositions {
+            async fn fetch(&self) -> anyhow::Result<Vec<Position>> {
+                self.fetch_count.fetch_add(1, AOrd::Relaxed);
+                Ok(self.positions.clone())
+            }
+        }
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let source: Arc<dyn PositionsSource> = Arc::new(CountingPositions {
+            positions: vec![position_with_pnl(-100.0)],
+            fetch_count: fetch_count.clone(),
+        });
+        let broker = broker_with_source(source);
+        // Pre-stamp the throttle instant so the first call is throttled
+        // (we want to assert the second-and-subsequent calls are skipped
+        // when the window is still open).
+        *broker.last_realized_loss_refresh.write() =
+            Instant::now() - Duration::from_secs(1);
+
+        // First call: within the throttle window, so no fetch.
+        broker.refresh_realized_loss().await;
+        assert_eq!(
+            fetch_count.load(AOrd::Relaxed),
+            0,
+            "first call inside the throttle window must short-circuit"
+        );
+
+        // Stamp the throttle instant far in the past so the next call fires.
+        *broker.last_realized_loss_refresh.write() =
+            Instant::now() - Duration::from_secs(PER_ORDER_REFRESH_MIN_INTERVAL_SECS + 1);
+        broker.refresh_realized_loss().await;
+        assert_eq!(
+            fetch_count.load(AOrd::Relaxed),
+            1,
+            "after the window expires, the next call must hit the source"
+        );
+
+        // And the very next call (still inside the new window) must
+        // short-circuit again — the throttle does not "leak."
+        broker.refresh_realized_loss().await;
+        assert_eq!(
+            fetch_count.load(AOrd::Relaxed),
+            1,
+            "second call inside the new window must short-circuit again"
+        );
+
+        // `refresh_realized_loss_unchecked` bypasses the throttle —
+        // background ticker uses it for that reason.
+        broker.refresh_realized_loss_unchecked().await;
+        assert_eq!(
+            fetch_count.load(AOrd::Relaxed),
+            2,
+            "unchecked refresh must always hit the source"
+        );
     }
 }

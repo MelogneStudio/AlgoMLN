@@ -65,7 +65,7 @@ pub struct OrderRequest {
     pub price: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderSide {
     Buy,
     Sell,

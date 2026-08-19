@@ -74,7 +74,17 @@ pub struct LiveSession {
     pub symbol: String,
     pub status: Arc<RwLock<SessionStatus>>,
     pub engine: Arc<Mutex<StrategyEngine>>,
-    pub broker: Arc<DhanBroker>,
+    /// L8 (audit): the broker handle is `pub(crate)` so only the `algomln`
+    /// crate can reach `DhanBroker::execute_with_meta` directly. External
+    /// callers (the Tauri binary, future plugin code) must go through the
+    /// typed helpers below — `broker_positions`, `broker_realized_loss`,
+    /// `broker_is_stale`, `broker_time_since_last_success`,
+    /// `broker_cancel_token`, `broker_paused_for_entries`, and the
+    /// `set_paused_for_entries` setter. The previous `pub broker` field
+    /// was a one-line tripwire that any plugin host with an
+    /// `Arc<LiveSession>` could have used to place orders without going
+    /// through the gate stack.
+    pub(crate) broker: Arc<DhanBroker>,
     pub trade_log: Arc<TradeLog>,
     pub candle_history: Arc<Mutex<Vec<Candle>>>,
     pub start_time: DateTime<Utc>,
@@ -274,13 +284,29 @@ impl LiveSession {
     /// still runs `on_candle` every minute — stop-loss, take-profit, and
     /// risk-breach orders are **not** suppressed. Only new *entry* (BUY) orders
     /// are blocked, via the broker's `paused_for_entries` flag.
+    ///
+    /// L2 (audit): the underlying `set_paused_for_entries` is gated on a
+    /// `SessionContext` being set; `LiveSession::start` always sets one
+    /// before this method is reachable, so the rejection branch should
+    /// never fire in production. We log a warning if it does — that
+    /// would mean the session's context was cleared while the session
+    /// itself is still active, which is a bookkeeping bug.
     pub fn pause(&self) {
-        self.broker.set_paused_for_entries(true);
+        if !self.broker.set_paused_for_entries(true) {
+            eprintln!(
+                "[live_session] WARN: pause() called but broker has no SessionContext \
+                 — the session's context was cleared out from under it"
+            );
+        }
         *self.status.write() = SessionStatus::Paused;
     }
 
     pub fn resume(&self) {
-        self.broker.set_paused_for_entries(false);
+        if !self.broker.set_paused_for_entries(false) {
+            eprintln!(
+                "[live_session] WARN: resume() called but broker has no SessionContext"
+            );
+        }
         *self.status.write() = SessionStatus::Running;
     }
 
@@ -332,6 +358,57 @@ impl LiveSession {
 
     pub fn status(&self) -> SessionStatus {
         self.status.read().clone()
+    }
+
+    // ── L8 (audit) typed accessors ────────────────────────────────────────
+    //
+    // The `pub(crate) broker` field exposes every method on `DhanBroker`,
+    // including `execute_with_meta`. That is too much surface for a
+    // plugin host (or a future IPC) that needs to render position counts
+    // or staleness toasts. The helpers below narrow the public API to
+    // exactly what `commands::live` (and any future read-only caller)
+    // needs; everything else stays crate-private.
+
+    /// Snapshot the broker's open positions. Tolerates a broker HTTP
+    /// failure with `Ok(Vec::new())` so the caller can still render
+    /// "0 open positions" in the UI rather than failing the whole
+    /// status call. Mirrors the behaviour the `commands::live` callers
+    /// used to rely on before L8 narrowed the broker field.
+    pub async fn broker_positions(&self) -> Vec<crate::models::Position> {
+        self.broker.get_positions().await.unwrap_or_default()
+    }
+
+    /// Non-negative realized-loss magnitude in rupees. Drives the
+    /// `LiveStatusWire.realized_loss` field.
+    pub fn broker_realized_loss(&self) -> f64 {
+        self.broker.realized_loss()
+    }
+
+    /// `true` once the broker's realized-loss / available-cash cache has
+    /// gone stale. Drives the `LiveStatusWire.loss_tracking_stale` flag.
+    pub fn broker_is_stale(&self) -> bool {
+        self.broker.is_stale()
+    }
+
+    /// Wall-clock duration since the most recent successful broker refresh,
+    /// or `None` if no refresh has ever succeeded. Drives the
+    /// resume-during-stale error message so the user can see how long the
+    /// broker has been unreachable.
+    pub fn broker_time_since_last_success(&self) -> Option<Duration> {
+        self.broker.time_since_last_success()
+    }
+
+    /// Snapshot of the entry-suppression flag (BUY orders blocked). The
+    /// GatedLiveExecutionApi re-runs this gate on every plugin order.
+    pub fn broker_paused_for_entries(&self) -> bool {
+        self.broker.paused_for_entries_snapshot()
+    }
+
+    /// Clone of the session's cancellation token. The plugin order
+    /// gateway constructs its own copy of this token so its gate stack
+    /// can short-circuit orders without re-reading the broker field.
+    pub fn broker_cancel_token(&self) -> CancellationToken {
+        self.broker.cancel_token()
     }
 }
 
