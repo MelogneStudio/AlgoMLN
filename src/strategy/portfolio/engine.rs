@@ -96,6 +96,7 @@ impl PortfolioEngine {
                 status: StrategyStatus::Running,
                 execution_target: Arc::clone(&broker)
                     as Arc<dyn crate::strategy::execution::target::ExecutionTarget>,
+                initial_cash,
             };
 
             let mut engine = StrategyEngine::new(instance);

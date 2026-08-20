@@ -88,6 +88,7 @@ pub async fn run_backtest_internal(
         timeframe: Timeframe::M5,
         status: StrategyStatus::Running,
         execution_target: broker.clone(),
+        initial_cash,
     };
     let mut engine = StrategyEngine::new(instance);
     // EventBus is not wired during backtests — plugins observe live/paper sessions only.

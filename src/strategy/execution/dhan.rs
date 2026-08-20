@@ -769,7 +769,7 @@ mod tests {
     use super::{
         classify_result, map_place_order_error, DhanBroker, FundsSource, OrderPlacer,
         PositionsSource, SessionContext, CancellationToken, DEFAULT_AVAILABLE_CASH_CAP,
-        MAX_CONSECUTIVE_FAILURES,
+        MAX_CONSECUTIVE_FAILURES, PER_ORDER_REFRESH_MIN_INTERVAL_SECS,
     };
 
     fn temp_trade_log() -> (Arc<TradeLog>, tempfile::TempDir) {
@@ -960,8 +960,11 @@ mod tests {
         });
         let broker = broker_with_source(source);
         assert!(!broker.is_stale());
+        // Use `_unchecked` to bypass the per-order throttle — the throttled
+        // public path only fires once within `PER_ORDER_REFRESH_MIN_INTERVAL_SECS`
+        // and would leave `consecutive_failures` short of the stale threshold.
         for _ in 0..MAX_CONSECUTIVE_FAILURES {
-            broker.refresh_realized_loss().await;
+            broker.refresh_realized_loss_unchecked().await;
         }
         assert!(broker.is_stale());
     }

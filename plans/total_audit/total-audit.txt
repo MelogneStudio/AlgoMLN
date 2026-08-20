@@ -57,6 +57,3 @@
   - Lock discipline in commands/live.rs: no parking_lot guard held across .await (all await-spanning locks are tokio::sync::Mutex).
   Clean.
   - on_candle/plan_candle equivalence, determinism (BTreeMap usage), and SL/TP bypass-of-trigger-state are all correct.
-
-  I recommend fixing A1, A2, A3, A4 first — each is verified and contradicts a stated invariant. I made no code edits. Want me to fix
-  any of these?

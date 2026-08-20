@@ -86,6 +86,20 @@ pub struct StrategyInstance {
     pub timeframe: Timeframe,
     pub status: StrategyStatus,
     pub execution_target: Arc<dyn ExecutionTarget>,
+    /// Starting capital used by `RISK MAX_DAILY_LOSS` to compute the
+    /// cumulative-loss percentage. Stored on the instance (instead of
+    /// being read from `PaperBroker::get_state().initial_cash` via
+    /// downcast) so the cap fires on **every** `ExecutionTarget`,
+    /// including live `DhanBroker` runs where the broker has no
+    /// "initial cash" concept. Backtests, paper runs, portfolio runs,
+    /// and live sessions each pass their own value here:
+    ///   - backtests: the `--cash` argument
+    ///   - paper/portfolio: the paper capital
+    ///   - live: the user-declared starting cash (a `0.0` sentinel
+    ///     degrades the check to "never breached", matching the old
+    ///     pre-fix behaviour for callers that have not yet been
+    ///     updated to provide one).
+    pub initial_cash: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -538,14 +552,19 @@ impl StrategyEngine {
         }
 
         if let Some(limit_pct) = risk.max_daily_loss_pct {
-            let initial = self.broker_initial_cash();
+            // Use `StrategyInstance::initial_cash` (threaded in by the
+            // caller — `--cash` for backtests, paper capital for paper
+            // runs, the user-declared starting capital for live
+            // sessions) instead of downcasting `PaperBroker`. The old
+            // downcast returned 0.0 for any non-Paper target, which
+            // caused the `initial > 0.0` guard below to skip the
+            // check entirely in live trading — making `MAX_DAILY_LOSS`
+            // a silent no-op for `DhanBroker`. See audit item A1.
+            let initial = self.instance.initial_cash;
             if initial > 0.0 {
                 let realized = self.instance.execution_target.realized_loss();
                 let loss_pct = realized / initial * 100.0;
                 if loss_pct >= limit_pct {
-                    // Refresh the cached session loss so subsequent
-                    // breaches within the same candle don't redundantly
-                    // recompute from the broker.
                     if let Some(state) = self.risk_state.as_mut() {
                         state.daily_realized_loss = realized;
                     }
@@ -558,19 +577,6 @@ impl StrategyEngine {
         }
 
         None
-    }
-
-    /// Read `initial_cash` from the broker's public state, if it's a
-    /// `PaperBroker`. Returns 0.0 for any other `ExecutionTarget` so the
-    /// loss-percentage check degrades to "never breached" rather than
-    /// dividing by zero or panicking.
-    fn broker_initial_cash(&self) -> f64 {
-        let any = self.instance.execution_target.as_any();
-        if let Some(paper) = any.downcast_ref::<crate::strategy::execution::PaperBroker>() {
-            paper.get_state().initial_cash
-        } else {
-            0.0
-        }
     }
 
     /// Run the strategy-level stop-loss / take-profit pass on the current
@@ -894,6 +900,7 @@ mod tests {
             timeframe: Timeframe::M5,
             status: StrategyStatus::Running,
             execution_target: broker,
+            initial_cash,
         };
         StrategyEngine::new(instance)
     }
@@ -1454,6 +1461,186 @@ mod tests {
         }
         assert_eq!(total_orders, 2, "two orders: BUY + SELL");
         assert!(total_breaches >= 1, "expected at least one breach");
+    }
+
+    /// Mock `ExecutionTarget` for risk tests that need a non-Paper broker.
+    /// Lets a test pre-load `realized_loss` (e.g. for `MAX_DAILY_LOSS`)
+    /// without standing up a full `DhanBroker` HTTP plumbing. The order
+    /// path accepts any market order and treats it as filled so the engine
+    /// flow can complete; only `realized_loss` matters for the A1
+    /// regression test.
+    struct MockExecutionTarget {
+        realized_loss: parking_lot::Mutex<f64>,
+        available_cash: parking_lot::Mutex<f64>,
+        name: &'static str,
+    }
+
+    impl MockExecutionTarget {
+        fn new(realized_loss: f64, available_cash: f64) -> Self {
+            Self {
+                realized_loss: parking_lot::Mutex::new(realized_loss),
+                available_cash: parking_lot::Mutex::new(available_cash),
+                name: "mock",
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::strategy::execution::ExecutionTarget for MockExecutionTarget {
+        async fn execute(
+            &self,
+            order: crate::models::Order,
+        ) -> Result<crate::models::OrderResult, crate::strategy::execution::ExecutionError> {
+            Ok(crate::models::OrderResult {
+                order_id: format!("mock-{}", order.symbol),
+                status: crate::models::OrderStatus::Traded,
+                timestamp: 0,
+                correlation_id: String::new(),
+            })
+        }
+        async fn get_positions(
+            &self,
+        ) -> Result<Vec<crate::models::Position>, crate::strategy::execution::ExecutionError>
+        {
+            Ok(Vec::new())
+        }
+        fn realized_loss(&self) -> f64 {
+            *self.realized_loss.lock()
+        }
+        fn available_cash(&self) -> f64 {
+            *self.available_cash.lock()
+        }
+        fn is_paper(&self) -> bool {
+            false
+        }
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Regression for audit item A1: with a non-Paper `ExecutionTarget`
+    /// (`DhanBroker`-shaped), `RISK MAX_DAILY_LOSS` MUST still fire when
+    /// `initial_cash` is non-zero. The pre-fix code downcast to
+    /// `PaperBroker` and returned 0.0 for any other target, so the check
+    /// silently no-op'd in live trading. The engine now reads
+    /// `instance.initial_cash` directly, which is the same value the
+    /// caller passed at construction time.
+    #[tokio::test]
+    async fn risk_max_daily_loss_fires_for_non_paper_broker() {
+        use crate::strategy::execution::ExecutionTarget;
+        use crate::strategy::runtime::StrategyInstance;
+
+        // Broker-shaped mock: realized_loss already at 200 with
+        // initial_cash 1000 → 20% > 5% threshold → first BUY must be
+        // blocked. Pre-fix this would have been a silent no-op (the
+        // downcast returned 0.0, the guard skipped the check, the BUY
+        // executed).
+        let target: Arc<dyn ExecutionTarget> =
+            Arc::new(MockExecutionTarget::new(/* realized_loss */ 200.0, /* cash */ 1000.0));
+
+        let tokens = Lexer::tokenize("RISK MAX_DAILY_LOSS 5%\nWHEN close > 100\nBUY 1").unwrap();
+        let node = Parser::new(tokens).parse().unwrap();
+        let errors = AstValidator::validate(&node);
+        assert!(errors.is_empty(), "validation failed: {errors:?}");
+
+        let instance = StrategyInstance {
+            id: "a1-regression".to_string(),
+            strategy: Arc::new(node),
+            symbol: "TEST".to_string(),
+            timeframe: Timeframe::M5,
+            status: StrategyStatus::Running,
+            execution_target: target,
+            initial_cash: 1000.0,
+        };
+        let mut engine = StrategyEngine::new(instance);
+
+        let candles: Vec<Candle> = vec![candle(80.0), candle(200.0)];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        LogEntryKind::RiskBreach {
+                            reason: RiskBreachReason::MaxDailyLossReached,
+                            ..
+                        }
+                    )
+                })
+                .count();
+        }
+        assert_eq!(
+            total_orders, 0,
+            "BUY must be blocked: realized_loss=200, initial_cash=1000, cap=5%"
+        );
+        assert_eq!(
+            total_breaches, 1,
+            "MAX_DAILY_LOSS must fire on a non-Paper ExecutionTarget"
+        );
+    }
+
+    /// Companion to `risk_max_daily_loss_fires_for_non_paper_broker`:
+    /// when the caller passes `initial_cash = 0.0` (or hasn't wired it
+    /// yet), the engine degrades to the old behaviour of "never breach"
+    /// rather than dividing by zero. The Tauri binary now defaults
+    /// `initial_cash` to 1M INR for live sessions, so this branch should
+    /// only be reachable on misconfiguration.
+    #[tokio::test]
+    async fn risk_max_daily_loss_no_op_when_initial_cash_is_zero() {
+        use crate::strategy::execution::ExecutionTarget;
+        use crate::strategy::runtime::StrategyInstance;
+
+        let target: Arc<dyn ExecutionTarget> =
+            Arc::new(MockExecutionTarget::new(/* realized_loss */ 999.0, /* cash */ 1000.0));
+
+        let tokens = Lexer::tokenize("RISK MAX_DAILY_LOSS 1%\nWHEN close > 100\nBUY 1").unwrap();
+        let node = Parser::new(tokens).parse().unwrap();
+        let errors = AstValidator::validate(&node);
+        assert!(errors.is_empty(), "validation failed: {errors:?}");
+
+        let instance = StrategyInstance {
+            id: "a1-zero-cash".to_string(),
+            strategy: Arc::new(node),
+            symbol: "TEST".to_string(),
+            timeframe: Timeframe::M5,
+            status: StrategyStatus::Running,
+            execution_target: target,
+            initial_cash: 0.0,
+        };
+        let mut engine = StrategyEngine::new(instance);
+
+        let candles: Vec<Candle> = vec![candle(200.0)];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::RiskBreach { .. }))
+                .count();
+        }
+        // The BUY executes; MAX_DAILY_LOSS check is intentionally skipped
+        // because the denominator would be 0. Misconfiguration on the
+        // caller's side; stderr warnings at session start are the
+        // signal.
+        assert_eq!(total_orders, 1);
+        assert_eq!(total_breaches, 0);
     }
 
     #[tokio::test]

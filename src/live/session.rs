@@ -53,7 +53,11 @@ use crate::{
     plugin::api::events::EventBus,
     strategy::{
         dsl::StrategyNode,
-        execution::{DhanBroker, dhan::SessionContext},
+        execution::{
+            dhan::SessionContext,
+            target::ExecutionTarget,
+            DhanBroker,
+        },
         runtime::{StrategyEngine, StrategyInstance, StrategyStatus as EngineStatus},
     },
 };
@@ -102,6 +106,14 @@ impl LiveSession {
     /// session transitions to `Failed`. In production, pass a
     /// `TauriSessionEmitter(app_handle)` (defined in the Tauri binary). In
     /// tests or contexts that don't need UI alerts, pass `Arc::new(NoopEmitter)`.
+    ///
+    /// `initial_cash` is the user's declared starting capital. It feeds the
+    /// engine's `RISK MAX_DAILY_LOSS` check: with `DhanBroker` the live
+    /// engine has no way to recover the starting capital from the broker,
+    /// so the cap would otherwise be a silent no-op in live trading. A
+    /// value of `0.0` (or negative) degrades the check to "never
+    /// breached" and is logged at startup so the user notices the cap
+    /// won't actually fire.
     pub async fn start(
         strategy_id: String,
         strategy_name: String,
@@ -112,6 +124,7 @@ impl LiveSession {
         trade_log: Arc<TradeLog>,
         event_bus: Arc<EventBus>,
         initial_candles: Vec<Candle>,
+        initial_cash: f64,
         emitter: Arc<dyn SessionEventEmitter>,
     ) -> Result<Arc<Self>, String> {
         // Write session context onto the broker before the engine starts so
@@ -131,8 +144,16 @@ impl LiveSession {
             timeframe: Timeframe::M1,
             status: EngineStatus::Running,
             execution_target,
+            initial_cash,
         });
         engine.event_bus = Some(event_bus);
+
+        if initial_cash <= 0.0 {
+            eprintln!(
+                "live_session: strategy {strategy_id} started with initial_cash={initial_cash}; \
+                 RISK MAX_DAILY_LOSS will not fire for this session"
+            );
+        }
 
         let status = Arc::new(RwLock::new(SessionStatus::Starting));
         let cancel = CancellationToken::new();

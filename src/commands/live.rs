@@ -20,6 +20,14 @@ use crate::{
     strategy::execution::target::ExecutionTarget,
 };
 
+/// Default starting capital for a live session, in INR. Used as the
+/// denominator for `RISK MAX_DAILY_LOSS`. Until per-strategy starting
+/// cash is exposed in Settings, this is the value every live session
+/// inherits — sensible for an NSE retail account. The live engine
+/// cannot recover the starting capital from `DhanBroker`, so without
+/// this default the cap is a silent no-op (audit item A1).
+const DEFAULT_LIVE_INITIAL_CASH: f64 = 1_000_000.0;
+
 /// Returns all entries from the trade log, newest first.
 pub async fn get_trade_log(state: State<'_, AppState>) -> Result<Vec<TradeLogEntry>, String> {
     TradeLog::read_all(&state.trade_log_path)
@@ -243,6 +251,13 @@ pub async fn confirm_live_start(
         state.trade_log.clone(),
         state.event_bus.clone(),
         seed,
+        // Starting capital for `RISK MAX_DAILY_LOSS`. Default to 1M INR
+        // (sensible NSE retail starting capital) until settings expose
+        // a per-strategy starting cash; the live engine cannot recover
+        // this from `DhanBroker` and the cap would otherwise silently
+        // never fire. A negative/zero value triggers a stderr warning
+        // inside `LiveSession::start`.
+        DEFAULT_LIVE_INITIAL_CASH,
         emitter,
     )
     .await?;
