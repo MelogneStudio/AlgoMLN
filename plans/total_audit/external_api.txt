@@ -1,147 +1,334 @@
+# Plugin External API & Secrets — Combined Design Plan
 
-  Plan: External-API access for plugins (Capability::ExternalApi) + keychain-backed secrets
+Merges the original phased plan (orthogonal capabilities, keychain secrets, SSRF guard,
+determinism test) with the second proposal's request-shaping additions (header/method
+allowlists, redirect policy, concurrency cap).
 
-  Design decisions (from your answers)
+Merged with Claude's plan.
 
-  - Secrets at rest: OS keychain via the keyring crate (Windows Credential Manager / macOS Keychain / Linux Secret Service).
-  - Host access: strict allowlist declared in plugin.toml (allowed_hosts, mirrors the existing allowed_symbols precedent). Empty ⇒
-  deny all.
-  - Provisioning: user enters keys in a Settings panel; plugins can also read and write (refreshed OAuth tokens), both through a
-  gated secret_* API.
+---
 
-  Two orthogonal capabilities so a plugin can hold secrets without network, or vice-versa:
-  - Capability::ExternalApi — outbound HTTP.
-  - Capability::Secrets — keychain read/write scoped to the plugin id.
+## Design Decisions
 
-  ---
-  Phase 1 — Capability + manifest plumbing (no behavior yet)
+| Decision | Choice | Rationale |
+|---|---|---|
+| Secrets at rest | OS keychain via `keyring` crate | Windows Credential Manager / macOS Keychain / Linux Secret Service |
+| Host matching | Exact host only (no `*.domain` wildcards) | Wildcards expand SSRF/trust surface; allowlisted subdomain added later resolves to private IP = bypass |
+| Scheme | HTTPS-only by default | HTTP opt-in via explicit `allow_http: true` in manifest; never for non-localhost |
+| Redirects | Follow max 3 hops, only to allowlisted hosts | Prevents redirect-chain escape from allowlist |
+| Method allowlist | GET / POST by default; PUT / DELETE opt-in | Reduces surface; declared per-plugin in manifest |
+| Header allowlist | Declared in manifest; anything undeclared is stripped | Prevents credential-leakage via injected headers |
+| Rate limit defaults | 10 req/s burst, 200/min sustained | Per-plugin; configurable in manifest |
+| Concurrency cap | 4 in-flight requests per plugin | Prevents thread exhaustion; not in original plan |
+| Response body cap | 5 MB per response | Stream + abort past limit |
+| Request timeout | 10 s connect, 30 s total | Via `reqwest::ClientBuilder` |
+| Provisioning | User enters keys in Settings panel; plugins can read/write (e.g. OAuth refresh) | Via gated `secret_*` API only — never plaintext manifest |
+| Dhan token migration | Out of scope — separate follow-up | `DhanAuth` holds token as plaintext in-memory `String` today; migrate later |
 
-  src/plugin/types.rs — add ExternalApi and Secrets variants to the Capability enum (types.rs:92), then update the two string
-  surfaces that every variant must appear in: as_str (types.rs:106) → "externalApi" / "secrets", and TryFrom<&str> (types.rs:127)
-  with snake/kebab/camel aliases. Manifest validation (manifest.rs:59) already rejects unknown capability strings, so this is the
-  only place to touch for parsing.
+---
 
-  src/plugin/manifest.rs — add to PluginPermissions (manifest.rs:26):
-  #[serde(default)] pub allowed_hosts: Vec<String>,
-  Matches the allowed_symbols pattern already there. Note: permissions.network: bool is currently dead (parsed, never read) — I'll
-  repurpose it as a coarse master switch OR drop it; my recommendation is to keep it as a required master toggle (network = true AND
-  allowed_hosts non-empty AND Capability::ExternalApi all required) so there are three independent "yes I meant it" signals,
-  consistent with how the live-trading gates stack.
+## Capabilities
 
-  ---
-  Phase 2 — HttpApi trait + reqwest impl (backend slice, gated)
+Two orthogonal capabilities so a plugin can hold secrets without network access, or vice versa:
 
-  New src/plugin/api/http.rs:
-  - Trait in api/mod.rs alongside the others:
-  pub trait HttpApi: Send + Sync {
-      fn request(&self, req: HttpRequest) -> PluginResult<HttpResponse>;
-  }
-    with HttpRequest { method, url, headers: Vec<(String,String)>, body: Option<Vec<u8>> } and HttpResponse { status: u16, headers,
-  body: Vec<u8> }.
-  - Concrete ReqwestHttpApi holding: plugin_id, allowed_hosts: Vec<String>, a shared reqwest::Client (connection-pooled, one per
-  process), the captured runtime_handle (Tokio multi-thread handle — same bridge market_data.rs:104 uses via Handle::block_on), and a
-  per-plugin RateLimiter (reuse the token-bucket from api/log_file.rs).
-  - Gates inside request, before any socket:
-    a. URL parses and scheme is https (allow http only if you decide to; default deny).
-    b. Host ∈ allowed_hosts (exact or suffix match — decide api.foo.com vs *.foo.com).
-    c. SSRF guard: resolve and reject loopback / RFC-1918 / link-local / 169.254.169.254 cloud-metadata. (Even with an allowlist,
-  keep this — an allowlisted host that resolves to a private IP is the classic bypass.)
-    d. Rate-limit (default e.g. 10 req/s burst, 200/min) — drop/err on breach.
-    e. Enforce a request timeout (Client builder) and a response body size cap (stream + abort past N MB) so a plugin can't OOM the
-  app.
+- **`Capability::ExternalApi`** — outbound HTTP (gated by `http_guarded`)
+- **`Capability::Secrets`** — keychain read/write scoped to plugin id (gated by `secrets_guarded`)
 
-  Determinism note (invariant #1): HTTP lives only in the plugin-host/live path, never on the engine eval loop — backtests set
-  event_bus = None and never run plugin callbacks (invariant #8), so this can't leak into replay. Worth an explicit comment.
+Three independent "yes I meant it" signals required for network access, consistent with how
+live-trading gates stack:
 
-  ---
-  Phase 3 — Keychain-backed SecretsApi
+1. `permissions.network = true` (coarse master switch in manifest)
+2. `allowed_hosts` non-empty
+3. `Capability::ExternalApi` declared
 
-  New src/plugin/api/secrets.rs:
-  - Trait:
-  pub trait SecretsApi: Send + Sync {
-      fn get(&self, name: &str) -> PluginResult<Option<String>>;
-      fn set(&self, name: &str, value: &str) -> PluginResult<()>;
-      fn delete(&self, name: &str) -> PluginResult<()>;
-      fn list_names(&self) -> PluginResult<Vec<String>>;
-  }
-  - Concrete KeyringSecretsApi { plugin_id } using keyring::Entry::new(service, account). Namespace: service =
-  "algomln.plugin.<plugin_id>", account = <name> — this is what scopes secrets per-plugin (same idea as PluginKvStore scoping by
-  plugin_id, storage.rs:8).
-  - list_names: keyring has no enumeration API, so keep a plaintext index of key names (never values) in the existing PluginKvStore
-  (plugins/<id>/secret_index.json). Values only ever live in the keychain.
-  - sanitize the name the same way storage.rs:24 blocks traversal.
+---
 
-  This is the "not already done" part — there is zero secure storage in the repo today (DhanAuth holds the token as a plaintext
-  in-memory String, auth.rs:5; .env is plaintext). Consider migrating DHAN_ACCESS_TOKEN onto the same keychain in a follow-up, but
-  keep it out of this scope.
+## Manifest Shape (`plugin.toml`)
 
-  ---
-  Phase 4 — PluginHost wiring
+```toml
+[capabilities]
+capabilities = ["externalApi", "secrets"]
 
-  src/plugin/host.rs — add two fields to both PluginHost (host.rs:15) and PluginHostBuilder (host.rs:107), two guarded accessors
-  following the exact two-line pattern of storage_guarded (host.rs:62):
-  pub fn http_guarded(&self) -> PluginResult<&Arc<dyn HttpApi>> {
-      self.require_capability(&Capability::ExternalApi)?;
-      Ok(&self.http)
-  }
-  pub fn secrets_guarded(&self) -> PluginResult<&Arc<dyn SecretsApi>> {
-      self.require_capability(&Capability::Secrets)?;
-      Ok(&self.secrets)
-  }
+[permissions]
+network = true
+allowed_hosts = ["api.openai.com", "api.telegram.org"]
+allowed_methods = ["GET", "POST"]          # default; add "PUT", "DELETE" to opt in
+allowed_headers = ["Authorization", "Content-Type", "X-Api-Key"]
+rate_limit = 200                           # req/min
+body_limit_bytes = 5242880                 # 5 MB
+allow_http = false                         # true only for explicit localhost dev use
+```
 
-  src-tauri/src/main.rs HostFactory closure (main.rs:443) — construct ReqwestHttpApi::new(id.clone(), perms.allowed_hosts.clone(),
-  shared_client, runtime_handle.clone(), ...) and KeyringSecretsApi::new(id.clone()), add both to the builder. runtime_handle is
-  already captured at main.rs:402 for exactly this bridging. Hosts built when a capability isn't granted still get a real impl — the
-  *_guarded gate is what denies at call time (matches how execution is always wired but gated).
+`allowed_hosts` mirrors the existing `allowed_symbols` precedent (flat `Vec<String>`, serde
+default = empty → deny all). The nested sub-fields (`allowed_methods`, `allowed_headers`,
+`rate_limit`, `body_limit_bytes`) are new — they sit under `[permissions]` rather than
+introducing a new `[network]` block to stay consistent with the existing permissions shape.
 
-  ---
-  Phase 5 — Runtime host functions
+---
 
-  Rhai (src/plugin/runtime/rhai_runtime.rs::register_host_functions, rhai_runtime.rs:148) — register following the storage_set
-  pattern (rhai_runtime.rs:202), no-op/false on capability denial:
-  - http_get(url) -> Map / http_post(url, body) -> Map / http_request(Map) -> Map (status/headers/body).
-  - secret_get(name) -> String (empty on miss/denied), secret_set(name, val) -> bool.
+## Phase 1 — Capability + Manifest Plumbing
 
-  WASM (src/plugin/runtime/wasm_runtime.rs::build_linker, wasm_runtime.rs:197) — add algomln::http_request, algomln::secret_get,
-  algomln::secret_set via func_wrap, marshalling strings through linear memory with the existing helpers (read_string_from_memory /
-  write_bytes_to_memory, wasm_runtime.rs:132), gating on caller.data().host.http_guarded() / secrets_guarded(), returning -1 on
-  denial.
-  - ⚠️ Blocking-call risk: WASM host fns are sync (async_support(false), wasm_runtime.rs:107) and the epoch counter is armed but not
-  driven by a watchdog (wasm_runtime.rs:19). A blocking HTTP call inside a host fn holds the thread. Mitigation: the reqwest client's
-  own timeout bounds it; document that the epoch-watchdog gap means CPU interruption still won't fire mid-call. Not a blocker, but
-  call it out.
+**`src/plugin/types.rs`**
+- Add `ExternalApi` and `Secrets` variants to `Capability` enum (`types.rs:92`)
+- `as_str` (`types.rs:106`): `"externalApi"` / `"secrets"`
+- `TryFrom<&str>` (`types.rs:127`): snake/kebab/camel aliases for both
+- Manifest validation (`manifest.rs:59`) already rejects unknown strings — no change needed there
 
-  ---
-  Phase 6 — Settings UI for user-provisioned secrets
+**`src/plugin/manifest.rs`**
+- Add to `PluginPermissions` (`manifest.rs:26`):
 
-  Thin, following the existing IPC + screen patterns:
-  - New commands (src/commands/, registered in tauri::generate_handler!): list_plugin_secrets(plugin_id) -> Vec<String> (names only),
-  set_plugin_secret(plugin_id, name, value), delete_plugin_secret(plugin_id, name). All go through KeyringSecretsApi; values never
-  cross IPC on read.
-  - Frontend: a "Secrets" section per plugin in the Settings/Plugins screen — masked inputs, name list, add/delete. TS wrappers in
-  src/types/tauri.ts with the browser-fallback throw pattern already used for live commands.
+```rust
+#[serde(default)] pub allowed_hosts: Vec<String>,
+#[serde(default)] pub allowed_methods: Vec<String>,  // empty = ["GET","POST"]
+#[serde(default)] pub allowed_headers: Vec<String>,
+#[serde(default)] pub rate_limit: Option<u32>,
+#[serde(default)] pub body_limit_bytes: Option<usize>,
+#[serde(default)] pub allow_http: bool,
+```
 
-  ---
-  Phase 7 — Tests & docs
+- Repurpose `permissions.network: bool` (currently parsed but never read) as the coarse
+  master switch.
 
-  - Unit: allowlist accept/reject, SSRF reject (loopback/private/metadata), scheme enforcement, rate-limit drop, body-size cap,
-  capability-denied returns error not panic.
-  - Keychain: get/set/delete/list round-trip (may need a mock SecretsApi for CI since keychain isn't available headless — mirror the
-  MockEmitter pattern).
-  - Determinism guard already covers the eval path; add a test asserting no HTTP is reachable when event_bus is None.
-  - Update CLAUDE.md (new invariant, extend #7), BACKEND.md, ARCHITECTURE.md, FRONTEND.md, .env.example if the Dhan-migration
-  follow-up lands.
+No behaviour yet — purely additive parsing.
 
-  ---
-  Recommended sequencing
+---
 
-  1. Phase 1 + 2 + 4 + 5(Rhai) = smallest end-to-end vertical: a Rhai plugin can make an allowlisted HTTPS call. Ship and validate.
-  2. Phase 3 + 6 = keychain secrets + Settings UI.
-  3. Phase 5(WASM) + Phase 7 hardening/tests.
+## Phase 2 — `HttpApi` Trait + `ReqwestHttpApi` Impl
 
-  Open questions worth deciding before coding
+**New `src/plugin/api/http.rs`**
 
-  - allowed_hosts matching: exact host vs *.domain suffix wildcards?
-  - http allowed at all, or HTTPS-only? (I'd default HTTPS-only, exception for explicit localhost never.)
-  - Rate-limit defaults and max response size — pick numbers (I'd start 10 req/s / 5 MB).
-  - Dhan token migration to the keychain — in scope or separate follow-up? (I'd keep it separate.)
+Trait in `api/mod.rs` alongside the others:
+
+```rust
+pub trait HttpApi: Send + Sync {
+    fn request(&self, req: HttpRequest) -> PluginResult<HttpResponse>;
+}
+
+pub struct HttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+}
+
+pub struct HttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+```
+
+**Concrete `ReqwestHttpApi`** holds:
+- `plugin_id: String`
+- `allowed_hosts: Vec<String>`
+- `allowed_methods: Vec<String>`
+- `allowed_headers: HashSet<String>` (normalised to lowercase)
+- `allow_http: bool`
+- Shared `reqwest::Client` (connection-pooled, one per process — same bridge
+  `market_data.rs:104` uses)
+- Captured `runtime_handle` (Tokio multi-thread — `Handle::block_on`)
+- Per-plugin `RateLimiter` (reuse token-bucket from `api/log_file.rs`)
+- Concurrency semaphore (default 4 permits)
+
+**Gates inside `request`, in order, before any socket opens:**
+
+1. **Method check** — `method` ∈ `allowed_methods` (normalised uppercase); error on deny.
+2. **Scheme check** — must be `https` unless `allow_http = true`; error on deny.
+3. **Host allowlist** — parsed host ∈ `allowed_hosts` (exact match); error on deny.
+4. **Header strip** — drop any request header not in `allowed_headers`; silently strip (don't error — a plugin passing extra headers shouldn't crash, it should just not leak them).
+5. **SSRF guard** — resolve hostname and reject: loopback (`127.0.0.0/8`, `::1`), RFC-1918
+   (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, `fe80::/10`), cloud
+   metadata (`169.254.169.254`). **Keep this even with an allowlist** — an allowlisted host
+   that DNS-resolves to a private IP is the classic bypass.
+6. **Concurrency semaphore** — acquire permit or return `RateLimited` immediately.
+7. **Rate limiter** — token-bucket check; drop and log on breach.
+8. **Execute** with `Client` configured for `connect_timeout(10s)`, `timeout(30s)`,
+   `redirect(Policy::custom(max 3 hops, allowlisted hosts only))`, no cookie store.
+9. **Body cap** — stream response; abort and return error past `body_limit_bytes` (default 5 MB).
+10. **Header filter on response** — return only headers the plugin could legitimately use;
+    strip `Set-Cookie`, internal proxy headers, etc.
+
+**Determinism note:** HTTP lives only in the plugin-host/live path, never in the engine eval
+loop. Backtests set `event_bus = None` and never run plugin callbacks (invariant #8), so this
+cannot leak into replay. Add an explicit comment at the call site.
+
+---
+
+## Phase 3 — Keychain-Backed `SecretsApi`
+
+**New `src/plugin/api/secrets.rs`**
+
+```rust
+pub trait SecretsApi: Send + Sync {
+    fn get(&self, name: &str) -> PluginResult<Option<String>>;
+    fn set(&self, name: &str, value: &str) -> PluginResult<()>;
+    fn delete(&self, name: &str) -> PluginResult<()>;
+    fn list_names(&self) -> PluginResult<Vec<String>>;
+}
+```
+
+**Concrete `KeyringSecretsApi { plugin_id }`** using `keyring::Entry::new(service, account)`:
+- Namespace: `service = "algomln.plugin.<plugin_id>"`, `account = <name>`
+- Same scoping idea as `PluginKvStore` (scoped by `plugin_id`, `storage.rs:8`)
+- `list_names`: keyring has no enumeration API, so maintain a plaintext index of key *names*
+  (never values) in `PluginKvStore` at `plugins/<id>/secret_index.json`. Values only ever
+  live in the keychain.
+- Sanitise `name` the same way `storage.rs:24` blocks path traversal.
+
+**Security note:** `DhanAuth` today holds `DHAN_ACCESS_TOKEN` as a plaintext in-memory
+`String` (`auth.rs:5`); `.env` is plaintext. Migrating that to the same keychain is the right
+long-term move but is out of scope here — keep it as a tracked follow-up.
+
+---
+
+## Phase 4 — `PluginHost` Wiring
+
+**`src/plugin/host.rs`** — add two fields to both `PluginHost` (`host.rs:15`) and
+`PluginHostBuilder` (`host.rs:107`), following the exact two-line pattern of
+`storage_guarded` (`host.rs:62`):
+
+```rust
+pub fn http_guarded(&self) -> PluginResult<&Arc<dyn HttpApi>> {
+    self.require_capability(&Capability::ExternalApi)?;
+    Ok(&self.http)
+}
+
+pub fn secrets_guarded(&self) -> PluginResult<&Arc<dyn SecretsApi>> {
+    self.require_capability(&Capability::Secrets)?;
+    Ok(&self.secrets)
+}
+```
+
+**`src-tauri/src/main.rs`** `HostFactory` closure (`main.rs:443`):
+- Construct `ReqwestHttpApi::new(id.clone(), perms.allowed_hosts.clone(), ...)` and
+  `KeyringSecretsApi::new(id.clone())`
+- Add both to the builder
+- `runtime_handle` is already captured at `main.rs:402` for exactly this bridging
+- Hosts built when a capability isn't granted still get a real impl — the `*_guarded` gate
+  denies at call time, matching how execution is always wired but gated
+
+---
+
+## Phase 5 — Runtime Host Functions
+
+**Rhai** (`src/plugin/runtime/rhai_runtime.rs::register_host_functions`, `rhai_runtime.rs:148`)
+
+Register following the `storage_set` pattern (`rhai_runtime.rs:202`); no-op / error value on
+capability denial, never panic:
+
+```
+http_get(url)              -> Map { status, headers, body }
+http_post(url, body)       -> Map { status, headers, body }
+http_request(Map)          -> Map { status, headers, body }
+secret_get(name)           -> String  (empty string on miss or denied)
+secret_set(name, val)      -> bool
+secret_delete(name)        -> bool
+secret_list()              -> Array<String>
+```
+
+**WASM** (`src/plugin/runtime/wasm_runtime.rs::build_linker`, `wasm_runtime.rs:197`)
+
+Add `algomln::http_request`, `algomln::secret_get`, `algomln::secret_set`,
+`algomln::secret_delete` via `func_wrap`, marshalling strings through linear memory with the
+existing helpers (`read_string_from_memory` / `write_bytes_to_memory`, `wasm_runtime.rs:132`).
+Gate on `caller.data().host.http_guarded()` / `secrets_guarded()`, returning `-1` on denial.
+
+**⚠️ Blocking-call risk (WASM):** WASM host fns are sync (`async_support(false)`,
+`wasm_runtime.rs:107`) and the epoch counter is armed but not driven by a watchdog
+(`wasm_runtime.rs:19` — also audit finding B3). A blocking HTTP call in a host fn holds the
+thread. The `reqwest` client's own timeout (`connect 10s / total 30s`) bounds worst-case hold
+time, but the epoch-watchdog gap means CPU interruption won't fire mid-call. This is not a
+blocker, but must be documented, and driving the epoch watchdog should be prioritised before
+this ships — B3 is now more consequential with network calls possible.
+
+---
+
+## Phase 6 — Settings UI for User-Provisioned Secrets
+
+Thin, following the existing IPC + screen patterns:
+
+**New Tauri commands** (`src/commands/`, registered in `tauri::generate_handler!`):
+
+```
+list_plugin_secrets(plugin_id)              -> Vec<String>   // names only, never values
+set_plugin_secret(plugin_id, name, value)   -> ()
+delete_plugin_secret(plugin_id, name)       -> ()
+```
+
+All route through `KeyringSecretsApi`. Values never cross IPC on read — the frontend
+provisions them but cannot retrieve them once stored.
+
+**Frontend:** a "Secrets" section per plugin in Settings → Plugins. Masked inputs, name list,
+add/delete. TS wrappers in `src/types/tauri.ts` with the browser-fallback throw pattern
+already used for live commands.
+
+---
+
+## Phase 7 — Tests & Docs
+
+**Unit tests:**
+- Allowlist: accepted host passes, non-declared host returns `PermissionDenied`
+- Method block: undeclared method (`DELETE` when not opted-in) returns error
+- Header strip: headers not in `allowed_headers` are absent from the outgoing request
+- SSRF reject: loopback (`127.0.0.1`), RFC-1918 (`192.168.1.1`), link-local
+  (`169.254.169.254`) all rejected even when a hostname resolves to them
+- Scheme enforce: `http://` URL rejected unless `allow_http = true`
+- Redirect policy: redirect to non-allowlisted host is refused; chain > 3 hops refused
+- Rate-limit drop: (n+1)th call over limit returns `RateLimited`, not panic
+- Body cap: response stream aborted past `body_limit_bytes`
+- Concurrency cap: 5th concurrent call blocks / errors while 4 in-flight
+- Capability-denied: `http_guarded()` and `secrets_guarded()` return error, not panic, when
+  capability not declared
+- Keychain round-trip: `get` / `set` / `delete` / `list_names` (mock `SecretsApi` for CI
+  since keychain isn't available headless — mirror `MockEmitter` pattern)
+
+**Determinism guard:**
+- Add a test asserting no HTTP is reachable (i.e. `http_guarded()` errors or the impl is
+  `NoopHttpApi`) when `event_bus` is `None`. The existing determinism guard covers the eval
+  path; this closes the plugin-callback path explicitly.
+
+**Docs to update:**
+- `CLAUDE.md` — new invariant: "NetworkApi is the only path a plugin can reach an external
+  host; WASI remains intentionally unlinked. Backtests never invoke plugin network calls
+  (invariant #8)." Extend invariant #7.
+- `BACKEND.md` — new files (`api/http.rs`, `api/secrets.rs`), new capability names
+- `ARCHITECTURE.md` — plugin capability table: add ExternalApi + Secrets rows
+- `FRONTEND.md` — Secrets settings section
+- `.env.example` — note if/when Dhan token migration follow-up lands
+
+---
+
+## Recommended Sequencing
+
+| Step | Phases | Milestone |
+|---|---|---|
+| 1 | 1 + 2 + 4 + 5 (Rhai only) | Smallest vertical: a Rhai plugin can make an allowlisted HTTPS call. Ship and validate all gates. |
+| 2 | 3 + 6 | Keychain secrets + Settings UI. API-key use case now end-to-end usable. |
+| 3 | 5 (WASM) | WASM network + secrets host fns. Drive epoch watchdog before or alongside this. |
+| 4 | 7 | Full test suite + doc pass. |
+
+---
+
+## Open Questions to Decide Before Coding
+
+| Question | Recommendation |
+|---|---|
+| `allowed_hosts`: exact only vs `*.domain` wildcards? | **Exact only.** Wildcards expand SSRF surface; add wildcard support later if there's a concrete need. |
+| `http://` ever allowed? | **HTTPS-only default.** `allow_http = true` opt-in for explicit localhost dev; never for production. |
+| Rate-limit defaults | **10 req/s burst, 200/min sustained, 4 concurrent.** Tune per feedback. |
+| Response body cap | **5 MB.** Abort stream past limit. |
+| Dhan token → keychain | **Separate follow-up.** Out of scope here; track as a TODO in `auth.rs:5`. |
+| Epoch watchdog (B3) | **Resolve before Phase 5 (WASM) ships.** Now more consequential with blocking HTTP host fns. |
+
+---
+
+## What to Explicitly Avoid
+
+- **No `TcpStream` / `UdpSocket` capability.** That recreates the WASI problem the codebase
+  solved by not linking it.
+- **No raw URL-fetch in DSL extension handlers.** DSL handlers run inside the engine, not
+  through `PluginHost` — they bypass capability gating entirely.
+- **Don't share the broker's `reqwest::Client`.** The Dhan client carries auth headers and a
+  retry policy tuned to the Dhan API. Plugins get a clean client with no broker credentials.
+- **Values never cross IPC on read.** The Settings UI provisions secrets but cannot retrieve
+  them — `list_plugin_secrets` returns names only.
