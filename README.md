@@ -426,7 +426,7 @@ Plugin manifest → PluginLoader → Rhai / WASM runtime → capability-gated Pl
 
 ### ✅ Phase 6.5 — Advanced Strategy Features (partial)
 - **Stop-loss / take-profit** — strategy-level `STOP_LOSS` / `TAKE_PROFIT` declarations on `StrategyNode` (not `RuleNode`s); bypass `TriggerStateMap` deliberately and run *after* the rule loop. Stop-loss wins on a gap candle.
-- **Risk controls** — `RISK MAX_ORDERS`, `RISK MAX_POSITIONS`, `RISK MAX_DAILY_LOSS` strategy-level declarations; `check_risk_breach` runs before every order in `submit_action`. `MAX_DAILY_LOSS` is a hard non-negotiable for live trading (gate 7 of `LiveGuard`).
+- **Risk controls** — `RISK MAX_ORDERS`, `RISK MAX_POSITIONS`, `RISK MAX_DAILY_LOSS` strategy-level declarations; `check_risk_breach` runs before every order in `submit_action`. `MAX_DAILY_LOSS` is a hard non-negotiable for live trading (gate 7 of `LiveGuard`). `MAX_ORDERS` counts entry orders (BUYs) only — exits (`SELL` / `SELL ALL`, including the strategy-level SL/TP synthetic closes) are exempt so the safety net can always close a position (audit A2).
 - **Position sizing** — `OrderBuilder::resolve_quantity` supports `QuantitySpec::Fixed` and `QuantitySpec::PercentCapital` (the latter is fed by `DhanBroker::available_cash`).
 - **Multi-symbol strategies** — Phase 7 single-symbol only; the DSL `TRADE_IN Symbols` / `TRADE_IN NIFTY_*` clauses exist but the live runner rejects multi-symbol with a clear error.
 

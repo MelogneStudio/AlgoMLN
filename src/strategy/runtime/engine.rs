@@ -139,6 +139,11 @@ pub struct StrategyEngine {
 /// realized loss. `daily_realized_loss` is session-scoped (in a backtest
 /// "session" = the whole run; in a live paper run = the lifetime of the
 /// strategy instance).
+///
+/// `session_orders` counts **entry orders only** (BUYs). Exits (SELL /
+/// SELL ALL, including the strategy-level SL/TP synthetic closes) are
+/// exempt so a stop-loss / take-profit can always close a position even
+/// when the cap is exhausted (audit item A2; invariant 12).
 #[derive(Debug, Clone)]
 struct RiskState {
     session_orders: u32,
@@ -351,8 +356,17 @@ impl StrategyEngine {
 
         match execution_result {
             Ok(result) => {
-                if let Some(state) = self.risk_state.as_mut() {
-                    state.session_orders += 1;
+                // MAX_ORDERS counts entry orders only. Exits
+                // (OrderSide::Sell) are exempt — see the matching
+                // exemption in `check_risk_breach`. Counting exits
+                // would silently shrink the effective cap as the
+                // strategy cycles (BUY → SL → BUY → SL → …) and
+                // could leave a position open with no remaining
+                // entry headroom for the next cycle. Audit item A2.
+                if matches!(order.side, crate::models::OrderSide::Buy) {
+                    if let Some(state) = self.risk_state.as_mut() {
+                        state.session_orders += 1;
+                    }
                 }
                 self.logger.log(
                     LogEntryKind::OrderExecuted {
@@ -502,7 +516,10 @@ impl StrategyEngine {
     /// return the first `RiskBreachReason` that fires, or `None` if the
     /// order may proceed. Order:
     ///   1. `MAX_ORDERS` — count is in `risk_state.session_orders`, so no
-    ///      broker call is needed.
+    ///      broker call is needed. **Exits (`SELL` / `SELL ALL`) are
+    ///      exempt** so a stop-loss or take-profit can always close a
+    ///      position even when the cap is exhausted (audit item A2;
+    ///      see invariant 12 — "SL/TP is a safety net").
     ///   2. `MAX_POSITIONS` — counts open positions (`quantity > 0`) on the
     ///      broker. Applies only to BUY actions; sells are never blocked by
     ///      this check.
@@ -519,13 +536,22 @@ impl StrategyEngine {
         let risk: &RiskConfig = self.instance.strategy.risk.as_ref()?;
 
         if let Some(limit) = risk.max_orders {
-            let session_orders = self
-                .risk_state
-                .as_ref()
-                .expect("risk_state must be Some when strategy.risk is Some")
-                .session_orders;
-            if session_orders >= limit {
-                return Some(RiskBreachReason::MaxOrdersReached);
+            // MAX_ORDERS guards against runaway entry churn. Exits —
+            // both rule-driven SELL/SELL ALL and the strategy's
+            // safety-net stop-loss / take-profit — must NEVER be
+            // blocked, even when the cap is exhausted: leaving a
+            // position open while SL/TP silently no-ops contradicts
+            // invariant 12 ("SL/TP is a safety net"). See audit item A2.
+            let is_exit = matches!(action, ActionNode::Sell { .. } | ActionNode::SellAll);
+            if !is_exit {
+                let session_orders = self
+                    .risk_state
+                    .as_ref()
+                    .expect("risk_state must be Some when strategy.risk is Some")
+                    .session_orders;
+                if session_orders >= limit {
+                    return Some(RiskBreachReason::MaxOrdersReached);
+                }
             }
         }
 
@@ -1671,6 +1697,186 @@ mod tests {
         }
         assert_eq!(total_orders, 1);
         assert_eq!(total_breaches, 1);
+    }
+
+    #[tokio::test]
+    async fn risk_max_orders_does_not_block_stop_loss() {
+        // Regression for audit item A2: with the cap exhausted, a
+        // stop-loss SELL ALL must still fire. Pre-fix the SL pass
+        // shared the same MAX_ORDERS gate as rule fires and would
+        // leave the position open with the safety net disabled.
+        let mut engine = make_engine(
+            "RISK MAX_ORDERS 1\nSTOP_LOSS 2%\nWHEN close > 0\nBUY 1",
+            100_000.0,
+        );
+        // BUY fires (close > 0, fresh trigger, count = 1, cap reached).
+        // Then a drop below the 2% threshold must close the position
+        // even though MAX_ORDERS is exhausted.
+        let candles: Vec<Candle> = vec![candle(100.0), candle(100.0), candle(97.0)];
+
+        let mut total_breaches = 0;
+        let mut total_sl = 0;
+        let mut total_exec = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_breaches += logs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        LogEntryKind::RiskBreach {
+                            reason: RiskBreachReason::MaxOrdersReached,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            total_sl += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::StopLossFired { .. }))
+                .count();
+            total_exec += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+        }
+        // 1 BUY (count = 1, cap reached) + 1 SL SELL = 2 successful orders.
+        // No MAX_ORDERS breach on the SL candle: exits are exempt.
+        assert_eq!(total_breaches, 0, "SL must not be blocked by MAX_ORDERS");
+        assert_eq!(total_sl, 1, "SL must fire");
+        assert_eq!(total_exec, 2);
+    }
+
+    #[tokio::test]
+    async fn risk_max_orders_does_not_block_take_profit() {
+        // TP counterpart of `risk_max_orders_does_not_block_stop_loss`.
+        let mut engine = make_engine(
+            "RISK MAX_ORDERS 1\nTAKE_PROFIT 5%\nWHEN close > 0\nBUY 1",
+            100_000.0,
+        );
+        let candles: Vec<Candle> = vec![candle(100.0), candle(100.0), candle(106.0)];
+
+        let mut total_breaches = 0;
+        let mut total_tp = 0;
+        let mut total_exec = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_breaches += logs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        LogEntryKind::RiskBreach {
+                            reason: RiskBreachReason::MaxOrdersReached,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            total_tp += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::TakeProfitFired { .. }))
+                .count();
+            total_exec += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+        }
+        assert_eq!(total_breaches, 0, "TP must not be blocked by MAX_ORDERS");
+        assert_eq!(total_tp, 1);
+        assert_eq!(total_exec, 2);
+    }
+
+    #[tokio::test]
+    async fn risk_max_orders_does_not_count_or_block_rule_driven_sell() {
+        // MAX_ORDERS 2: a rule-driven SELL ALL is also an exit and
+        // must (a) execute even when the cap is exhausted and (b) not
+        // count toward the cap, so the BUY on the next cycle can
+        // still go through.
+        let mut engine = make_engine(
+            "RISK MAX_ORDERS 2\nWHEN close > 100\nBUY 1\nWHEN close > 105\nSELL ALL",
+            100_000.0,
+        );
+        // Cycle 1: BUY (count=1) + SELL ALL (exit, exempt; count stays 1).
+        // Cycle 2: re-arm BUY (drop below 100), then both rules fire
+        // again on the up-candle: BUY (count=2, at cap but still <=
+        // limit) + SELL ALL (exit, exempt). Without the A2 fix the
+        // SELL on cycle 1 would have counted, count would be 2, and
+        // this second BUY would be blocked with a RiskBreach.
+        let candles: Vec<Candle> = vec![
+            candle(50.0),  // no rules fire
+            candle(110.0), // BUY (count=1) + SELL ALL (exit, exempt)
+            candle(50.0),  // no rules fire, triggers reset
+            candle(110.0), // BUY (count=2) + SELL ALL (exit, exempt)
+        ];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        LogEntryKind::RiskBreach {
+                            reason: RiskBreachReason::MaxOrdersReached,
+                            ..
+                        }
+                    )
+                })
+                .count();
+        }
+        // 2 BUYs + 2 SELL ALLs = 4 orders. No breaches — the SELLs
+        // don't consume the cap, so the second BUY fits.
+        assert_eq!(total_breaches, 0, "SELL ALL must not consume the cap");
+        assert_eq!(total_orders, 4, "BUY+SELL+BUY+SELL should all execute");
+    }
+
+    #[tokio::test]
+    async fn risk_max_orders_exhausted_then_re_armed_after_exit() {
+        // After the cap is exhausted, an exit must not unlock additional
+        // entry headroom. The cap is on entry orders; exits neither
+        // increment nor decrement the counter.
+        let mut engine = make_engine(
+            "RISK MAX_ORDERS 1\nWHEN close > 100\nBUY 1\nWHEN close > 105\nSELL ALL",
+            100_000.0,
+        );
+        let candles: Vec<Candle> = vec![
+            candle(50.0),  // no fire
+            candle(110.0), // BUY (count = 1) + SELL ALL (exit)
+            candle(50.0),  // no fire, triggers reset
+            candle(110.0), // BUY is blocked (cap reached)
+        ];
+
+        let mut total_orders = 0;
+        let mut total_breaches = 0;
+        for index in 1..=candles.len() {
+            let logs = engine.on_candle(&candles[..index]).await;
+            total_orders += logs
+                .iter()
+                .filter(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }))
+                .count();
+            total_breaches += logs
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        LogEntryKind::RiskBreach {
+                            reason: RiskBreachReason::MaxOrdersReached,
+                            ..
+                        }
+                    )
+                })
+                .count();
+        }
+        // BUY #1 + SELL ALL = 2 orders executed; BUY #2 blocked.
+        assert_eq!(total_orders, 2);
+        assert_eq!(total_breaches, 1, "second BUY must still be blocked");
     }
 
     #[tokio::test]

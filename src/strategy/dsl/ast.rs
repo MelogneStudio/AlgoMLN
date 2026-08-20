@@ -251,9 +251,13 @@ pub struct RiskConfig {
     /// positions with `quantity > 0` and skips BUY orders when the count is
     /// already at or above the limit. Sells are not affected.
     pub max_open_positions: Option<u32>,
-    /// `RISK MAX_ORDERS <int>`. The engine counts orders it has successfully
-    /// submitted during the run and skips when the count reaches the limit.
-    /// Counts every order — both rule-triggered and SL/TP synthetic.
+    /// `RISK MAX_ORDERS <int>`. The engine counts entry orders (BUYs) it
+    /// has successfully submitted during the run and skips when the count
+    /// reaches the limit. **Exits (`SELL` / `SELL ALL`, including the
+    /// strategy-level SL/TP synthetic closes) are NEVER blocked** and
+    /// do NOT count toward the cap — invariant 12 ("SL/TP is a safety
+    /// net") trumps the cap, so the safety net can always close a
+    /// position. See audit item A2.
     pub max_orders: Option<u32>,
 }
 
