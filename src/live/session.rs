@@ -221,7 +221,20 @@ impl LiveSession {
 
             loop {
                 tokio::select! {
-                    _ = task_session.cancel.cancelled() => break,
+                    _ = task_session.cancel.cancelled() => {
+                        // B2 (audit): flush the assembler's in-progress minute
+                        // before breaking so the last partial candle's prices
+                        // and volume aren't silently dropped when the session
+                        // stops. The flushed candle is routed through the
+                        // same B1-gated `append_candle` path so a stop at
+                        // 15:29:30 still honours the per-candle market-hours
+                        // gate (the gate handles a post-close partial minute
+                        // the same way it handles a tick-closed one).
+                        if let Some(pending) = assembler.flush() {
+                            task_session.append_candle(pending).await;
+                        }
+                        break;
+                    }
                     tick = receiver.recv() => {
                         let tick = match tick {
                             Ok(tick) => tick,
@@ -242,6 +255,13 @@ impl LiveSession {
                                     reason,
                                     open_positions_estimate: None,
                                 });
+                                // B2 (audit): flush the assembler's in-progress
+                                // minute before breaking so a feed shutdown
+                                // mid-minute preserves the partial candle's
+                                // prices and volume.
+                                if let Some(pending) = assembler.flush() {
+                                    task_session.append_candle(pending).await;
+                                }
                                 break;
                             }
                         };
@@ -268,85 +288,17 @@ impl LiveSession {
                             }
                         }
 
-                        let Some(candle) = assembler.feed(&tick) else {
-                            continue;
-                        };
-
-                        // B1 (audit): per-candle market-hours gate. A session
-                        // started at 15:29 would otherwise run `on_candle` on
-                        // the 15:30 candle and submit a post-close order
-                        // that NSE rejects. Re-using the same predicate as
-                        // `LiveGuard::run_preflight` keeps the boundary
-                        // definitions in one place; the session treats
-                        // weekend/holiday/outside-hours candles as
-                        // un-tradeable and skips the rest of the pipeline.
-                        //
-                        // The candle still goes into `candle_history` so the
-                        // indicator warm-up does not skip a day when the
-                        // first session candle lands after a weekend gap —
-                        // we just don't try to trade on it. Skipping the
-                        // history append would leave indicators blind to
-                        // that day's prices.
-                        if let Some(candle_close_ist) = candle_close_ist(candle.timestamp) {
-                            if !is_market_open(candle_close_ist, &task_session.holiday_calendar) {
-                                eprintln!(
-                                    "[live_session] market closed at candle close {} IST; \
-                                     skipping trading on this candle",
-                                    candle_close_ist.format("%Y-%m-%d %H:%M:%S")
-                                );
-                                // Still record the candle so the next
-                                // in-session candle has the correct
-                                // preceding close.
-                                let mut history = task_session.candle_history.lock().await;
-                                history.push(candle);
-                                if history.len() > MAX_CANDLE_HISTORY {
-                                    let excess = history.len() - MAX_CANDLE_HISTORY;
-                                    history.drain(0..excess);
-                                }
-                                continue;
-                            }
+                        // B2 (audit): `feed` may now emit more than one candle
+                        // — one for the minute that just closed, plus a
+                        // zero-volume gap candle for every minute the feed
+                        // skipped. Iterate and forward each through the
+                        // B1-gated `append_candle` path so the engine sees
+                        // a contiguous minute-by-minute series even across
+                        // feed gaps.
+                        let candles = assembler.feed(&tick);
+                        for candle in candles {
+                            task_session.append_candle(candle).await;
                         }
-
-                        // Append the new candle and clone the history while the lock is held;
-                        // the guard is dropped at the end of this block — before any .await.
-                        let candles = {
-                            let mut history = task_session.candle_history.lock().await;
-                            history.push(candle.clone());
-                            // Keep only the most recent MAX_CANDLE_HISTORY candles; older
-                            // candles are dead weight once the indicator windows have slid past them.
-                            if history.len() > MAX_CANDLE_HISTORY {
-                                let excess = history.len() - MAX_CANDLE_HISTORY;
-                                history.drain(0..excess);
-                            }
-                            history.clone()
-                        }; // history guard dropped here — no lock held across the awaits below.
-
-                        // C2 + H3 fix (Phase 8): the engine now exposes `plan_candle` which
-                        // returns `(Vec<LogEntry>, Vec<OrderIntent>)`. The
-                        // tick loop captures the intent list for the
-                        // audit trail and forwards it to a future H3-aware
-                        // executor (Phase 9). Today the intents are
-                        // already executed by `plan_candle` itself — the
-                        // split exists so we can re-route them through a
-                        // cancellation-aware executor without changing
-                        // the engine's eval logic.
-                        //
-                        // H3 cancellation plumbing is wired separately:
-                        // `DhanBroker::execute_with_meta` now checks the
-                        // session's `CancellationToken` before the HTTP
-                        // call (see `dhan.rs::execute_with_meta`), so a
-                        // `stop()` mid-`place_order` aborts the broker
-                        // call within a few hundred ms instead of waiting
-                        // for the broker's response.
-                        let (_logs, intents) = {
-                            let mut engine = task_session.engine.lock().await;
-                            engine.plan_candle(&candles).await
-                        };
-                        // Intents are recorded for any future executor
-                        // (Phase 9 multi-session work). Today they were
-                        // already executed by `plan_candle`; we just keep
-                        // the list visible so logs and audit can correlate.
-                        let _ = intents;
                     }
                 }
             }
@@ -399,6 +351,91 @@ impl LiveSession {
     /// pragmatic bound: real broker round-trips on NSE are typically
     /// 300–800 ms, so anything past 5 s is almost certainly hung.
     const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Push one completed candle through the same pipeline the tick loop
+    /// uses for tick-driven candles: append to `candle_history` (with the
+    /// `MAX_CANDLE_HISTORY` drain), honour the B1 per-candle market-hours
+    /// gate, and call `engine.plan_candle` only when the gate passes.
+    ///
+    /// Called from three sites:
+    /// 1. The regular tick body, once per candle the assembler emits.
+    /// 2. The cancel branch of the tick loop, with the candle returned by
+    ///    `CandleAssembler::flush` — so the last partial minute isn't
+    ///    silently dropped when the session stops.
+    /// 3. The `RecvError::Closed` branch of the tick loop, with the same
+    ///    flushed candle — so a feed shutdown also preserves the partial
+    ///    minute.
+    async fn append_candle(&self, candle: Candle) {
+        // B1 (audit): per-candle market-hours gate. A session started at
+        // 15:29 would otherwise run `on_candle` on the 15:30 candle and
+        // submit a post-close order that NSE rejects. Re-using the same
+        // predicate as `LiveGuard::run_preflight` keeps the boundary
+        // definitions in one place; the session treats weekend / holiday /
+        // outside-hours candles as un-tradeable and skips the rest of the
+        // pipeline.
+        //
+        // The candle still goes into `candle_history` so the indicator
+        // warm-up does not skip a day when the first session candle lands
+        // after a weekend gap — we just don't try to trade on it.
+        // Skipping the history append would leave indicators blind to that
+        // day's prices.
+        if let Some(candle_close_ist) = candle_close_ist(candle.timestamp) {
+            if !is_market_open(candle_close_ist, &self.holiday_calendar) {
+                eprintln!(
+                    "[live_session] market closed at candle close {} IST; \
+                     skipping trading on this candle",
+                    candle_close_ist.format("%Y-%m-%d %H:%M:%S")
+                );
+                // Still record the candle so the next in-session candle
+                // has the correct preceding close.
+                let mut history = self.candle_history.lock().await;
+                history.push(candle);
+                if history.len() > MAX_CANDLE_HISTORY {
+                    let excess = history.len() - MAX_CANDLE_HISTORY;
+                    history.drain(0..excess);
+                }
+                return;
+            }
+        }
+
+        // Append the new candle and clone the history while the lock is held;
+        // the guard is dropped at the end of this block — before any .await.
+        let candles = {
+            let mut history = self.candle_history.lock().await;
+            history.push(candle);
+            // Keep only the most recent MAX_CANDLE_HISTORY candles; older
+            // candles are dead weight once the indicator windows have slid past them.
+            if history.len() > MAX_CANDLE_HISTORY {
+                let excess = history.len() - MAX_CANDLE_HISTORY;
+                history.drain(0..excess);
+            }
+            history.clone()
+        }; // history guard dropped here — no lock held across the awaits below.
+
+        // C2 + H3 fix (Phase 8): the engine now exposes `plan_candle` which
+        // returns `(Vec<LogEntry>, Vec<OrderIntent>)`. The tick loop captures
+        // the intent list for the audit trail and forwards it to a future
+        // H3-aware executor (Phase 9). Today the intents are already
+        // executed by `plan_candle` itself — the split exists so we can
+        // re-route them through a cancellation-aware executor without
+        // changing the engine's eval logic.
+        //
+        // H3 cancellation plumbing is wired separately:
+        // `DhanBroker::execute_with_meta` now checks the session's
+        // `CancellationToken` before the HTTP call (see
+        // `dhan.rs::execute_with_meta`), so a `stop()` mid-`place_order`
+        // aborts the broker call within a few hundred ms instead of
+        // waiting for the broker's response.
+        let (_logs, intents) = {
+            let mut engine = self.engine.lock().await;
+            engine.plan_candle(&candles).await
+        };
+        // Intents are recorded for any future executor (Phase 9
+        // multi-session work). Today they were already executed by
+        // `plan_candle`; we just keep the list visible so logs and audit
+        // can correlate.
+        let _ = intents;
+    }
 
     /// Stop the session. Cancels the cancellation token (the tick loop's
     /// `select!` will break on the next iteration boundary) and awaits the
