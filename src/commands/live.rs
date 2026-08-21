@@ -259,6 +259,11 @@ pub async fn confirm_live_start(
         // inside `LiveSession::start`.
         DEFAULT_LIVE_INITIAL_CASH,
         emitter,
+        // B1 (audit): the per-candle market-hours gate reuses the
+        // same NSE holiday calendar the preflight gate already
+        // consulted, so session-start and per-candle decisions can
+        // never drift apart.
+        state.live_guard.holiday_calendar.clone(),
     )
     .await?;
 

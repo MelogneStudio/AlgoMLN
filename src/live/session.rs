@@ -47,6 +47,8 @@ use crate::{
     feed::FeedManager,
     live::{
         candle_assembler::CandleAssembler,
+        guard::{is_market_open, IST_OFFSET_SECONDS},
+        holidays::NseHolidayCalendar,
         trade_log::TradeLog,
     },
     models::Candle,
@@ -61,6 +63,20 @@ use crate::{
         runtime::{StrategyEngine, StrategyInstance, StrategyStatus as EngineStatus},
     },
 };
+
+/// Convert a candle's millisecond UTC unix timestamp into an IST wall-clock
+/// `DateTime<FixedOffset>`. Used by the per-candle market-hours gate so the
+/// decision reads the candle close in the same frame as `is_market_open`.
+///
+/// Lives here (rather than in `guard.rs`) so the session module does not
+/// have to re-export `FixedOffset`. The constant offset keeps the math
+/// trivial: `chrono::DateTime::from_timestamp_millis(ts) -> Utc -> IST`.
+fn candle_close_ist(ts_millis: i64) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    let utc = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ts_millis)?;
+    Some(utc.with_timezone(
+        &chrono::FixedOffset::east_opt(IST_OFFSET_SECONDS).expect("IST offset is in range"),
+    ))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +108,13 @@ pub struct LiveSession {
     pub trade_log: Arc<TradeLog>,
     pub candle_history: Arc<Mutex<Vec<Candle>>>,
     pub start_time: DateTime<Utc>,
+    /// B1 (audit): NSE trading-day calendar used by the per-candle
+    /// market-hours gate in the tick loop. Cloned from the shared
+    /// `AppState` via `LiveGuard`. The session never mutates this
+    /// calendar — the only mutator is `NseHolidayCalendar` itself, which
+    /// is constructed once at startup and shared with `LiveGuard` and
+    /// `GatedLiveExecutionApi`.
+    pub(crate) holiday_calendar: Arc<NseHolidayCalendar>,
     cancel: CancellationToken,
     task: Mutex<Option<JoinHandle<()>>>,
     /// Emitter for loud failure alerts. The real impl wraps `tauri::AppHandle`
@@ -126,6 +149,7 @@ impl LiveSession {
         initial_candles: Vec<Candle>,
         initial_cash: f64,
         emitter: Arc<dyn SessionEventEmitter>,
+        holiday_calendar: Arc<NseHolidayCalendar>,
     ) -> Result<Arc<Self>, String> {
         // Write session context onto the broker before the engine starts so
         // every `execute`/`execute_with_meta` call during this session sees
@@ -175,6 +199,7 @@ impl LiveSession {
             trade_log,
             candle_history: Arc::new(Mutex::new(initial_candles)),
             start_time: Utc::now(),
+            holiday_calendar,
             cancel,
             task: Mutex::new(None),
             emitter,
@@ -246,6 +271,41 @@ impl LiveSession {
                         let Some(candle) = assembler.feed(&tick) else {
                             continue;
                         };
+
+                        // B1 (audit): per-candle market-hours gate. A session
+                        // started at 15:29 would otherwise run `on_candle` on
+                        // the 15:30 candle and submit a post-close order
+                        // that NSE rejects. Re-using the same predicate as
+                        // `LiveGuard::run_preflight` keeps the boundary
+                        // definitions in one place; the session treats
+                        // weekend/holiday/outside-hours candles as
+                        // un-tradeable and skips the rest of the pipeline.
+                        //
+                        // The candle still goes into `candle_history` so the
+                        // indicator warm-up does not skip a day when the
+                        // first session candle lands after a weekend gap —
+                        // we just don't try to trade on it. Skipping the
+                        // history append would leave indicators blind to
+                        // that day's prices.
+                        if let Some(candle_close_ist) = candle_close_ist(candle.timestamp) {
+                            if !is_market_open(candle_close_ist, &task_session.holiday_calendar) {
+                                eprintln!(
+                                    "[live_session] market closed at candle close {} IST; \
+                                     skipping trading on this candle",
+                                    candle_close_ist.format("%Y-%m-%d %H:%M:%S")
+                                );
+                                // Still record the candle so the next
+                                // in-session candle has the correct
+                                // preceding close.
+                                let mut history = task_session.candle_history.lock().await;
+                                history.push(candle);
+                                if history.len() > MAX_CANDLE_HISTORY {
+                                    let excess = history.len() - MAX_CANDLE_HISTORY;
+                                    history.drain(0..excess);
+                                }
+                                continue;
+                            }
+                        }
 
                         // Append the new candle and clone the history while the lock is held;
                         // the guard is dropped at the end of this block — before any .await.
@@ -437,6 +497,7 @@ impl LiveSession {
 mod tests {
     use super::*;
     use crate::models::Candle;
+    use chrono::{Datelike, TimeZone, Timelike};
 
     fn make_candle(ts: i64) -> Candle {
         Candle { timestamp: ts, open: 100.0, high: 101.0, low: 99.0, close: 100.5, volume: 1000.0 }
@@ -506,6 +567,80 @@ mod tests {
     /// Verify that a `RecvError::Lagged` on the broadcast channel is recoverable:
     /// the tick loop matches it to `continue`, not `break`, so the session stays alive.
     /// This test demonstrates the channel contract that underpins that logic.
+    // ---- B1 (audit): per-candle market-hours gate ----
+    //
+    // The tick loop's gate is a one-line `is_market_open(candle_close_ist, ...)`.
+    // The interesting cases are the conversion itself and the predicate's
+    // behaviour at the IST open/close boundary when fed via `candle.timestamp`.
+
+    /// 2026-01-05 09:30:00 IST (Monday, well inside trading hours).
+    /// Build the millisecond timestamp the engine sees.
+    fn ts_ist(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
+        let ist = chrono::FixedOffset::east_opt(IST_OFFSET_SECONDS).unwrap();
+        let nd = chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        let nt = chrono::NaiveTime::from_hms_opt(h, mi, s).unwrap();
+        let dt = ist
+            .from_local_datetime(&nd.and_time(nt))
+            .single()
+            .expect("valid ist instant");
+        dt.timestamp_millis()
+    }
+
+    #[test]
+    fn test_candle_close_ist_converts_mid_session() {
+        // 2026-01-05 (Monday) 09:30:00 IST.
+        let ts = ts_ist(2026, 1, 5, 9, 30, 0);
+        let got = candle_close_ist(ts).expect("valid ts");
+        assert_eq!(got.hour(), 9);
+        assert_eq!(got.minute(), 30);
+        assert_eq!(got.weekday(), chrono::Weekday::Mon);
+    }
+
+    #[test]
+    fn test_candle_close_ist_returns_none_for_garbage() {
+        // Far-future timestamp that overflows `from_timestamp_millis`.
+        assert!(candle_close_ist(i64::MAX).is_none());
+    }
+
+    /// Saturday candle: even with an empty holiday calendar, the gate
+    /// must reject weekend timestamps.
+    #[test]
+    fn test_gate_skips_weekend_candle() {
+        let cal = NseHolidayCalendar::new();
+        // 2026-01-03 is a Saturday.
+        let sat_close = candle_close_ist(ts_ist(2026, 1, 3, 10, 0, 0)).unwrap();
+        assert!(!is_market_open(sat_close, &cal));
+    }
+
+    /// Post-close candle: a 15:30:01 IST candle on a trading day must be
+    /// rejected. This is the exact B1 scenario — a session started at 15:29
+    /// must not submit a 15:30 order.
+    #[test]
+    fn test_gate_skips_post_close_candle() {
+        let cal = NseHolidayCalendar::new();
+        // 2026-01-05 (Monday) 15:30:01 IST.
+        let post_close = candle_close_ist(ts_ist(2026, 1, 5, 15, 30, 1)).unwrap();
+        assert!(!is_market_open(post_close, &cal));
+        // And the inclusive boundary at 15:30:00 is still open.
+        let close = candle_close_ist(ts_ist(2026, 1, 5, 15, 30, 0)).unwrap();
+        assert!(is_market_open(close, &cal));
+    }
+
+    /// Holiday candle: 2026-01-26 (Republic Day, Monday) must be rejected
+    /// only when registered in the calendar — proves the calendar actually
+    /// reaches the gate, not just the weekday/weekend predicates.
+    #[test]
+    fn test_gate_skips_holiday_candle() {
+        let empty = NseHolidayCalendar::new();
+        let holidays = vec![chrono::NaiveDate::from_ymd_opt(2026, 1, 26).unwrap()];
+        let populated = NseHolidayCalendar::with_holidays(holidays);
+        let rep_day = candle_close_ist(ts_ist(2026, 1, 26, 10, 0, 0)).unwrap();
+        // Empty calendar treats it as a normal trading day.
+        assert!(is_market_open(rep_day, &empty));
+        // Populated calendar treats it as a holiday.
+        assert!(!is_market_open(rep_day, &populated));
+    }
+
     #[tokio::test]
     async fn test_lag_error_does_not_break_loop() {
         // Channel with capacity 2 — send 3 items before reading to overflow the buffer.

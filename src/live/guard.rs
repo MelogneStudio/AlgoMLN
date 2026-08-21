@@ -239,15 +239,12 @@ impl LiveGuard {
 /// and exclusive on the close side (`15:30` is open, `15:30:01` is not).
 ///
 /// Extracted as a pure function so it can be unit-tested with a fake
-/// `DateTime<FixedOffset>` without depending on the system clock.
-///
-/// L4 (audit): the boundary is checked only at *session start*. A session
-/// that starts at 15:29:00 will still call `on_candle` on the 15:30 candle
-/// and may submit an order at 15:30:00.001, which NSE rejects. The guard
-/// does not (and cannot) abort an already-running session mid-candle —
-/// the close is a wall-clock check, not a per-candle gate. Operators
-/// starting a session in the last minute should expect a possible
-/// post-close order attempt, and the UI should surface a warning.
+/// `DateTime<FixedOffset>` without depending on the system clock. The
+/// predicate is consulted at two points in the live pipeline: (a) at
+/// session start by `LiveGuard::run_preflight`, and (b) on every closed
+/// candle by the tick loop in `src/live/session.rs` (audit item B1). Both
+/// callers share the same `Arc<NseHolidayCalendar>` so the boundary
+/// definition cannot drift between preflight and per-candle.
 pub fn is_market_open(dt: DateTime<FixedOffset>, holidays: &NseHolidayCalendar) -> bool {
     // Weekend first — the common case for off-hours attempts.
     match dt.weekday() {

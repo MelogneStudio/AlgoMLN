@@ -33,7 +33,7 @@ AlgoMLN/
 │   │   ├── candle_assembler.rs Per-symbol 1-minute candles from live ticks
 │   │   ├── guard.rs            LiveGuard — 9 preflight safety gates (paper guard, broker reach, symbol/segment, market hours, risk controls, stale cache, ack file)
 │   │   ├── holidays.rs         NseHolidayCalendar — trading-day list (whole-day closures only; updated yearly)
-│   │   ├── session.rs          Single live session manager (engine + Dhan + feed task)
+│   │   ├── session.rs          Single live session manager (engine + Dhan + feed task + per-candle market-hours gate)
 │   │   └── trade_log.rs        Append-only JSONL live execution audit log
 │   ├── strategy/
 │   │   ├── dsl/                Lexer → Parser → AST → Validator
