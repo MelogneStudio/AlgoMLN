@@ -30,10 +30,11 @@ Phase 1 (Data) · Phase 2 (Indicators) · Phase 2.5–2.9 (Strategy Engine) ✅
 Phase 3–5 UI (Builder / Strategies / Coder / Uploader / Settings) ✅
 Phase 6 (Plugin System — Rhai + WASM runtimes, capability gating) ✅
 Phase 7 (Live Trading) — single live-session manager, trade log, 9-gate preflight ✅
+Phase 8 (Engine eval/execute split + Plugin order gateway) — Tasks #1–#4 ✅, Tasks #5–#6 deferred
 ```
 
 Run `cargo test --workspace` for the current test count
-Current count: `311 passing | 1 ignored | 0 failed`.
+Current count: `341 passing | 1 ignored | 0 failed`.
 
 ### ✅ Phase 1 — Data Layer
 - Broker abstraction trait (`BrokerClient`)
@@ -194,7 +195,7 @@ What plugins can currently do:
 | UI Panels | Register a panel, push notifications/toasts, stream data into the panel |
 | Scheduler | Cron-based recurring tasks |
 | Market Data | Read-only access to the same broker client the strategy engine uses |
-| Execution | Reserved — currently a no-op stub until the engine's execution path is broker-agnostic |
+| Execution | Phase 7: read-only `positions()` snapshot (`ReadOnlyLiveExecutionApi`). Phase 8: `GatedLiveExecutionApi` — `submit_order` re-runs every engine gate (session, symbol, market hours, stale, cancelled, paused) and forwards through `DhanBroker::execute_with_meta`. |
 
 Plugins publish and subscribe to engine events (`RuleFired`, `TradeExecuted`, `CandleProcessed`) over a broadcast event bus. **Backtests never wire up the event bus**, so plugin callbacks can't run during replay — this keeps backtests deterministic. The bus is only attached to the engine for paper/live runs.
 
@@ -430,6 +431,15 @@ Plugin manifest → PluginLoader → Rhai / WASM runtime → capability-gated Pl
 - **Position sizing** — `OrderBuilder::resolve_quantity` supports `QuantitySpec::Fixed` and `QuantitySpec::PercentCapital` (the latter is fed by `DhanBroker::available_cash`).
 - **Multi-symbol strategies** — Phase 7 single-symbol only; the DSL `TRADE_IN Symbols` / `TRADE_IN NIFTY_*` clauses exist but the live runner rejects multi-symbol with a clear error.
 
+**Live-execution audit resolutions (committed):**
+
+| Finding | Resolution |
+|---|---|
+| **A1** `MAX_DAILY_LOSS` was a silent no-op in live trading | `check_risk_breach` now reads starting capital from `StrategyInstance::initial_cash` (threaded through `LiveSession::start` with `DEFAULT_LIVE_INITIAL_CASH = 1_000_000.0` INR). A stderr warning fires when `<= 0.0` so the user notices the cap is inactive. |
+| **A2** `MAX_ORDERS` could block stop-loss / take-profit exits | Exits (`SELL`, `SELL ALL`, strategy-level SL/TP synthetic closes) short-circuit `check_risk_breach` before `session_orders` is touched. `session_orders` increments only on successful entry (BUY) executes. |
+| **B1** no per-candle market-hours gate in the live tick loop | The tick loop runs `is_market_open(candle_close_ist, &holiday_calendar)` per candle. A session started at 15:29 will not submit an order after 15:30. Off-hours candles still land in `candle_history` so indicator windows stay continuous across weekend gaps. |
+| **B2** live tick-loop gap-fill + flush | `CandleAssembler::feed` emits a zero-volume gap candle for every minute between the closed minute and the new tick. `CandleAssembler::flush()` returns the in-progress partial candle and is called from `cancel.cancelled()` and `RecvError::Closed`, so a stop at 15:29:30 preserves the last minute's prices and volume. Both gap-filled and flushed candles flow through the same B1-gated `append_candle` helper. |
+
 ### ✅ Phase 7 — Live Trading
 
 - `DhanBroker` wraps `DhanClient` and implements `ExecutionTarget` — same engine drives backtests, paper, and live
@@ -444,7 +454,17 @@ Plugin manifest → PluginLoader → Rhai / WASM runtime → capability-gated Pl
 - Plugin `Execution` capability is **read-only** in Phase 7 (`ReadOnlyLiveExecutionApi`) — order submission is Phase 8
 - Browser fallback: every live command throws `"live trading is not available in the browser"`; the modal swaps Step 1 for a "live trading is only available in the desktop app" notice
 
-Full audit of the live-execution path lives in `plans/live_execution/live_execution_audit.md`. As of the latest resolution pass: C1 (cash cap), C3 (start lock), H1 (Transit not a trade), H2 (resume-during-stale), H4 (positions after stop), M2 (nanosecond), L4 (market-hours docs) are fixed; C2 (`OrderIntents` refactor) and H3 (cancel in-flight HTTP) await the Phase 8 engine refactor.
+Full audit of the live-execution path lives in `plans/live_execution/live_execution_audit.md` (the C1/C3/H1/H2/H4/M2/L4 resolution table is there, plus the new top-down `A1`/`A2`/`B1`/`B2` fixes in `plans/total_audit/total-audit.txt`). C2 (`OrderIntents` refactor) and H3 (cancel in-flight HTTP) are fixed in Phase 8 — see below.
+
+### ✅ Phase 8 — Eval/Execute Split + Plugin Order Gateway (partial)
+
+- **`StrategyEngine::plan_candle` / `execute_intent`** — the engine now splits evaluation from execution. `plan_candle(&[Candle]) -> (Vec<LogEntry>, Vec<OrderIntent>)` returns the audit trail of intents (order, rule id, notes — `"stop_loss"` / `"take_profit"` / empty, candle timestamp) without firing the broker. `on_candle` stays as a thin compatibility wrapper for backtests and the CLI; the live tick loop plans under the engine lock, drops the lock, and executes each intent through a cancellation-aware executor. Backwards-compatibility guarded by `on_candle_preserves_logs_when_run_via_plan_candle`.
+- **`GatedLiveExecutionApi`** — the plugin order gateway. Plugins that declare the `Execution` capability can now submit live orders. Every `submit_order` re-runs six gates before forwarding to `DhanBroker::execute_with_meta`: session active, symbol resolves to `Segment::NseEq`, market hours via `is_market_open`, broker not stale, session `CancellationToken` not cancelled, and BUY blocked when paused (SELL always passes so plugin-driven exits remain allowed). A `PluginSessionContextGuard` RAII handle stages `strategy_id = "plugin:<strategy_id>"` and `strategy_name = "<strategy_name> [plugin order]"` on the broker so the trade-log row attributes to the plugin. `cancel_order` returns a structured error (broker has no cancel endpoint yet); `positions()` mirrors the read-only path. The Tauri host factory wires `GatedLiveExecutionApi` when the session slot is `Some` and `NoopExecutionApi` otherwise.
+- **H3 cancellation plumbing** — `LiveSession::start` constructs a `CancellationToken` and wires it into the broker via `DhanBroker::set_cancel_token`. `execute_with_meta` checks `cancel_token.is_cancelled()` at the very top, before the paused-for-entries check or the broker HTTP call — `stop()` mid-`place_order` aborts within a few hundred ms and the trade-log row is never appended. Token lives in a `parking_lot::RwLock<CancellationToken>` so the broker can be shared through `Arc<DhanBroker>` without exclusive ownership.
+- **C2 lock discipline** — `execute_intent` still keeps the lock today because extracting `risk_state` and the logger from `&mut self` is a much larger refactor; H3 cancellation is the practical safety net. The full lock-release refactor (release during the await on `execute`) is deferred to Phase 9 multi-session work.
+- **Remaining** — Tasks #5–#6 (W1/W2/W5 wiring, L2/L8 hardening) deferred to a follow-up commit.
+
+
 
 ---
 

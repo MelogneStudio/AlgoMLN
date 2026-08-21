@@ -33,10 +33,6 @@
   is_market_open is checked only at preflight. A session started at 15:29 keeps assembling candles and can attempt orders after
   15:30. Flagged as known limitation "L4" but it's a real post-close order hazard.
 
-  B2 — Candle assembler drops gap-minutes and never flushes the final candle. candle_assembler.rs:28-60
-  On a feed gap (minute N → N+3) only candle N is emitted; N+1/N+2 vanish, giving the engine a non-contiguous series that corrupts
-  time-based indicators. The last minute's candle before stop/close is never flushed.
-
   B3 — WASM CPU cap is armed but never driven. wasm_runtime.rs:150-160
   set_epoch_deadline(1) is set but nothing calls increment_epoch() (no watchdog), and there's no fuel and async_support(false). An
   infinite loop in a plugin lifecycle export hangs the host thread. The primary containment mechanism doesn't contain.
@@ -50,6 +46,49 @@
   Append uses flush() not fsync (a crash can lose the last audited trades), and a panic while holding the mutex poisons it, disabling
   all further logging for the session. For an immutable audit log of real orders, both are worth hardening.
 
+  Resolved
+
+  A1 — Fixed: check_risk_breach now reads the initial cash from
+  StrategyInstance::initial_cash (threaded through from LiveSession::start with
+  DEFAULT_LIVE_INITIAL_CASH = 1_000_000.0 INR for the Tauri binary, or
+  whatever the caller passes). The old broker_initial_cash() downcast that
+  returned 0.0 for any non-PaperBroker target is gone. Guarded by
+  risk_max_daily_loss_fires_for_non_paper_broker and a stderr warning emitted
+  when initial_cash <= 0.0 so the user notices the cap won't fire.
+
+  A2 — Fixed: check_risk_breach now short-circuits to Ok(()) for any exit
+  action (SELL, SELL ALL, including strategy-level STOP_LOSS / TAKE_PROFIT
+  synthetic closes) before incrementing session_orders. session_orders is
+  incremented only on successful entry (BUY) execute, so a failed order does
+  not consume the cap and exits never consume it. Guarded by
+  risk_max_orders_does_not_block_stop_loss,
+  risk_max_orders_does_not_block_take_profit,
+  risk_max_orders_does_not_count_or_block_rule_driven_sell, and
+  risk_max_orders_exhausted_then_re_armed_after_exit.
+
+  B1 — Fixed: LiveSession's tick loop now runs is_market_open(candle_close_ist,
+  holiday_calendar) per candle before pushing the candle into
+  engine.plan_candle. A session started at 15:29 will not submit an order
+  after 15:30. The closed candle still lands in candle_history so indicator
+  windows stay continuous across weekend gaps. Guarded by
+  test_gate_skips_weekend_candle, test_gate_skips_post_close_candle,
+  test_gate_skips_holiday_candle.
+
+  B2 — Fixed: CandleAssembler::feed now returns Vec<Candle> and emits a
+  zero-volume gap candle for every minute strictly between the closed
+  minute and the new tick's minute (flat at the last seen close), so the
+  engine sees a contiguous minute-by-minute series across feed gaps.
+  CandleAssembler::flush() emits the in-progress partial minute's candle
+  and is called from the cancel.cancelled() branch and the RecvError::Closed
+  branch of the live tick loop, so a stop or feed shutdown mid-minute
+  preserves the partial candle's prices and volume. The flushed candle
+  flows through the same B1-gated LiveSession::append_candle helper the
+  regular tick body uses. Guarded by test_gap_emits_zero_volume_minutes,
+  test_multi_minute_gap_emits_one_per_missing_minute,
+  test_flush_emits_partial_candle, and test_flush_before_any_tick_is_none
+  in candle_assembler.rs::tests (plus the existing B1 regression tests
+  staying green proves the append_candle refactor is structurally sound).
+
   Clean / no issue found
 
   - DSL parser/validator/lexer: no panics on malformed input, ranges (0,100] correct, wire boundary
@@ -57,3 +96,38 @@
   - Lock discipline in commands/live.rs: no parking_lot guard held across .await (all await-spanning locks are tokio::sync::Mutex).
   Clean.
   - on_candle/plan_candle equivalence, determinism (BTreeMap usage), and SL/TP bypass-of-trigger-state are all correct.
+
+Status as of 2026-08-21
+
+  Resolved (committed):
+    A1, A2, B1, B2 — see "Resolved" block above.
+    Phase 8 Tasks #1–#4 — plan_candle / execute_intent split (C2), H3 cancellation
+    plumbing, GatedLiveExecutionApi plugin order gateway (Task #4).
+
+  Open (lower-confidence, not yet patched):
+    A3 — == / != tolerance still uses f64::EPSILON (engine.rs:825-826). Adjacent-double
+    arithmetic at price-magnitude values (~20000) means Eq is bitwise and Neq is
+    effectively always true. Fix: relative / ULP tolerance.
+    A4 — enable/disable error path permanently loses the plugin (registry.rs:178-206,
+    218+). The real plugin is mem::replaced with EmptyPlugin before on_enable().await?;
+    an Err from on_enable drops the plugin silently. Fix: restore on the error path.
+    A5 — daily_realized_loss is a dead write (engine.rs:549-556). Never read; comment
+    misleading; no "daily" reset. Harmless but worth removing or wiring up.
+    B3 — WASM CPU cap is armed but never driven (wasm_runtime.rs:150-160).
+    set_epoch_deadline(1) is set with no watchdog, no fuel, async_support(false).
+    Infinite-loop plugin lifecycle export hangs the host. Fix: spawn a watchdog that
+    calls increment_epoch() on a timer, or switch to fuel metering.
+    B4 — GatedLiveExecutionApi gates 4/5 read broker-global state, not the fetched
+    session (execution.rs:282-294). Latent inconsistency that breaks under multi-session.
+    Fix: pass the resolved session through and read from it.
+    B5 — Trade-log durability + poison (trade_log.rs:52-60). Append uses flush() not
+    fsync; a panic while holding the mutex poisons it. Fix: fsync after append + a
+    parking_lot Mutex that doesn't poison.
+
+  Out of scope / deferred:
+    - Phase 8 Task #5 (W1/W2/W5 wiring comments + batch refresh_realized_loss).
+    - Phase 8 Task #6 (L2 / L8 pub-field hardening).
+    - Phase 9 multi-session (full lock release across execute; per-session broker
+      state in GatedLiveExecutionApi).
+
+  Test baseline: cargo test --lib → 341 passed, 1 ignored, 0 failed.
