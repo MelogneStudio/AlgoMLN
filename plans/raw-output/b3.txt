@@ -1,0 +1,197 @@
+error: test failed, to rerun pass `--lib`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\Ansh Tiwari\Documents\GitHub\AlgoMLN\target\debug\deps\algomln-41a7847d893a706c.exe` (exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)
+note: test exited abnormally; to see the full output pass --no-capture to the harness.
+
+C:\Users\Ansh Tiwari\Documents\GitHub\AlgoMLN>   set RUST_BACKTRACE=full
+
+C:\Users\Ansh Tiwari\Documents\GitHub\AlgoMLN>   cargo test epoch_watchdog_traps_infinite_loop -- --nocapture
+warning: unused import: `strategy::execution::target::ExecutionTarget`
+  --> src\commands\live.rs:20:5
+   |
+20 |     strategy::execution::target::ExecutionTarget,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `permissions` is never read
+  --> src\plugin\host.rs:28:16
+   |
+15 | pub struct PluginHost {
+   |            ---------- field in this struct
+...
+28 |     pub(crate) permissions: PluginPermissions,
+   |                ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `NoopIndicator` is never constructed
+   --> src\plugin\runtime\rhai_runtime.rs:305:8
+    |
+305 | struct NoopIndicator;
+    |        ^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> src\strategy\execution\dhan.rs:1331:13
+     |
+1331 |         let mut broker = broker_with_mocks(
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src\strategy\runtime\engine.rs:2034:13
+     |
+2034 |         let mut engine = make_engine("WHEN close > 105\nBUY 1", 100_000.0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `engine`
+    --> src\strategy\runtime\engine.rs:2034:13
+     |
+2034 |         let mut engine = make_engine("WHEN close > 105\nBUY 1", 100_000.0);
+     |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_engine`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `algomln` (lib) generated 3 warnings
+warning: `algomln` (lib test) generated 6 warnings (3 duplicates) (run `cargo fix --lib -p algomln --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.30s
+     Running unittests src\lib.rs (target\debug\deps\algomln-41a7847d893a706c.exe)
+
+running 1 test
+
+thread 'plugin::runtime::wasm_runtime::tests::epoch_watchdog_traps_infinite_loop' (18716) panicked at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\panicking.rs:225:5:
+panic in a function that cannot unwind
+stack backtrace:
+   0:     0x7ff61a47fd20 - std::backtrace_rs::backtrace::win64::trace
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\..\..\backtrace\src\backtrace\win64.rs:85
+   1:     0x7ff61a47fd20 - std::backtrace_rs::backtrace::trace_unsynchronized
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\..\..\backtrace\src\backtrace\mod.rs:66
+   2:     0x7ff61a47fd20 - std::sys::backtrace::_print_fmt
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\backtrace.rs:74
+   3:     0x7ff61a47fd20 - std::sys::backtrace::impl$0::print::impl$0::fmt
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\backtrace.rs:44
+   4:     0x7ff61a495ea1 - core::fmt::write
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\fmt\mod.rs:0
+   5:     0x7ff61a4863c4 - std::io::default_write_fmt
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\io\mod.rs:639
+   6:     0x7ff61a4863c4 - std::io::Write::write_fmt<std::sys::stdio::windows::Stderr>
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\io\mod.rs:1994
+   7:     0x7ff61a463b42 - std::sys::backtrace::BacktraceLock::print
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\backtrace.rs:47
+   8:     0x7ff61a463b42 - std::panicking::default_hook::closure$0
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:292
+   9:     0x7ff61a476c37 - std::panicking::default_hook
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:319
+  10:     0x7ff61a476ef3 - std::panicking::panic_with_hook
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:825
+  11:     0x7ff61a463c4a - std::panicking::panic_handler::closure$0
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:691
+  12:     0x7ff61a46146f - std::sys::backtrace::__rust_end_short_backtrace<std::panicking::panic_handler::closure_env$0,never$>
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\backtrace.rs:182
+  13:     0x7ff61a4645de - std::panicking::panic_handler
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:689
+  14:     0x7ff61a528d77 - core::panicking::panic_nounwind_fmt
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\intrinsics\mod.rs:2447
+  15:     0x7ff61a528cf1 - core::panicking::panic_nounwind
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\panicking.rs:225
+  16:     0x7ff61a528ea6 - core::panicking::panic_cannot_unwind
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\panicking.rs:337
+  17:     0x7ff618e98583 - wasmtime::runtime::vm::libcalls::raw::new_epoch
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\libcalls.rs:105
+  18:     0x7ffda96b0500 - _CxxFrameHandler3
+  19:     0x7ffda96a3a91 - is_exception_typeof
+  20:     0x7ffda96af978 - _C_specific_handler
+  21:     0x7ffda96a2c78 - is_exception_typeof
+  22:     0x7ffda96b0311 - _CxxFrameHandler3
+  23:     0x7ffdc1944b3f - _chkstk
+  24:     0x7ffdc1822103 - RtlUnwindEx
+  25:     0x7ffdc18b2a26 - RtlUnwind
+  26:     0x7ffda96b1ce9 - _report_gsfailure
+  27:     0x7ff61a4a1a22 - wasmtime_longjmp_23_0_3
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\helpers.c:72
+  28:     0x7ff618f64268 - wasmtime::runtime::vm::traphandlers::call_thread_state::CallThreadState::unwind_with
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:423
+  29:     0x7ff6190014c0 - wasmtime::runtime::vm::traphandlers::raise_trap::closure$0
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:84
+  30:     0x7ff618f22334 - wasmtime::runtime::vm::traphandlers::tls::with<never$,wasmtime::runtime::vm::traphandlers::raise_trap::closure_env$0>
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:765
+  31:     0x7ff619001421 - wasmtime::runtime::vm::traphandlers::raise_trap
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:84
+  32:     0x7ff6190411ae - wasmtime::runtime::vm::libcalls::raw::impl$1::convert<u64,anyhow::Error>
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\libcalls.rs:172
+  33:     0x7ff618e9853f - wasmtime::runtime::vm::libcalls::raw::new_epoch
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\libcalls.rs:118
+  34:      0x18b746e122e - <unknown>
+  35:      0x18b746e106c - <unknown>
+  36:      0x18b746e1107 - <unknown>
+  37:     0x7ff618c4efc8 - wasmtime::runtime::func::typed::impl$1::call_raw::closure$0<tuple$<>,tuple$<>,tuple$<> >
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\func\typed.rs:217
+  38:     0x7ff618de4f92 - wasmtime::runtime::vm::traphandlers::catch_traps::call_closure<wasmtime::runtime::func::typed::impl$1::call_raw::closure_env$0<tuple$<>,tuple$<>,tuple$<> > >
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:266
+  39:     0x7ff61a4a19d9 - wasmtime_setjmp_23_0_3
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\helpers.c:66
+  40:     0x7ff618de584c - wasmtime::runtime::vm::traphandlers::catch_traps::closure$1<wasmtime::runtime::func::typed::impl$1::call_raw::closure_env$0<tuple$<>,tuple$<>,tuple$<> > >
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:243
+  41:     0x7ff618de5928 - wasmtime::runtime::vm::traphandlers::impl$3::with::closure$0<wasmtime::runtime::vm::traphandlers::catch_traps::closure_env$1<wasmtime::runtime::func::typed::impl$1::call_raw::closure_env$0<tuple$<>,tuple$<>,tuple$<> > > >
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:386
+  42:     0x7ff618cd0977 - wasmtime::runtime::vm::traphandlers::tls::set<i32,wasmtime::runtime::vm::traphandlers::impl$3::with::closure_env$0<wasmtime::runtime::vm::traphandlers::catch_traps::closure_env$1<wasmtime::runtime::func::typed::impl$1::call_raw::closure_env$0<tuple$<>,tupl
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:758
+  43:     0x7ff618c9aebe - wasmtime::runtime::vm::traphandlers::call_thread_state::CallThreadState::with<wasmtime::runtime::vm::traphandlers::catch_traps::closure_env$1<wasmtime::runtime::func::typed::impl$1::call_raw::closure_env$0<tuple$<>,tuple$<>,tuple$<> > > >
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:386
+  44:     0x7ff618de5186 - wasmtime::runtime::vm::traphandlers::catch_traps<wasmtime::runtime::func::typed::impl$1::call_raw::closure_env$0<tuple$<>,tuple$<>,tuple$<> > >
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\vm\traphandlers.rs:242
+  45:     0x7ff618cfb389 - wasmtime::runtime::func::invoke_wasm_and_catch_traps<tuple$<>,wasmtime::runtime::func::typed::impl$1::call_raw::closure_env$0<tuple$<>,tuple$<>,tuple$<> > >
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\func.rs:1587
+  46:     0x7ff618c4ed9e - wasmtime::runtime::func::typed::TypedFunc<tuple$<>,tuple$<> >::call_raw<tuple$<>,tuple$<>,tuple$<> >
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\func\typed.rs:214
+  47:     0x7ff618c4ec0e - wasmtime::runtime::func::typed::TypedFunc<tuple$<>,tuple$<> >::call<tuple$<>,tuple$<>,ref_mut$<wasmtime::runtime::store::Store<tuple$<> > > >
+                               at C:\Users\Ansh Tiwari\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmtime-23.0.3\src\runtime\func\typed.rs:107
+  48:     0x7ff618d2962f - algomln::plugin::runtime::wasm_runtime::tests::epoch_watchdog_traps_infinite_loop
+                               at C:\Users\Ansh Tiwari\Documents\GitHub\AlgoMLN\src\plugin\runtime\wasm_runtime.rs:636
+  49:     0x7ff618def998 - algomln::plugin::runtime::wasm_runtime::tests::epoch_watchdog_traps_infinite_loop::closure$0
+                               at C:\Users\Ansh Tiwari\Documents\GitHub\AlgoMLN\src\plugin\runtime\wasm_runtime.rs:609
+  50:     0x7ff618d7b2d2 - core::ops::function::FnOnce::call_once<algomln::plugin::runtime::wasm_runtime::tests::epoch_watchdog_traps_infinite_loop::closure_env$0,tuple$<> >
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\ops\function.rs:250
+  51:     0x7ff618e14110 - core::ops::function::FnOnce::call_once
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\ops\function.rs:250
+  52:     0x7ff618e14110 - test::__rust_begin_short_backtrace<enum2$<core::result::Result<tuple$<>,alloc::string::String> >,enum2$<core::result::Result<tuple$<>,alloc::string::String> > (*)()>
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\test\src\lib.rs:663
+  53:     0x7ff618e21786 - test::run_test_in_process
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\test\src\lib.rs:686
+  54:     0x7ff618e21786 - test::run_test::closure$0
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\test\src\lib.rs:607
+  55:     0x7ff618e1bc8d - test::run_test::closure$1
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\test\src\lib.rs:637
+  56:     0x7ff618e1bc8d - std::sys::backtrace::__rust_begin_short_backtrace<test::run_test::closure_env$1,tuple$<> >
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\backtrace.rs:166
+  57:     0x7ff618e25453 - std::thread::lifecycle::spawn_unchecked::closure$1::closure$0
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\thread\lifecycle.rs:91
+  58:     0x7ff618e25453 - core::panic::unwind_safe::impl$25::call_once
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\panic\unwind_safe.rs:274
+  59:     0x7ff618e25453 - std::panicking::catch_unwind::do_call
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:581
+  60:     0x7ff618e25453 - std::panicking::catch_unwind
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panicking.rs:544
+  61:     0x7ff618e25453 - std::panic::catch_unwind
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\panic.rs:359
+  62:     0x7ff618e25453 - std::thread::lifecycle::spawn_unchecked::closure$1
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\thread\lifecycle.rs:89
+  63:     0x7ff618e25453 - core::ops::function::FnOnce::call_once<std::thread::lifecycle::spawn_unchecked::closure_env$1<test::run_test::closure_env$1,tuple$<> >,tuple$<> >
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\core\src\ops\function.rs:250
+  64:     0x7ff61a47e94c - std::sys::thread::windows::impl$0::new::thread_start
+                               at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library\std\src\sys\thread\windows.rs:58
+  65:     0x7ffdc133ccb7 - BaseThreadInitThunk
+  66:     0x7ffdc188ad6c - RtlUserThreadStart
+thread caused non-unwinding panic. aborting.
+error: test failed, to rerun pass `--lib`
+
+Caused by:
+  process didn't exit successfully: `C:\Users\Ansh Tiwari\Documents\GitHub\AlgoMLN\target\debug\deps\algomln-41a7847d893a706c.exe epoch_watchdog_traps_infinite_loop --nocapture` (exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)
+
+C:\Users\Ansh Tiwari\Documents\GitHub\AlgoMLN>
