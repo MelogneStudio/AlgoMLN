@@ -365,7 +365,7 @@ The engine and AST are stored in `Arc` so the `register_indicator` closure can h
 - `cranelift_opt_level(Speed)` — release-style codegen.
 - Memory limit is computed from `memory_limit_mb * 1024 * 1024` and enforced by a `ResourceLimiter` (`MemoryLimitState`) that is stored inline in `WasmState` and handed to `store.limiter(|s: &mut WasmState| &mut s.memory_limiter)`. `memory_growing` returns `false` for any growth past the cap; `table_growing` caps tables at 10,000 entries.
 
-**WASI is intentionally not linked.** `WasiCtx` in wasmtime 23 holds trait objects (`RngCore`, `HostWallClock`, `HostMonotonicClock`) that are `Send` but not `Sync`. Carrying a `WasiCtx` in `WasmState` would prevent `Store<WasmState>` from satisfying the `Sync` bound the `Plugin` trait requires, and therefore would prevent `WasmPlugin` from being `Sync` — which the rest of the host assumes. Plugins interact with the platform exclusively through the `algomln::*` host functions.
+**WASI is intentionally not linked.** Plugins interact with the platform exclusively through the `algomln::*` host functions; linking WASI would expose a filesystem and process surface to plugin authors that the rest of the host architecture deliberately keeps walled off.
 
 **Host functions** — bound in `build_linker`. All string/binary data crosses the WASM boundary through `(ptr, len)` pairs; helpers `read_string_from_memory` and `write_bytes_to_memory` decode/encode against the instance's `memory` export:
 

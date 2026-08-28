@@ -333,7 +333,7 @@ src/
                       log, UI broadcast, no-op execution stub)
     runtime/
       rhai_runtime.rs Rhai script plugin — hardened engine, capability-gated host fns
-      wasm_runtime.rs WASM plugin — wasmtime 23, bounded memory, epoch interruption
+      wasm_runtime.rs WASM plugin — wasmtime 48, bounded memory, epoch interruption
     host.rs           PluginHost — capability-gated `*_guarded` accessors
     loader.rs         Manifest → boxed Plugin (dispatches on entry file extension)
     registry.rs       In-memory plugin map, lifecycle (Loaded/Enabled/Disabled/Failed)
@@ -420,7 +420,7 @@ Same runtime as text strategies. No separate execution path.
 Plugin manifest → PluginLoader → Rhai / WASM runtime → capability-gated PluginHost
 ```
 - Rhai script runtime (hardened engine: op/recursion/collection budgets)
-- WASM runtime (wasmtime 23, bounded memory, epoch-interruption watchdog, no WASI)
+- WASM runtime (wasmtime 48, bounded memory, epoch-interruption watchdog, no WASI)
 - Capability gating: Market Data, Storage, Indicators, Analytics, DSL Extension, UI Panels, Scheduler, Execution (stub)
 - Broadcast event bus (`RuleFired` / `TradeExecuted` / `CandleProcessed`) — wired for paper/live only, never for backtests
 - Desktop Plugins screen: list / enable / disable / reload

@@ -1,6 +1,6 @@
 # Plan: Upgrade wasmtime 23 → 48
 
-Status: proposed (not started)
+Status: superseded 2026-08-28 by [wasmtime-upgrade-plan.md](wasmtime-upgrade-plan.md) (chunks 1–3 done; kept as historical reference)
 Author context: written 2026-08-27 on branch `fix/b3-wasm-cpu-cap`
 Latest published wasmtime at time of writing: **48.0.1** (2026-08-25); 49.0.0 unreleased.
 
