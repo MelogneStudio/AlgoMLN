@@ -7,12 +7,9 @@
 //! corresponding lifecycle events.
 //!
 //! The host surface is intentionally minimal: logging, per-plugin KV
-//! storage, notifications, and a panel-data emit hook. WASI is not
-//! linked: `WasiCtx` in wasmtime 23 holds trait objects that are
-//! `Send`-only and not `Sync`, which would prevent the resulting
-//! `Store<WasmState>` (and therefore `WasmPlugin`) from satisfying the
-//! `Plugin: Send + Sync` bound. Plugins interact with the platform
-//! exclusively through the `algomln::*` host functions below.
+//! storage, notifications, and a panel-data emit hook. WASI is intentionally
+//! not linked — plugins interact with the platform exclusively through the
+//! `algomln::*` host functions below.
 //!
 //! Memory is bounded by a `ResourceLimiter` that refuses linear-memory
 //! growth past the configured `memory_limit_bytes`. CPU is bounded by
@@ -53,9 +50,9 @@ use super::super::Plugin;
 /// may grow to. Refusing growth past the configured cap is the
 /// primary memory-isolation mechanism for untrusted plugin code.
 ///
-/// `ResourceLimiter::memory_growing` / `table_growing` receive `u32`
-/// byte/page counts (not `usize`), so the limiter operates on `u32`
-/// values and rejects any growth past the configured cap.
+/// Both `memory_growing` and `table_growing` take `usize` arguments: for
+/// `memory_growing` they are page-aligned byte counts; for `table_growing`
+/// they are element counts. We reject any growth past the configured caps.
 struct MemoryLimitState {
     memory_limit: u32,
 }
@@ -72,13 +69,13 @@ impl ResourceLimiter for MemoryLimitState {
 
     fn table_growing(
         &mut self,
-        _current: u32,
-        desired: u32,
-        _maximum: Option<u32>,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
         // Tables are not exposed through our host surface, so a small
         // generous bound is sufficient.
-        Ok(desired <= 10_000)
+        Ok(desired <= 10_000usize)
     }
 }
 
@@ -152,11 +149,9 @@ pub struct WasmPlugin {
 /// `WasmPlugin`) can satisfy the `Send + Sync` bound that the
 /// `Plugin` trait requires.
 ///
-/// Note: WASI is intentionally **not** linked in this build. `WasiCtx`
-/// in wasmtime 23 holds trait objects that are `Send`-only and not
-/// `Sync`, which would prevent the resulting `Store<WasmState>` (and
-/// therefore `WasmPlugin`) from satisfying the `Plugin: Send + Sync`
-/// bound. There is therefore no `wasi` field on this struct.
+/// Note: WASI is intentionally **not** linked in this build — plugins
+/// interact with the platform exclusively through the `algomln::*`
+/// host functions. There is therefore no `wasi` field on this struct.
 pub struct WasmState {
     pub host: Arc<PluginHost>,
     #[allow(private_interfaces)]
@@ -173,7 +168,6 @@ impl WasmPlugin {
         memory_limit_mb: u32,
     ) -> PluginResult<Self> {
         let mut config = Config::new();
-        config.async_support(false);
         config.epoch_interruption(true);
         config.cranelift_opt_level(OptLevel::Speed);
         let engine = Engine::new(&config).map_err(|e| {
