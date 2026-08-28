@@ -1,6 +1,6 @@
 # Plan: wasmtime 23 → 48 (chunked)
 
-Status: proposed (not started)
+Status: chunk 3 verified 2026-08-28 (chunks 1 + 2 + 3 done; chunk 4 docs and chunk 5 trim remain)
 Parent plan: [wasmtime-23-to-48-upgrade.md](wasmtime-23-to-48-upgrade.md) (single-pass version)
 Author context: written 2026-08-27 on branch `fix/b3-wasm-cpu-cap`
 Latest published wasmtime at time of writing: **48.0.1** (2026-08-25).
@@ -131,6 +131,10 @@ Single-commit revert. The plugin ABI (`_algomln_on_*` exports, `algomln::*` impo
 ## Chunk 3 — App-level smoke test (verification only)
 
 **Why separate**: `src-tauri/Cargo.lock` resolves independently of `Cargo.lock`; `cargo test` does not exercise the Tauri resolution path. The parent plan's §3.4 step calls this out explicitly. This chunk is "did the upgrade actually work in the app" — not a code change.
+
+**Verified 2026-08-28** — instead of the manual `npm run tauri dev` path the chunk called for, the user chose to land a reproducible Rust test (`wasm_plugin_drives_host_fns_end_to_end` in `src/plugin/runtime/wasm_runtime.rs::tests`). The test writes a `.wat` module to a temp file, drives a `WasmPlugin` through `on_load` → `on_enable` → `on_unload`, and asserts both `algomln::log_info` lands in the rate-limited log file and `algomln::storage_get` / `storage_set` round-trip through the host fns.
+
+The smoke uncovered a latent bug: `WasmPlugin::on_load` was arming the epoch deadline only inside `call_lifecycle`, but `linker.instantiate` runs BEFORE that with the store's default deadline of 0, which traps as soon as a watchdog tick lands during instantiate. Production code masked this because typical plugins instantiate in <100 ms (under one tick); the test triggered it because the `.wat` module's instantiate crossed the first tick. Fix: `set_epoch_deadline(LIFECYCLE_CPU_BUDGET_TICKS)` is now also called once at the top of `on_load`, before `linker.instantiate` and before `EpochWatchdog::spawn`. Documented in `CLAUDE.md` invariant 7 and `BACKEND.md` wasm_runtime section.
 
 ### Files
 None (verification only).
