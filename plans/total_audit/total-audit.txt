@@ -12,11 +12,6 @@
   leaving a position open with its safety net disabled. Contradicts the spirit of invariant 12 ("SL/TP is a safety net"). Exits
   should be exempt from the order cap.
 
-  A3 — == / != use f64::EPSILON as an absolute tolerance. engine.rs:825-826
-  (left - right).abs() <= f64::EPSILON is only meaningful for operands near 1.0. For prices/indicators (~20000), the gap between
-  adjacent doubles dwarfs f64::EPSILON (~2.2e-16), so Eq degrades to bitwise equality and Neq is effectively always true. Any DSL
-  rule using ==/!= against a computed value misbehaves. Should be a relative/ULP tolerance.
-
   A4 — enable/disable error path permanently loses the plugin. registry.rs:178-206 (same at :218+)
   The real plugin is mem::replaced out with EmptyPlugin before on_enable().await?. If on_enable returns Err, ? returns early and the
   moved-out plugin is dropped — the registry slot keeps EmptyPlugin with status Loaded forever, while the UI still lists it. A plugin
@@ -89,6 +84,10 @@
   in candle_assembler.rs::tests (plus the existing B1 regression tests
   staying green proves the append_candle refactor is structurally sound).
 
+  A3 — Fixed: == / != comparisons in `compare` now use a relative tolerance (1e-9) combined with an absolute floor.
+  This ensures that equalities are correctly evaluated for large values (e.g. prices around 20,000) where bitwise
+  equality is too strict. Guarded by `test_compare_float_tolerance` in `engine.rs`.
+
   Clean / no issue found
 
   - DSL parser/validator/lexer: no panics on malformed input, ranges (0,100] correct, wire boundary
@@ -117,9 +116,6 @@ Status as of 2026-08-21
   gone.
 
   Open (lower-confidence, not yet patched):
-    A3 — == / != tolerance still uses f64::EPSILON (engine.rs:825-826). Adjacent-double
-    arithmetic at price-magnitude values (~20000) means Eq is bitwise and Neq is
-    effectively always true. Fix: relative / ULP tolerance.
     A4 — enable/disable error path permanently loses the plugin (registry.rs:178-206,
     218+). The real plugin is mem::replaced with EmptyPlugin before on_enable().await?;
     an Err from on_enable drops the plugin silently. Fix: restore on the error path.

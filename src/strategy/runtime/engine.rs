@@ -71,6 +71,8 @@ use super::incremental_provider::BoundedWindowProvider;
 use super::indicator_provider::{IndicatorProvider, IndicatorProviderProfile};
 use super::trigger_state::TriggerStateMap;
 
+const FLOAT_TOLERANCE: f64 = 1e-9;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StrategyStatus {
     Running,
@@ -854,8 +856,16 @@ fn compare(left: f64, op: &CompareOp, right: f64) -> bool {
         CompareOp::Gt => left > right,
         CompareOp::Lte => left <= right,
         CompareOp::Gte => left >= right,
-        CompareOp::Eq => (left - right).abs() <= f64::EPSILON,
-        CompareOp::Neq => (left - right).abs() > f64::EPSILON,
+        CompareOp::Eq => {
+            let diff = (left - right).abs();
+            let norm = left.abs().max(right.abs());
+            diff <= FLOAT_TOLERANCE * norm || diff <= FLOAT_TOLERANCE
+        }
+        CompareOp::Neq => {
+            let diff = (left - right).abs();
+            let norm = left.abs().max(right.abs());
+            !(diff <= FLOAT_TOLERANCE * norm || diff <= FLOAT_TOLERANCE)
+        }
     }
 }
 
@@ -899,6 +909,47 @@ fn position_to_paper(position: Position) -> PaperPosition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_compare_float_tolerance() {
+        let a = 20000.0;
+        let b = 20000.0 + 1e-7; // within 1e-9 * 20000 = 2e-5
+        let c = 20000.0 + 1e-3; // outside
+
+        assert!(compare(a, &CompareOp::Eq, b), "{} and {} should be equal", a, b);
+        assert!(!compare(a, &CompareOp::Eq, c), "{} and {} should not be equal", a, c);
+        assert!(compare(a, &CompareOp::Neq, c), "{} and {} should be not equal", a, c);
+        assert!(!compare(a, &CompareOp::Neq, b), "{} and {} should be equal", a, b);
+
+        // Test near zero
+        let z1 = 0.0;
+        let z2 = 1e-10;
+        assert!(compare(z1, &CompareOp::Eq, z2), "0.0 and 1e-10 should be equal");
+    }
+
+    #[tokio::test]
+    async fn test_dsl_float_equality_regression() {
+        // A3 Regression: Equality check against a large price should be
+        // tolerant of small floating point noise.
+        let mut engine = make_engine("WHEN close == 20000\nBUY 1", 100_000.0);
+
+        // Close is slightly offset from 20000.0 (diff = 1e-7), which is
+        // > EPSILON but < our relative tolerance.
+        let candles = vec![candle(20000.0000001)];
+
+        let logs = engine.on_candle(&candles).await;
+        let buy_fired = logs.iter().any(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }));
+
+        assert!(buy_fired, "BUY should fire when close is approximately 20000.0");
+
+        // Test Neq: should NOT fire if values are approximately equal
+        let mut engine_neq = make_engine("WHEN close != 20000\nBUY 1", 100_000.0);
+        let logs_neq = engine_neq.on_candle(&candles).await;
+        let buy_fired_neq = logs_neq.iter().any(|e| matches!(e.kind, LogEntryKind::OrderExecuted { .. }));
+
+        assert!(!buy_fired_neq, "BUY should NOT fire when close is approximately 20000.0 for !=");
+    }
+
     use crate::strategy::dsl::{AstValidator, Lexer, Parser};
     use crate::strategy::execution::PaperBroker;
 
