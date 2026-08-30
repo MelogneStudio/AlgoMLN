@@ -1,6 +1,6 @@
 # Plan: wasmtime 23 → 48 (chunked)
 
-Status: chunk 3 verified 2026-08-28 (chunks 1 + 2 + 3 done; chunk 4 docs and chunk 5 trim remain)
+Status: chunk 4 verified 2026-08-30 (chunks 1 + 2 + 3 + 4 done; chunk 5 trim remains)
 Parent plan: [wasmtime-23-to-48-upgrade.md](wasmtime-23-to-48-upgrade.md) (single-pass version)
 Author context: written 2026-08-27 on branch `fix/b3-wasm-cpu-cap`
 Latest published wasmtime at time of writing: **48.0.1** (2026-08-25).
