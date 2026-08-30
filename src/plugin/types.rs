@@ -143,7 +143,7 @@ impl TryFrom<&str> for Capability {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PluginStatus {
     Loaded,
     Enabled,

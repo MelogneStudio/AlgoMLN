@@ -196,13 +196,24 @@ impl PluginRegistry {
             ))),
             Check::Enable(plugin) => {
                 let mut plugin = plugin;
-                plugin.on_enable().await?;
-                let mut guard = self.plugins.write();
-                if let Some(entry) = guard.get_mut(id) {
-                    entry.plugin = plugin;
-                    entry.status = PluginStatus::Enabled;
+                match plugin.on_enable().await {
+                    Ok(()) => {
+                        let mut guard = self.plugins.write();
+                        if let Some(entry) = guard.get_mut(id) {
+                            entry.plugin = plugin;
+                            entry.status = PluginStatus::Enabled;
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        let mut guard = self.plugins.write();
+                        if let Some(entry) = guard.get_mut(id) {
+                            entry.plugin = plugin;
+                            entry.status = PluginStatus::Loaded;
+                        }
+                        Err(e)
+                    }
                 }
-                Ok(())
             }
         }
     }
@@ -230,13 +241,24 @@ impl PluginRegistry {
             }
         };
         let mut plugin = to_run;
-        plugin.on_disable().await?;
-        let mut guard = self.plugins.write();
-        if let Some(entry) = guard.get_mut(id) {
-            entry.plugin = plugin;
-            entry.status = PluginStatus::Disabled;
+        match plugin.on_disable().await {
+            Ok(()) => {
+                let mut guard = self.plugins.write();
+                if let Some(entry) = guard.get_mut(id) {
+                    entry.plugin = plugin;
+                    entry.status = PluginStatus::Disabled;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let mut guard = self.plugins.write();
+                if let Some(entry) = guard.get_mut(id) {
+                    entry.plugin = plugin;
+                    entry.status = PluginStatus::Enabled;
+                }
+                Err(e)
+            }
         }
-        Ok(())
     }
 
     /// Tear down a plugin and remove it from the registry.
@@ -317,4 +339,142 @@ impl Plugin for EmptyPlugin {
     }
 
     fn on_unload(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::types::*;
+    use std::sync::Arc;
+
+    struct MockPlugin {
+        meta: PluginMeta,
+        fail_enable: bool,
+        fail_disable: bool,
+    }
+
+    impl MockPlugin {
+        fn new(id: &str, fail_enable: bool, fail_disable: bool) -> Self {
+            Self {
+                meta: PluginMeta {
+                    id: PluginId(id.to_string()),
+                    name: "Mock".to_string(),
+                    version: PluginVersion { major: 0, minor: 0, patch: 0 },
+                    description: "".to_string(),
+                    author: "".to_string(),
+                },
+                fail_enable,
+                fail_disable,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Plugin for MockPlugin {
+        fn meta(&self) -> &PluginMeta { &self.meta }
+        fn capabilities(&self) -> &[Capability] { &[] }
+        async fn on_load(&mut self, _host: Arc<PluginHost>) -> PluginResult<()> { Ok(()) }
+        async fn on_enable(&mut self) -> PluginResult<()> {
+            if self.fail_enable {
+                Err(PluginError::ApiError("enable failed".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+        async fn on_disable(&mut self) -> PluginResult<()> {
+            if self.fail_disable {
+                Err(PluginError::ApiError("disable failed".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+        fn on_unload(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn test_enable_failure_restores_plugin() {
+        let host_factory = Arc::new(|_, _, _| panic!("should not be called"));
+        let registry = PluginRegistry::new(PathBuf::from("test_plugins"), host_factory);
+
+        let id = PluginId("test_plugin".to_string());
+        let plugin = Box::new(MockPlugin::new("test_plugin", true, false));
+
+        {
+            let mut plugins = registry.plugins.write();
+            plugins.insert(id.clone(), PluginEntry {
+                plugin,
+                status: PluginStatus::Loaded,
+                manifest: PluginManifest {
+                    id: "test_plugin".to_string(),
+                    name: "Mock".to_string(),
+                    version: "0.0.0".to_string(),
+                    description: "".to_string(),
+                    author: "".to_string(),
+                    capabilities: vec![],
+                    entry: "entry.rhai".to_string(),
+                    permissions: PluginPermissions {
+                        network: false,
+                        file_system: false,
+                        max_memory_mb: 32,
+                        allowed_symbols: vec![],
+                    },
+                },
+                schedule_handles: Vec::new(),
+            });
+        }
+
+        let result = registry.enable(&id).await;
+        assert!(result.is_err());
+
+        // Verify that the plugin is NOT an EmptyPlugin
+        let guard = registry.plugins.read();
+        let entry = guard.get(&id).expect("Plugin should still exist");
+
+        // If it's EmptyPlugin, the ID in meta() will be empty
+        assert_eq!(entry.plugin.meta().id, id);
+        assert_eq!(entry.status, PluginStatus::Loaded);
+    }
+
+    #[tokio::test]
+    async fn test_disable_failure_restores_plugin() {
+        let host_factory = Arc::new(|_, _, _| panic!("should not be called"));
+        let registry = PluginRegistry::new(PathBuf::from("test_plugins"), host_factory);
+
+        let id = PluginId("test_plugin".to_string());
+        let plugin = Box::new(MockPlugin::new("test_plugin", false, true));
+
+        {
+            let mut plugins = registry.plugins.write();
+            plugins.insert(id.clone(), PluginEntry {
+                plugin,
+                status: PluginStatus::Enabled,
+                manifest: PluginManifest {
+                    id: "test_plugin".to_string(),
+                    name: "Mock".to_string(),
+                    version: "0.0.0".to_string(),
+                    description: "".to_string(),
+                    author: "".to_string(),
+                    capabilities: vec![],
+                    entry: "entry.rhai".to_string(),
+                    permissions: PluginPermissions {
+                        network: false,
+                        file_system: false,
+                        max_memory_mb: 32,
+                        allowed_symbols: vec![],
+                    },
+                },
+                schedule_handles: Vec::new(),
+            });
+        }
+
+        let result = registry.disable(&id).await;
+        assert!(result.is_err());
+
+        // Verify that the plugin is NOT an EmptyPlugin
+        let guard = registry.plugins.read();
+        let entry = guard.get(&id).expect("Plugin should still exist");
+
+        assert_eq!(entry.plugin.meta().id, id);
+        assert_eq!(entry.status, PluginStatus::Enabled);
+    }
 }
