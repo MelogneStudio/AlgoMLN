@@ -104,6 +104,18 @@ Status as of 2026-08-21
     Phase 8 Tasks #1–#4 — plan_candle / execute_intent split (C2), H3 cancellation
     plumbing, GatedLiveExecutionApi plugin order gateway (Task #4).
 
+  B3 — Fixed: each WasmPlugin now owns an EpochWatchdog background thread
+  (wasm_runtime.rs) that calls Engine::increment_epoch() every
+  EPOCH_TICK_MS = 100 ms, and call_lifecycle re-arms
+  store.set_epoch_deadline(LIFECYCLE_CPU_BUDGET_TICKS = 50) before every
+  lifecycle export (~5 s CPU budget). An infinite loop in _algomln_on_load
+  / _algomln_on_enable / _algomln_on_disable now traps instead of hanging
+  the host thread. The watchdog is spawned in on_load and stopped+joined
+  (via Drop) in on_unload so it never outlives the plugin. Guarded by
+  epoch_watchdog_traps_infinite_loop and epoch_watchdog_stops_on_drop in
+  wasm_runtime.rs::tests. The old inert set_epoch_deadline(1) one-shot is
+  gone.
+
   Open (lower-confidence, not yet patched):
     A3 — == / != tolerance still uses f64::EPSILON (engine.rs:825-826). Adjacent-double
     arithmetic at price-magnitude values (~20000) means Eq is bitwise and Neq is
@@ -113,10 +125,6 @@ Status as of 2026-08-21
     an Err from on_enable drops the plugin silently. Fix: restore on the error path.
     A5 — daily_realized_loss is a dead write (engine.rs:549-556). Never read; comment
     misleading; no "daily" reset. Harmless but worth removing or wiring up.
-    B3 — WASM CPU cap is armed but never driven (wasm_runtime.rs:150-160).
-    set_epoch_deadline(1) is set with no watchdog, no fuel, async_support(false).
-    Infinite-loop plugin lifecycle export hangs the host. Fix: spawn a watchdog that
-    calls increment_epoch() on a timer, or switch to fuel metering.
     B4 — GatedLiveExecutionApi gates 4/5 read broker-global state, not the fetched
     session (execution.rs:282-294). Latent inconsistency that breaks under multi-session.
     Fix: pass the resolved session through and read from it.

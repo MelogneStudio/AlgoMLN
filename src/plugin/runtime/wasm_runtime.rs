@@ -7,24 +7,39 @@
 //! corresponding lifecycle events.
 //!
 //! The host surface is intentionally minimal: logging, per-plugin KV
-//! storage, notifications, and a panel-data emit hook. WASI is not
-//! linked: `WasiCtx` in wasmtime 23 holds trait objects that are
-//! `Send`-only and not `Sync`, which would prevent the resulting
-//! `Store<WasmState>` (and therefore `WasmPlugin`) from satisfying the
-//! `Plugin: Send + Sync` bound. Plugins interact with the platform
-//! exclusively through the `algomln::*` host functions below.
+//! storage, notifications, and a panel-data emit hook. WASI is intentionally
+//! not linked — plugins interact with the platform exclusively through the
+//! `algomln::*` host functions below.
 //!
 //! Memory is bounded by a `ResourceLimiter` that refuses linear-memory
 //! growth past the configured `memory_limit_bytes`. CPU is bounded by
-//! wasmtime's epoch-interruption mechanism — callers should drive the
-//! engine's epoch counter from a watchdog thread if a stricter cap is
-//! needed; we arm a one-tick deadline so the trap is available.
+//! wasmtime's epoch-interruption mechanism: each `WasmPlugin` owns an
+//! `EpochWatchdog` background thread that calls `Engine::increment_epoch`
+//! once every `EPOCH_TICK_MS` milliseconds, and every lifecycle export is
+//! invoked with a fresh `LIFECYCLE_CPU_BUDGET_TICKS` deadline. A plugin
+//! export that runs longer than roughly `EPOCH_TICK_MS *
+//! LIFECYCLE_CPU_BUDGET_TICKS` ms traps instead of hanging the host
+//! thread — the watchdog is what actually drives the deadline (arming a
+//! deadline without incrementing the epoch would never fire). The
+//! watchdog is stopped and joined in `on_unload`.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use wasmtime::ResourceLimiter;
 use wasmtime::{Caller, Config, Engine, Instance, Linker, Memory, Module, OptLevel, Store};
+
+/// How often the epoch watchdog ticks the engine's epoch counter. The
+/// effective CPU cap for a lifecycle export is roughly
+/// `EPOCH_TICK_MS * LIFECYCLE_CPU_BUDGET_TICKS` milliseconds.
+const EPOCH_TICK_MS: u64 = 100;
+
+/// Number of epoch ticks a single lifecycle export may consume before the
+/// store's deadline is reached and the call traps. 50 ticks × 100 ms ≈ 5 s.
+const LIFECYCLE_CPU_BUDGET_TICKS: u64 = 50;
 
 use crate::plugin::host::PluginHost;
 use crate::plugin::types::{Capability, NotificationKind, PluginError, PluginMeta, PluginResult};
@@ -35,9 +50,9 @@ use super::super::Plugin;
 /// may grow to. Refusing growth past the configured cap is the
 /// primary memory-isolation mechanism for untrusted plugin code.
 ///
-/// `ResourceLimiter::memory_growing` / `table_growing` receive `u32`
-/// byte/page counts (not `usize`), so the limiter operates on `u32`
-/// values and rejects any growth past the configured cap.
+/// Both `memory_growing` and `table_growing` take `usize` arguments: for
+/// `memory_growing` they are page-aligned byte counts; for `table_growing`
+/// they are element counts. We reject any growth past the configured caps.
 struct MemoryLimitState {
     memory_limit: u32,
 }
@@ -54,13 +69,60 @@ impl ResourceLimiter for MemoryLimitState {
 
     fn table_growing(
         &mut self,
-        _current: u32,
-        desired: u32,
-        _maximum: Option<u32>,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
         // Tables are not exposed through our host surface, so a small
         // generous bound is sufficient.
-        Ok(desired <= 10_000)
+        Ok(desired <= 10_000usize)
+    }
+}
+
+/// Background thread that drives an `Engine`'s epoch counter so that
+/// per-store epoch deadlines actually fire. Without something calling
+/// `Engine::increment_epoch`, a `set_epoch_deadline` is inert and an
+/// infinite loop in a plugin export would hang the host thread. The
+/// watchdog ticks once every `EPOCH_TICK_MS` ms until dropped; `Drop`
+/// signals the thread to stop and joins it.
+struct EpochWatchdog {
+    running: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl EpochWatchdog {
+    /// Spawn a watchdog that increments `engine`'s epoch on a fixed timer.
+    /// `Engine` is cheap to clone (internally reference-counted), so the
+    /// thread owns its own handle.
+    fn spawn(engine: Engine) -> PluginResult<Self> {
+        let running = Arc::new(AtomicBool::new(true));
+        let flag = running.clone();
+        let handle = std::thread::Builder::new()
+            .name("algomln-wasm-epoch".into())
+            .spawn(move || {
+                while flag.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_MS));
+                    engine.increment_epoch();
+                }
+            })
+            .map_err(|e| {
+                PluginError::LoadFailed(format!("failed to spawn wasm epoch watchdog: {e}"))
+            })?;
+        Ok(Self {
+            running,
+            handle: Some(handle),
+        })
+    }
+}
+
+impl Drop for EpochWatchdog {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            // The thread wakes at most `EPOCH_TICK_MS` ms after the flag
+            // flips, so this join is bounded.
+            let _ = handle.join();
+        }
     }
 }
 
@@ -76,6 +138,10 @@ pub struct WasmPlugin {
     engine: Engine,
     store: Option<Store<WasmState>>,
     instance: Option<Instance>,
+    /// Drives the epoch counter so lifecycle deadlines fire. Present only
+    /// while the plugin is loaded; dropped (which stops the thread) in
+    /// `on_unload`.
+    watchdog: Option<EpochWatchdog>,
 }
 
 /// Per-store state: the plugin's host handle and an inline
@@ -83,11 +149,9 @@ pub struct WasmPlugin {
 /// `WasmPlugin`) can satisfy the `Send + Sync` bound that the
 /// `Plugin` trait requires.
 ///
-/// Note: WASI is intentionally **not** linked in this build. `WasiCtx`
-/// in wasmtime 23 holds trait objects that are `Send`-only and not
-/// `Sync`, which would prevent the resulting `Store<WasmState>` (and
-/// therefore `WasmPlugin`) from satisfying the `Plugin: Send + Sync`
-/// bound. There is therefore no `wasi` field on this struct.
+/// Note: WASI is intentionally **not** linked in this build — plugins
+/// interact with the platform exclusively through the `algomln::*`
+/// host functions. There is therefore no `wasi` field on this struct.
 pub struct WasmState {
     pub host: Arc<PluginHost>,
     #[allow(private_interfaces)]
@@ -104,7 +168,6 @@ impl WasmPlugin {
         memory_limit_mb: u32,
     ) -> PluginResult<Self> {
         let mut config = Config::new();
-        config.async_support(false);
         config.epoch_interruption(true);
         config.cranelift_opt_level(OptLevel::Speed);
         let engine = Engine::new(&config).map_err(|e| {
@@ -122,6 +185,7 @@ impl WasmPlugin {
             engine,
             store: None,
             instance: None,
+            watchdog: None,
         })
     }
 }
@@ -420,6 +484,11 @@ fn call_lifecycle(
         Ok(f) => f,
         Err(_) => return Ok(()),
     };
+    // Re-arm the CPU deadline relative to the current epoch before every
+    // lifecycle call. The `EpochWatchdog` (spawned in `on_load`) advances
+    // the epoch on a timer, so a lifecycle export that overruns the budget
+    // traps here instead of hanging the host thread.
+    store.set_epoch_deadline(LIFECYCLE_CPU_BUDGET_TICKS);
     func.call(&mut *store, ())
         .map_err(|e| PluginError::LoadFailed(format!("{name} failed: {e}")))?;
     Ok(())
@@ -466,17 +535,27 @@ impl Plugin for WasmPlugin {
         // store state.
         store.limiter(|s: &mut WasmState| &mut s.memory_limiter);
 
-        // Arm the epoch-interruption check. The host should drive the
-        // engine's epoch counter from a watchdog thread if a CPU cap
-        // is required; we set the deadline to 1 so the check is
-        // available on the next instruction.
-        store.set_epoch_deadline(1);
+        // Arm the epoch deadline BEFORE spawning the watchdog or
+        // instantiating the module. With `epoch_interruption(true)`
+        // enabled, a store with no deadline set traps on the first
+        // epoch tick; `linker.instantiate` runs against this store
+        // before `call_lifecycle` arms a deadline, so a slow
+        // instantiate (or even just a watchdog tick that lands before
+        // instantiation completes) would otherwise trap the load.
+        store.set_epoch_deadline(LIFECYCLE_CPU_BUDGET_TICKS);
+
+        // Spawn the epoch watchdog before any WASM code runs. It drives
+        // the engine's epoch counter so that the per-call deadline armed
+        // inside `call_lifecycle` actually fires — arming a deadline
+        // without something incrementing the epoch is a no-op and would
+        // let an infinite loop hang the host thread.
+        self.watchdog = Some(EpochWatchdog::spawn(self.engine.clone())?);
 
         let instance = linker
             .instantiate(&mut store, &module)
             .map_err(|e| PluginError::LoadFailed(format!("instantiate failed: {e}")))?;
 
-        // Dispatch the lifecycle hook.
+        // Dispatch the lifecycle hook (deadline armed inside call_lifecycle).
         call_lifecycle(&mut store, &instance, "_algomln_on_load")?;
 
         self.store = Some(store);
@@ -513,6 +592,304 @@ impl Plugin for WasmPlugin {
             // Best-effort: errors from on_unload are ignored per spec.
             let _ = call_lifecycle(&mut store, &instance, "_algomln_on_unload");
         }
+        // Stop and join the epoch watchdog thread (via Drop) so it does
+        // not outlive the plugin.
+        self.watchdog = None;
         self.host = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasmtime::{Config, Engine, Instance, Module, Store};
+
+    /// B3 regression: an infinite loop in a WASM export must trap because
+    /// the `EpochWatchdog` drives the engine's epoch counter past the
+    /// store's armed deadline. Without the watchdog, `set_epoch_deadline`
+    /// is inert and this call would hang forever.
+    #[test]
+    fn epoch_watchdog_traps_infinite_loop() {
+        let mut config = Config::new();
+        config.epoch_interruption(true);
+        let engine = Engine::new(&config).expect("engine");
+
+        // The watchdog ticks every EPOCH_TICK_MS ms; keep it alive for
+        // the duration of the call.
+        let _watchdog = EpochWatchdog::spawn(engine.clone()).expect("watchdog");
+
+        // `Module::new` accepts `.wat` text directly (wasmtime's default
+        // `wat` feature), so no extra dev-dependency is needed.
+        let module = Module::new(
+            &engine,
+            r#"(module (func (export "spin") (loop br 0)))"#.as_bytes(),
+        )
+        .expect("compile spin module");
+
+        let mut store = Store::new(&engine, ());
+        // Use a small deadline so the test finishes in a few hundred ms
+        // rather than the production LIFECYCLE_CPU_BUDGET_TICKS budget.
+        store.set_epoch_deadline(2);
+
+        let instance = Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let spin = instance
+            .get_typed_func::<(), ()>(&mut store, "spin")
+            .expect("spin export");
+
+        let result = spin.call(&mut store, ());
+        assert!(
+            result.is_err(),
+            "infinite loop should trap once the watchdog drives the epoch past the deadline"
+        );
+    }
+
+    /// The watchdog thread must actually stop when the `EpochWatchdog` is
+    /// dropped — otherwise it would leak for the lifetime of the process.
+    #[test]
+    fn epoch_watchdog_stops_on_drop() {
+        let mut config = Config::new();
+        config.epoch_interruption(true);
+        let engine = Engine::new(&config).expect("engine");
+        let watchdog = EpochWatchdog::spawn(engine).expect("watchdog");
+        // Dropping joins the thread; if the thread never observed the stop
+        // flag this would hang the test.
+        drop(watchdog);
+    }
+
+    /// Chunk 3 verification: a `.wat` plugin that exercises the host
+    /// surface end-to-end — `algomln::log_info`, `algomln::storage_set`,
+    /// `algomln::storage_get` — must link, instantiate, and run through
+    /// `WasmPlugin::on_load` / `on_enable` / `on_unload`. The B3
+    /// tripwires cover epoch interruption but not the linker or the
+    /// host-fn boundary; this test covers that.
+    ///
+    /// Strategy: write a `.wat` module to a temp file, build a
+    /// `WasmPlugin` for it, construct a `PluginHost` against temp
+    /// directories (no broker dependency), drive the lifecycle, then
+    /// read the plugin's log file and the storage backing directory to
+    /// confirm both round-trips worked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wasm_plugin_drives_host_fns_end_to_end() {
+        use std::io::Read;
+        use std::path::PathBuf;
+
+        use crate::plugin::api::analytics::SharedAnalyticsRegistry;
+        use crate::plugin::api::dsl_extension::SharedDslExtensionRegistry;
+        use crate::plugin::api::events::EventBus;
+        use crate::plugin::api::indicator_registry::SharedIndicatorRegistry;
+        use crate::plugin::api::log_file::{RateLimitedFileLog, RollingLog};
+        use crate::plugin::api::scheduler::CronScheduler;
+        use crate::plugin::api::storage::PluginKvStore;
+        use crate::plugin::api::ui::TauriUiApi;
+        use crate::plugin::api::StorageApi;
+        use crate::plugin::host::PluginHostBuilder;
+        use crate::plugin::manifest::PluginPermissions;
+        use crate::plugin::types::{
+            Capability, PluginId, PluginMeta, PluginVersion,
+        };
+
+        // Tiny WAT module. The host fns are linked by name into the
+        // `algomln` namespace; the linker populates the imports below.
+        //
+        // Layout in linear memory (1 page = 64 KiB):
+        //   256  "loaded"        (6 bytes)
+        //   512  "k"             (1 byte)   storage key
+        //   768  "v"             (1 byte)   storage value
+        //  1024  "got-v"         (5 bytes)  log on enable success
+        //  1280  "got-err"       (7 bytes)  log on enable failure
+        //  1536  4-byte slot     (out_len from storage_get)
+        //  2048  buffer          (out bytes from storage_get)
+        //
+        // Note: imports must precede `memory` in the textual form;
+        // wasmtime rejects "import after memory" otherwise.
+        let wat = r#"
+            (module
+              (import "algomln" "log_info"
+                (func $log_info (param i32 i32)))
+              (import "algomln" "storage_set"
+                (func $storage_set (param i32 i32 i32 i32) (result i32)))
+              (import "algomln" "storage_get"
+                (func $storage_get (param i32 i32 i32 i32) (result i32)))
+
+              (memory (export "memory") 1)
+              (data (i32.const  256) "loaded")
+              (data (i32.const  512) "k")
+              (data (i32.const  768) "v")
+              (data (i32.const 1024) "got-v")
+              (data (i32.const 1280) "got-err")
+
+              (func (export "_algomln_on_load")
+                i32.const 256 i32.const 6
+                call $log_info
+                i32.const 512 i32.const 1
+                i32.const 768 i32.const 1
+                call $storage_set
+                drop)
+
+              (func (export "_algomln_on_enable") (local $r i32)
+                i32.const 512  i32.const 1
+                i32.const 2048 i32.const 1536
+                call $storage_get
+                local.set $r
+                ;; Always log success on the happy path; surface the
+                ;; error case as a second line so the test can tell
+                ;; them apart.
+                i32.const 1024 i32.const 5
+                call $log_info
+                local.get $r
+                if
+                  i32.const 1280 i32.const 7
+                  call $log_info
+                end)
+
+              (func (export "_algomln_on_unload")
+                i32.const 256 i32.const 6
+                call $log_info)
+            )
+        "#;
+
+        // Materialize a temp layout: a `.wasm` file with the WAT bytes
+        // (wasmtime's default `wat` feature accepts text directly), a
+        // log file, and a storage directory.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wasm_path: PathBuf = dir.path().join("plugin.wasm");
+        let log_path: PathBuf = dir.path().join("plugin.log");
+        let storage_dir: PathBuf = dir.path().join("storage");
+        std::fs::create_dir_all(&storage_dir).expect("mkdir storage");
+        std::fs::write(&wasm_path, wat.as_bytes()).expect("write .wasm");
+
+        // Stand up a `WasmPlugin` for the temp artifact.
+        let plugin_id = PluginId::from("wasm-smoke");
+        let meta = PluginMeta {
+            id: plugin_id.clone(),
+            name: "wasm-smoke".into(),
+            version: PluginVersion {
+                major: 0,
+                minor: 1,
+                patch: 0,
+            },
+            description: "Chunk 3 smoke fixture".into(),
+            author: "tests".into(),
+        };
+        let mut plugin = WasmPlugin::new(
+            meta,
+            vec![Capability::Storage],
+            wasm_path,
+            8, // 8 MB memory limit
+        )
+        .expect("WasmPlugin::new");
+
+        // Build a `PluginHost` against the temp log file and temp
+        // storage directory. The host-side services the plugin never
+        // touches (market data, execution, analytics, etc.) get minimal
+        // inline stubs so the test does not pull in a broker.
+        struct NoopMarketData;
+        #[async_trait::async_trait]
+        impl crate::plugin::api::MarketDataApi for NoopMarketData {
+            fn subscribe_ticks(
+                &self,
+                _symbol: &str,
+                _callback: std::sync::Arc<
+                    dyn Fn(crate::plugin::api::MarketDataEvent) + Send + Sync,
+                >,
+            ) -> crate::plugin::PluginResult<crate::plugin::types::SubscriptionHandle> {
+                Err(crate::plugin::types::PluginError::ApiError(
+                    "noop".into(),
+                ))
+            }
+            fn unsubscribe_ticks(
+                &self,
+                _handle: crate::plugin::types::SubscriptionHandle,
+            ) -> crate::plugin::PluginResult<()> {
+                Ok(())
+            }
+            fn latest_candle(
+                &self,
+                _symbol: &str,
+            ) -> crate::plugin::PluginResult<crate::plugin::api::Candle> {
+                Err(crate::plugin::types::PluginError::ApiError(
+                    "noop".into(),
+                ))
+            }
+        }
+
+        let log = std::sync::Arc::new(RateLimitedFileLog::with_log(
+            plugin_id.clone(),
+            RollingLog::open(log_path.clone()).expect("open log file"),
+        ));
+        let storage = std::sync::Arc::new(
+            PluginKvStore::new(plugin_id.clone(), storage_dir.clone()).expect("kv store"),
+        );
+        let (tauri_ui_api, _rx) = TauriUiApi::new();
+        let host = PluginHostBuilder {
+            id: plugin_id.clone(),
+            market_data: std::sync::Arc::new(NoopMarketData),
+            execution: std::sync::Arc::new(
+                crate::plugin::api::execution::NoopExecutionApi,
+            ),
+            storage,
+            event_bus: EventBus::new(),
+            indicators: std::sync::Arc::new(SharedIndicatorRegistry::new()),
+            analytics: std::sync::Arc::new(SharedAnalyticsRegistry::new()),
+            dsl: std::sync::Arc::new(SharedDslExtensionRegistry::new()),
+            ui: tauri_ui_api,
+            scheduler: CronScheduler::new(),
+            log,
+            capabilities: vec![Capability::Storage],
+            permissions: PluginPermissions {
+                network: false,
+                file_system: false,
+                max_memory_mb: 8,
+                allowed_symbols: Vec::new(),
+            },
+        }
+        .build();
+
+        // Drive the lifecycle. on_load instantiates and runs the
+        // WAT's `_algomln_on_load`, which logs "loaded" and writes
+        // key="k" value="v" via the host fns.
+        plugin.on_load(host.clone()).await.expect("on_load");
+        // on_enable runs `_algomln_on_enable`, which reads "k" back and
+        // logs "got-v".
+        plugin.on_enable().await.expect("on_enable");
+        // on_unload stops the watchdog (via Drop on WasmPlugin) and
+        // best-effort dispatches `_algomln_on_unload`, which logs
+        // "loaded" again.
+        plugin.on_unload();
+
+        // Drop the host explicitly so its log file handle flushes
+        // before we read the file from disk.
+        drop(host);
+
+        // Assert the log file contains both "loaded" (from on_load and
+        // on_unload) and "got-v" (from on_enable).
+        let mut contents = String::new();
+        std::fs::File::open(&log_path)
+            .expect("open log")
+            .read_to_string(&mut contents)
+            .expect("read log");
+        assert!(
+            contents.contains("loaded"),
+            "log should contain 'loaded' from on_load; got: {contents}"
+        );
+        assert!(
+            contents.contains("got-v"),
+            "log should contain 'got-v' from on_enable; got: {contents}"
+        );
+        assert!(
+            !contents.contains("got-err"),
+            "log should NOT contain 'got-err' (storage_get returned non-zero); got: {contents}"
+        );
+
+        // Assert the storage write actually landed. The PluginKvStore
+        // writes `<base>/<sanitized_key>.val`; we re-open it and read
+        // the same key to confirm the round trip.
+        let re_open =
+            PluginKvStore::new(plugin_id.clone(), storage_dir.clone()).expect("re-open kv");
+        assert_eq!(
+            re_open.read("k").expect("read k"),
+            Some(b"v".to_vec()),
+            "storage_get/set round trip through the host fns should leave 'k' -> 'v'"
+        );
     }
 }

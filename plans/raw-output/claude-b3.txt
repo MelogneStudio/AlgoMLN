@@ -1,0 +1,52 @@
+Here's the complete picture and a concrete plan for the next instance.
+
+  Root cause (confirmed from the backtrace in b3.txt)
+
+  The crash is not a bug in my watchdog logic. It's a wasmtime 23 + recent-Rust + Windows incompatibility in trap delivery:
+
+  - Sequence: wasm epoch check fires → new_epoch libcall returns Err(Trap::Interrupt) → LibcallResult::convert calls raise_trap →
+  wasmtime_longjmp (helpers.c) → on Windows this does an SEH unwind (RtlUnwindEx) → it unwinds through wasmtime's libcall entry,
+  which is declared pub unsafe extern "C" fn $name(...) at libcalls.rs:105 (plain extern "C", i.e. nounwind, not extern "C-unwind").
+  - Recent Rust compilers enforce nounwind on extern "C", so unwinding through that frame triggers
+  core::panicking::panic_cannot_unwind → __report_gsfailure → STATUS_STACK_BUFFER_OVERRUN (0xc0000409) → process abort.
+
+  I verified the epoch default behavior itself is a clean trap (None => Err(Trap::Interrupt) in store.rs new_epoch), so
+  epoch_deadline_trap() is not the fix. This is the setjmp/longjmp trap mechanism that wasmtime rewrote in later versions (Cranelift
+  exception handlers in entry trampolines) precisely because of these Rust-unwinding issues on Windows.
+
+  The important implication
+
+  This crash happens on the exact same trap-delivery path the real WasmPlugin uses (func.call → epoch libcall → longjmp). So the B3
+  fix as designed does not actually contain runaway plugins on this Windows toolchain — a real infinite-loop plugin would crash the
+  host process, not trap cleanly. The docs I updated (CLAUDE.md invariant 7, BACKEND.md, total-audit.txt) claim B3 is resolved; that
+  claim is invalid on Windows and must be corrected or the fix must change.
+
+  Plan for the next instance (in priority order)
+
+  1. Localize the bug first (cheapest, highest-value diagnostic). Add a throwaway test that traps via a non-libcall path — (module
+  (func (export "boom") unreachable)), call it, expect Err.
+    - If unreachable also crashes with the same GS failure → all longjmp traps are broken on their toolchain → wasmtime upgrade is
+  mandatory.
+    - If unreachable traps cleanly but epoch crashes → it's narrower (async epoch increment catching a JIT frame mid-prologue, cf.
+  wasmtime issue #3859).
+  2. Try a release build: cargo test --release --lib wasm_runtime. Debug builds have longer prologues (more likely for an async epoch
+  tick to hit mid-prologue). If release doesn't crash, that's a strong clue — but do not rely on it for a security control.
+  3. Real fix — upgrade wasmtime (23 → a version with the trap-unwinding rewrite, current is ~33+). This is the only way epoch traps
+  work reliably on Windows. Caveats: major-version API breakage (Config, Linker, Store, ResourceLimiter, epoch APIs), and
+  wasmtime-wasi is also pinned at 23 in Cargo.toml:29-30. Must be compiled + tested on their machine (no Rust toolchain in this
+  environment — I could not run cargo at all).
+  4. If upgrade isn't feasible now: the honest move is to stop claiming B3 is resolved. Either (a) revert the doc "Resolved" edits
+  and mark B3 "blocked on wasmtime upgrade — epoch trap crashes on Windows," or (b) keep the watchdog (it's harmless and correct in
+  principle) but #[cfg(not(windows))]-gate the trap-triggering test and clearly document the Windows limitation.
+
+  Current branch state (fix/b3-wasm-cpu-cap, pushed)
+
+  - wasm_runtime.rs: EpochWatchdog thread + call_lifecycle re-arms set_epoch_deadline(50) + two tests
+  (epoch_watchdog_traps_infinite_loop crashes, epoch_watchdog_stops_on_drop is fine).
+  - The isolated test uses a bare Store<()> — but the real path crashes identically, so switching the test to exercise the real
+  WasmPlugin.on_load won't avoid the crash; it'll just crash "more realistically." Don't bother rewriting the test until the trap
+  mechanism itself is fixed.
+  - Docs updated optimistically — need correction per step 4.
+
+  My recommendation: do step 1 + 2 immediately to localize, then commit to the wasmtime upgrade (step 3). The watchdog design is
+  sound; the blocker is entirely wasmtime 23's Windows trap delivery.
