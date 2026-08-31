@@ -7,11 +7,15 @@ use algomln::broker::dhan::{DhanAuth, DhanClient};
 use algomln::broker::{BrokerClient, Timeframe};
 use algomln::commands::strategy::{run_backtest_internal, BacktestResult};
 use algomln::data::load_nifty_candles;
-use algomln::models::{Candle, OrderSide};
+use algomln::models::{Candle, Order, OrderResult, OrderSide, OrderType};
 use algomln::strategy::dsl::{AstValidator, Lexer, Parser, StrategyNode};
 use algomln::strategy::logging::LogEntryKind;
+use algomln::strategy::execution::{target::ExecutionTarget, DhanBroker};
+use algomln::strategy::execution::dhan::SessionContext;
+use algomln::live::trade_log::TradeLog;
+use std::sync::Arc;
 use anyhow::{Context, Result};
-use chrono::{NaiveDate, Utc};
+
 
 const INITIAL_CASH: f64 = 10_000_000.0;
 const DEFAULT_EXCHANGE_SEGMENT: &str = "NSE_EQ";
@@ -75,6 +79,11 @@ fn real_main() -> Result<(), String> {
         let args = parse_backtest_args(&args[2..])?;
         return block_on(run_backtest_from_dhan(args)).map_err(|error| error.to_string())?;
     }
+
+    if args.len() >= 2 && args[1] == "live-test-order" {
+        return block_on(run_live_test_order(&args[2..])).map_err(|error| error.to_string());
+    }
+
 
     let tiny_strategy = std::fs::read_to_string("sample-data/tiny_strategy.algomln")
         .context("read tiny strategy")
@@ -648,7 +657,61 @@ fn print_run_summary(name: &str, symbol: &str, result: &BacktestResult, _runtime
     }
 }
 
-fn print_help() {
+fn run_live_test_order(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("Error: missing symbol for live-test-order. Usage: live-test-order <symbol> [qty]".to_string());
+    }
+
+    let symbol = &args[0];
+    let qty = args.get(1)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1);
+
+    println!("🚀 Live Test Order: BUY {} shares of {}", qty, symbol);
+
+    let access_token = std::env::var("DHAN_ACCESS_TOKEN")
+        .map_err(|_| "Error: DHAN_ACCESS_TOKEN not set in .env".to_string())?;
+
+    let auth = DhanAuth::new(access_token).map_err(|e| e.to_string())?;
+    let client = DhanClient::new(auth);
+
+    // Resolve symbol to security ID
+    let entry = client.resolve_symbol_entry(symbol)
+        .map_err(|e| format!("Error resolving symbol {}: {}", symbol, e))?;
+
+    println!("Resolved {} to security_id={} segment={:?}", symbol, entry.security_id, entry.segment);
+
+    // Setup minimal broker environment
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("live_test.jsonl");
+    let log = Arc::new(TradeLog::open(log_path).unwrap());
+    let broker = Arc::new(DhanBroker::new(Arc::new(client), log));
+
+    // Set session context for the trade log
+    *broker.session_context.write() = Some(SessionContext {
+        strategy_id: "live-test-cli".to_string(),
+        strategy_name: "Live Test CLI".to_string(),
+        mode: "live".to_string(),
+    });
+
+    let order = Order {
+        symbol: symbol.clone(),
+        side: OrderSide::Buy,
+        quantity: qty,
+        order_type: OrderType::Market,
+        price: None,
+    };
+
+    println!("Submitting order to Dhan...");
+    let result = broker.execute_with_meta(order, "manual-test", "Live test order via CLI").await
+        .map_err(|e| format!("Execution failed: {}", e.message))?;
+
+    println!("✅ Order successfully placed!");
+    println!("Order ID: {}", result.order_id);
+    println!("Status: {:?}", result.status);
+
+    Ok(())
+}
     println!(
         r#"behavioral_backtest - AlgoMLN strategy runner
 
