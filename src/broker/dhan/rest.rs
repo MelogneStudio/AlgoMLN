@@ -233,7 +233,7 @@ impl DhanClient {
             .with_context(|| format!("Dhan response was not valid JSON: {path}"))
     }
 
-    fn resolve_symbol_entry(&self, symbol: &str) -> Result<SymbolEntry> {
+    pub fn resolve_symbol_entry(&self, symbol: &str) -> Result<SymbolEntry> {
         let symbol_map = self.symbol_map.read();
         symbol_map
             .lookup(symbol)
@@ -503,7 +503,9 @@ impl BrokerClient for DhanClient {
         };
         // Idempotency key: if any layer retries a timed-out request, Dhan
         // dedupes on this so the same order is not placed twice.
-        let correlation_id = format!("algomln-{}", uuid::Uuid::new_v4());
+        // Dhan limit: max 30 characters.
+        let uuid_str = uuid::Uuid::new_v4().simple().to_string();
+        let correlation_id = format!("am-{}", &uuid_str[..27]);
         let body = PlaceOrderRequest {
             dhan_client_id,
             correlation_id: correlation_id.clone(),

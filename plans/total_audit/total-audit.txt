@@ -12,10 +12,10 @@
   leaving a position open with its safety net disabled. Contradicts the spirit of invariant 12 ("SL/TP is a safety net"). Exits
   should be exempt from the order cap.
 
-  A4 — enable/disable error path permanently loses the plugin. registry.rs:178-206 (same at :218+)
-  The real plugin is mem::replaced out with EmptyPlugin before on_enable().await?. If on_enable returns Err, ? returns early and the
-  moved-out plugin is dropped — the registry slot keeps EmptyPlugin with status Loaded forever, while the UI still lists it. A plugin
-  that errors on enable effectively unloads itself silently. Needs the plugin restored to the slot on the error path.
+  A4 — Fixed: plugin restoration on enable/disable error path. registry.rs:178-206.
+  The real plugin is now restored to the registry slot if on_enable() or on_disable() returns an Err,
+  preventing the plugin from being permanently replaced by EmptyPlugin and silently lost.
+
 
   A5 — daily_realized_loss is a dead write. engine.rs:549-556
   Written on every call with a comment claiming it avoids recomputation, but check_risk_breach always recomputes realized_loss() from
@@ -32,10 +32,10 @@
   set_epoch_deadline(1) is set but nothing calls increment_epoch() (no watchdog), and there's no fuel and async_support(false). An
   infinite loop in a plugin lifecycle export hangs the host thread. The primary containment mechanism doesn't contain.
 
-  B4 — GatedLiveExecutionApi gate-5/6 read broker-global state, not the fetched session. execution.rs:282-294
-  Gate 1 pulls session from the slot, but gate 5 checks self.broker.cancel_token() and gate 4 self.broker.is_stale(). In
-  single-session Phase 8 the broker token is the active session's, so not currently exploitable — but it's a latent inconsistency
-  that breaks the moment multi-session lands, and gate 6 already reads session.broker while 4/5 read self.broker.
+  B4 — Fixed: GatedLiveExecutionApi gates now read session-specific state. execution.rs:282-294.
+  Gates 4 and 5 now use the resolved session's broker state (is_stale, cancel_token) instead of the
+  broker-global state, ensuring consistency even when moving to multi-session architecture.
+
 
   B5 — Trade-log durability + poison. trade_log.rs:52-60
   Append uses flush() not fsync (a crash can lose the last audited trades), and a panic while holding the mutex poisons it, disabling
