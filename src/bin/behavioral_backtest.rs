@@ -15,6 +15,7 @@ use algomln::strategy::execution::dhan::SessionContext;
 use algomln::live::trade_log::TradeLog;
 use std::sync::Arc;
 use anyhow::{Context, Result};
+use chrono::{Utc, NaiveDate};
 
 
 const INITIAL_CASH: f64 = 10_000_000.0;
@@ -81,7 +82,7 @@ fn real_main() -> Result<(), String> {
     }
 
     if args.len() >= 2 && args[1] == "live-test-order" {
-        return block_on(run_live_test_order(&args[2..])).map_err(|error| error.to_string());
+        return block_on(run_live_test_order(&args[2..])).map_err(|error| error.to_string())?;
     }
 
 
@@ -657,7 +658,7 @@ fn print_run_summary(name: &str, symbol: &str, result: &BacktestResult, _runtime
     }
 }
 
-fn run_live_test_order(args: &[String]) -> Result<(), String> {
+async fn run_live_test_order(args: &[String]) -> Result<(), String> {
     if args.is_empty() {
         return Err("Error: missing symbol for live-test-order. Usage: live-test-order <symbol> [qty]".to_string());
     }
@@ -669,11 +670,16 @@ fn run_live_test_order(args: &[String]) -> Result<(), String> {
 
     println!("🚀 Live Test Order: BUY {} shares of {}", qty, symbol);
 
-    let access_token = std::env::var("DHAN_ACCESS_TOKEN")
-        .map_err(|_| "Error: DHAN_ACCESS_TOKEN not set in .env".to_string())?;
+    let auth = DhanAuth::from_env().map_err(|e| format!("Error: {}", e))?;
 
-    let auth = DhanAuth::new(access_token).map_err(|e| e.to_string())?;
-    let client = DhanClient::new(auth);
+    // Load symbol map from seed file for the CLI test tool
+    let symbol_map_path = Path::new("sample-data/sec_id.csv");
+    let symbol_map = Arc::new(parking_lot::RwLock::new(
+        algomln::broker::symbol_map::SymbolMap::load(symbol_map_path)
+            .map_err(|e| format!("Error loading symbol map from {}: {}", symbol_map_path.display(), e))?
+    ));
+
+    let client = DhanClient::with_symbol_map(auth, symbol_map);
 
     // Resolve symbol to security ID
     let entry = client.resolve_symbol_entry(symbol)
@@ -712,6 +718,7 @@ fn run_live_test_order(args: &[String]) -> Result<(), String> {
 
     Ok(())
 }
+fn print_help() {
     println!(
         r#"behavioral_backtest - AlgoMLN strategy runner
 

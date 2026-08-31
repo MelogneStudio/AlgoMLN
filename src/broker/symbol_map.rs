@@ -104,13 +104,13 @@ impl SymbolMap {
                 None => continue,
             };
 
-            // Prefer SYMBOL_NAME, fall back to UNDERLYING_SYMBOL.
+            // Prefer UNDERLYING_SYMBOL as it typically contains the short trading symbol.
             let symbol = row
-                .symbol_name
+                .underlying_symbol
                 .as_deref()
                 .filter(|s| !s.trim().is_empty())
                 .or_else(|| {
-                    row.underlying_symbol
+                    row.symbol_name
                         .as_deref()
                         .filter(|s| !s.trim().is_empty())
                 });

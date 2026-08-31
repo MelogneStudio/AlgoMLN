@@ -233,7 +233,7 @@ impl DhanClient {
             .with_context(|| format!("Dhan response was not valid JSON: {path}"))
     }
 
-    fn resolve_symbol_entry(&self, symbol: &str) -> Result<SymbolEntry> {
+    pub fn resolve_symbol_entry(&self, symbol: &str) -> Result<SymbolEntry> {
         let symbol_map = self.symbol_map.read();
         symbol_map
             .lookup(symbol)
