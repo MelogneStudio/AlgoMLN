@@ -503,7 +503,9 @@ impl BrokerClient for DhanClient {
         };
         // Idempotency key: if any layer retries a timed-out request, Dhan
         // dedupes on this so the same order is not placed twice.
-        let correlation_id = format!("algomln-{}", uuid::Uuid::new_v4());
+        // Dhan limit: max 30 characters.
+        let uuid = uuid::Uuid::new_v4().simple();
+        let correlation_id = format!("am-{}", &uuid[..27]);
         let body = PlaceOrderRequest {
             dhan_client_id,
             correlation_id: correlation_id.clone(),
