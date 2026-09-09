@@ -32,9 +32,6 @@
   set_epoch_deadline(1) is set but nothing calls increment_epoch() (no watchdog), and there's no fuel and async_support(false). An
   infinite loop in a plugin lifecycle export hangs the host thread. The primary containment mechanism doesn't contain.
 
-  B4 — Fixed: GatedLiveExecutionApi gates now read session-specific state. execution.rs:282-294.
-  Gates 4 and 5 now use the resolved session's broker state (is_stale, cancel_token) instead of the
-  broker-global state, ensuring consistency even when moving to multi-session architecture.
 
 
   B5 — Trade-log durability + poison. trade_log.rs:52-60
@@ -84,6 +81,8 @@
   in candle_assembler.rs::tests (plus the existing B1 regression tests
   staying green proves the append_candle refactor is structurally sound).
 
+    B4 — Fixed: GatedLiveExecutionApi gates now read state from the resolved session's broker instead of the global broker. Guarded by test_gate_uses_session_broker_not_global_broker in execution.rs.
+
   A3 — Fixed: == / != comparisons in `compare` now use a relative tolerance (1e-9) combined with an absolute floor.
   This ensures that equalities are correctly evaluated for large values (e.g. prices around 20,000) where bitwise
   equality is too strict. Guarded by `test_compare_float_tolerance` in `engine.rs`.
@@ -99,7 +98,7 @@
 Status as of 2026-08-21
 
   Resolved (committed):
-    A1, A2, A4, B1, B2 — see "Resolved" block above.
+    A1, A2, A4, B1, B2, B4 — see "Resolved" block above.
     Phase 8 Tasks #1–#4 — plan_candle / execute_intent split (C2), H3 cancellation
     plumbing, GatedLiveExecutionApi plugin order gateway (Task #4).
 
@@ -118,9 +117,6 @@ Status as of 2026-08-21
   Open (lower-confidence, not yet patched):
     A5 — daily_realized_loss is a dead write (engine.rs:549-556). Never read; comment
     misleading; no "daily" reset. Harmless but worth removing or wiring up.
-    B4 — GatedLiveExecutionApi gates 4/5 read broker-global state, not the fetched
-    session (execution.rs:282-294). Latent inconsistency that breaks under multi-session.
-    Fix: pass the resolved session through and read from it.
     B5 — Trade-log durability + poison (trade_log.rs:52-60). Append uses flush() not
     fsync; a panic while holding the mutex poisons it. Fix: fsync after append + a
     parking_lot Mutex that doesn't poison.
