@@ -99,7 +99,7 @@
 Status as of 2026-08-21
 
   Resolved (committed):
-    A1, A2, B1, B2 — see "Resolved" block above.
+    A1, A2, A4, B1, B2 — see "Resolved" block above.
     Phase 8 Tasks #1–#4 — plan_candle / execute_intent split (C2), H3 cancellation
     plumbing, GatedLiveExecutionApi plugin order gateway (Task #4).
 
@@ -116,9 +116,6 @@ Status as of 2026-08-21
   gone.
 
   Open (lower-confidence, not yet patched):
-    A4 — enable/disable error path permanently loses the plugin (registry.rs:178-206,
-    218+). The real plugin is mem::replaced with EmptyPlugin before on_enable().await?;
-    an Err from on_enable drops the plugin silently. Fix: restore on the error path.
     A5 — daily_realized_loss is a dead write (engine.rs:549-556). Never read; comment
     misleading; no "daily" reset. Harmless but worth removing or wiring up.
     B4 — GatedLiveExecutionApi gates 4/5 read broker-global state, not the fetched
