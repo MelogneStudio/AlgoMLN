@@ -34,6 +34,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, Weak};
+use parking_lot::Mutex;
 
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, Map, Scope, AST};
 
@@ -85,7 +86,6 @@ pub struct RhaiPlugin {
     source_path: PathBuf,
     host: Option<Arc<PluginHost>>,
     engine: Arc<Engine>,
-    ast: Option<Arc<AST>>,
     scope: Option<Scope<'static>>,
 }
 
@@ -286,6 +286,28 @@ fn parse_event_filter(s: &str) -> EventFilter {
     }
 }
 
+/// Invokes a Rhai callback using the execution context provided by the host.
+/// Returns a `PluginResult` containing the result or a `PluginError::ApiError`.
+fn invoke_rhai_callback<Args: rhai::FuncArgs>(
+    host: &PluginHost,
+    fn_ptr: &FnPtr,
+    args: Args,
+) -> PluginResult<Dynamic> {
+    let engine = host
+        .engine
+        .get()
+        .ok_or_else(|| PluginError::ApiError("plugin engine not loaded".into()))?;
+    let ast = host
+        .ast
+        .get()
+        .ok_or_else(|| PluginError::ApiError("plugin ast not loaded".into()))?;
+
+    match fn_ptr.call(engine, ast, args) {
+        Ok(d) => Ok(d),
+        Err(e) => Err(PluginError::ApiError(e.to_string())),
+    }
+}
+
 /// Register all host-facing functions onto the given engine. Each
 /// function captures a clone of the host's `Arc`, so the engine owns
 /// the references it needs and dropping the engine drops the closures.
@@ -300,8 +322,6 @@ fn parse_event_filter(s: &str) -> EventFilter {
 fn register_host_functions(
     engine: &mut Engine,
     host: Arc<PluginHost>,
-    engine_cell: Arc<OnceLock<Weak<Engine>>>,
-    ast_arc: Arc<AST>,
     plugin_id: PluginId,
 ) {
     // ---- Logging (unguarded by capability, namespaced to the plugin). ----
@@ -683,39 +703,39 @@ fn register_host_functions(
     // ---- Analytics metric registration (Analytics capability). ----
     //
     // The script's `FnPtr` is invoked later as `fn(trades_array) -> number`
-    // whenever the metric is evaluated. Like `register_indicator`, the
-    // callback upgrades the shared engine `Weak` at call time.
+    // whenever the metric is evaluated.
     {
         let host = host.clone();
-        let cell = engine_cell.clone();
-        let ast_clone = ast_arc.clone();
         let pid = plugin_id.clone();
         engine.register_fn("register_metric", move |name: String, func: FnPtr| -> bool {
             let analytics = match host.analytics_guarded() {
                 Ok(a) => a,
                 Err(_) => return false,
             };
-            let cell_for_call = cell.clone();
-            let ast_for_call = ast_clone.clone();
+            if func.is_curried() {
+                host.log().error(&pid, "register_metric: callbacks must be plain named functions, not closures");
+                return false;
+            }
+            let host_for_call = host.clone();
             let func_for_call = func.clone();
+            let pid_for_call = pid.clone();
             let metric_fn: Arc<dyn Fn(&[PaperTrade]) -> f64 + Send + Sync> =
                 Arc::new(move |trades: &[PaperTrade]| -> f64 {
-                    let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
-                        Some(e) => e,
-                        None => return f64::NAN,
-                    };
                     let trades_array: Array = trades
                         .iter()
                         .map(paper_trade_to_map)
                         .map(Dynamic::from)
                         .collect();
-                    let call_result: Result<Dynamic, Box<EvalAltResult>> =
-                        func_for_call.call(&engine, &ast_for_call, (trades_array,));
-                    match call_result {
+                    match invoke_rhai_callback(&host_for_call, &func_for_call, (trades_array,)) {
                         Ok(d) => dynamic_to_f64(&d),
-                        Err(_) => f64::NAN,
+                        Err(e) => {
+                            host_for_call.log().error(&pid_for_call, &format!("metric callback failed: {e}"));
+                            f64::NAN
+                        }
                     }
                 });
+
+            host.callbacks.metrics.lock().insert(name.clone(), func.clone());
             analytics.register_metric(name, pid.clone(), metric_fn).is_ok()
         });
     }
@@ -724,27 +744,24 @@ fn register_host_functions(
     //
     // The script's `FnPtr` is invoked later as
     // `fn(candles_array, current_map) -> bool` from the strategy
-    // evaluator. `EvalContext` borrows its slices, so we materialize the
-    // candle array and the current-candle map before calling.
+    // evaluator.
     {
         let host = host.clone();
-        let cell = engine_cell.clone();
-        let ast_clone = ast_arc.clone();
         let pid = plugin_id.clone();
         engine.register_fn("register_keyword", move |keyword: String, func: FnPtr| -> bool {
             let dsl = match host.dsl_guarded() {
                 Ok(d) => d,
                 Err(_) => return false,
             };
-            let cell_for_call = cell.clone();
-            let ast_for_call = ast_clone.clone();
+            if func.is_curried() {
+                host.log().error(&pid, "register_keyword: callbacks must be plain named functions, not closures");
+                return false;
+            }
+            let host_for_call = host.clone();
             let func_for_call = func.clone();
+            let pid_for_call = pid.clone();
             let handler: Arc<dyn Fn(&EvalContext) -> bool + Send + Sync> =
                 Arc::new(move |ctx: &EvalContext| -> bool {
-                    let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
-                        Some(e) => e,
-                        None => return false,
-                    };
                     let candles_array: Array = ctx
                         .candles
                         .iter()
@@ -752,16 +769,15 @@ fn register_host_functions(
                         .map(Dynamic::from)
                         .collect();
                     let current_map = candle_to_map(ctx.current);
-                    let call_result: Result<Dynamic, Box<EvalAltResult>> = func_for_call.call(
-                        &engine,
-                        &ast_for_call,
-                        (candles_array, current_map),
-                    );
-                    match call_result {
+                    match invoke_rhai_callback(&host_for_call, &func_for_call, (candles_array, current_map)) {
                         Ok(d) => d.as_bool().unwrap_or(false),
-                        Err(_) => false,
+                        Err(e) => {
+                            host_for_call.log().error(&pid_for_call, &format!("keyword callback failed: {e}"));
+                            false
+                        }
                     }
                 });
+            host.callbacks.keywords.lock().insert(keyword.clone(), func.clone());
             dsl.register_keyword(keyword, pid.clone(), handler).is_ok()
         });
     }
@@ -769,31 +785,53 @@ fn register_host_functions(
     // ---- Cron scheduling (Scheduler capability). ----
     //
     // The task closure is spawned on a tokio task by the scheduler and
-    // calls the plugin `FnPtr` as `fn()`. It upgrades the shared engine
-    // `Weak` at fire time and no-ops if the plugin has been unloaded.
+    // calls the plugin `FnPtr` as `fn()`.
     {
         let host = host.clone();
-        let cell = engine_cell.clone();
-        let ast_clone = ast_arc.clone();
         let pid = plugin_id.clone();
         engine.register_fn("schedule", move |cron_expr: &str, func: FnPtr| -> String {
             let scheduler = match host.scheduler_guarded() {
-                Ok(s) => s,
+                Ok(s) => s.clone(),
                 Err(_) => return String::new(),
             };
-            let cell_for_call = cell.clone();
-            let ast_for_call = ast_clone.clone();
+            if func.is_curried() {
+                host.log().error(&pid, "schedule: callbacks must be plain named functions, not closures");
+                return String::new();
+            }
+            let host_for_call = host.clone();
             let func_for_call = func.clone();
+            let pid_for_call = pid.clone();
+            let scheduler_for_call = scheduler.clone();
+            let failures = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let failures_for_call = failures.clone();
+            let handle_cell = Arc::new(Mutex::new(None));
+            let handle_cell_for_call = handle_cell.clone();
             let task: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
-                    Some(e) => e,
-                    None => return,
-                };
-                let _: Result<Dynamic, Box<EvalAltResult>> =
-                    func_for_call.call(&engine, &ast_for_call, ());
+                let res = tokio::task::block_in_place(|| {
+                    invoke_rhai_callback(&host_for_call, &func_for_call, ())
+                });
+                match res {
+                    Ok(_) => {
+                        failures_for_call.store(0, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        let count = failures_for_call.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        host_for_call.log().error(&pid_for_call, &format!("scheduled task failed: {e}"));
+                        if count >= 3 {
+                            host_for_call.log().error(&pid_for_call, "scheduled task disabled after 3 consecutive failures");
+                            if let Some(handle) = handle_cell_for_call.lock().clone() {
+                                let _ = scheduler_for_call.cancel(handle);
+                            }
+                        }
+                    }
+                }
             });
             match scheduler.schedule(pid.clone(), cron_expr, task) {
-                Ok(handle) => handle.to_string(),
+                Ok(handle) => {
+                    *handle_cell.lock() = Some(handle.clone());
+                    host.callbacks.schedules.lock().insert(handle.clone(), func.clone());
+                    handle.to_string()
+                }
                 Err(e) => {
                     host.log().error(&pid, &format!("schedule: {e}"));
                     String::new()
@@ -820,30 +858,41 @@ fn register_host_functions(
     // ---- Event subscription (Events capability). ----
     //
     // The callback is invoked from a tokio task by the event bus and
-    // calls the plugin `FnPtr` as `fn(event_map)`. It upgrades the shared
-    // engine `Weak` at delivery time.
+    // calls the plugin `FnPtr` as `fn(event_map)`.
     {
         let host = host.clone();
-        let cell = engine_cell.clone();
-        let ast_clone = ast_arc.clone();
+        let pid = plugin_id.clone();
         engine.register_fn("subscribe_event", move |filter: &str, func: FnPtr| -> String {
             let bus: &Arc<EventBus> = match host.event_bus_guarded() {
                 Ok(b) => b,
                 Err(_) => return String::new(),
             };
-            let cell_for_call = cell.clone();
-            let ast_for_call = ast_clone.clone();
+            if func.is_curried() {
+                host.log().error(&pid, "subscribe_event: callbacks must be plain named functions, not closures");
+                return String::new();
+            }
+            let host_for_call = host.clone();
             let func_for_call = func.clone();
+            let pid_for_call = pid.clone();
             let callback: Arc<dyn Fn(EventKind) + Send + Sync> = Arc::new(move |event: EventKind| {
-                let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
-                    Some(e) => e,
-                    None => return,
-                };
                 let event_map = event_to_map(&event);
-                let _: Result<Dynamic, Box<EvalAltResult>> =
-                    func_for_call.call(&engine, &ast_for_call, (event_map,));
+                match invoke_rhai_callback(&host_for_call, &func_for_call, (event_map,)) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        host_for_call.log().error(&pid_for_call, &format!("event callback failed: {e}"));
+                    }
+                }
             });
-            bus.subscribe(parse_event_filter(filter), callback).to_string()
+            let handle = bus.subscribe(pid.clone(), parse_event_filter(filter), callback);
+            host.callbacks.events.lock().insert(
+                parse_event_filter(filter),
+                {
+                    let mut vec = Vec::new();
+                    vec.push(func.clone());
+                    vec
+                },
+            );
+            handle.to_string()
         });
     }
 }
@@ -874,47 +923,33 @@ impl Plugin for RhaiPlugin {
         self.host = Some(host.clone());
 
         // Build a FRESH, uniquely-owned engine so host functions can be
-        // registered on `&mut Engine` before it is shared. (The engine
-        // created in `new()` is only a placeholder — trying to recover a
-        // `&mut` from its `Arc` via `Arc::get_mut` always failed once any
-        // clone existed, which broke every Rhai plugin load.)
+        // registered on `&mut Engine` before it is shared.
         let mut engine = build_hardened_engine();
 
         // Compile the user source with the fresh engine.
         let ast = engine
             .compile_file(self.source_path.clone())
             .map_err(|e| PluginError::LoadFailed(format!("compile_file failed: {e}")))?;
-        let ast_arc = Arc::new(ast);
-        self.ast = Some(ast_arc.clone());
 
-        // Shared, lazily-filled cell holding a `Weak<Engine>`. Callback
-        // closures (indicator / metric / keyword / schedule / event)
-        // capture a clone of this and upgrade it at fire time. Using a
-        // `Weak` avoids a reference cycle (the engine owns the closures)
-        // and makes callbacks no-op after the plugin is unloaded.
-        let engine_cell: Arc<OnceLock<Weak<Engine>>> = Arc::new(OnceLock::new());
+        // Populate the host's execution context.
+        host.ast.set(Arc::new(ast)).expect("ast should be empty");
 
         register_host_functions(
             &mut engine,
-            host,
-            engine_cell.clone(),
-            ast_arc.clone(),
+            host.clone(),
             self.meta.id.clone(),
         );
 
-        // Wrap the now fully-configured engine in an `Arc` and populate
-        // the cell with a `Weak` handle so registered callbacks can reach
-        // it later.
+        // Wrap the now fully-configured engine in an `Arc` and store it in the host.
         let engine_arc = Arc::new(engine);
-        let _ = engine_cell.set(Arc::downgrade(&engine_arc));
+        host.engine.set(engine_arc.clone()).expect("engine should be empty");
         self.engine = engine_arc;
 
         // Initialize the call scope.
         self.scope = Some(Scope::new());
 
-        // Call the script's `on_load` if present. Missing function is
-        // not an error — many plugins won't define one.
-        let ast_ref = self.ast.as_ref().expect("just set");
+        // Call the script's `on_load` if present.
+        let ast_ref = host.ast.get().expect("just set");
         let scope = self.scope.as_mut().expect("just set");
         let result: Result<Dynamic, Box<EvalAltResult>> =
             self.engine.call_fn(scope, ast_ref, "on_load", ());

@@ -1,13 +1,34 @@
+// ... (start of file)
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::PathBuf;
 
+use parking_lot::Mutex;
 use crate::models::Candle;
 use crate::plugin::api::events::{EventBus, EventFilter, EventKind};
 use crate::plugin::api::indicator_registry::{IndicatorFn, SharedIndicatorRegistry};
+use crate::plugin::api::scheduler::CronScheduler;
 use crate::plugin::api::storage::PluginKvStore;
 use crate::plugin::api::StorageApi;
-use crate::plugin::manifest::PluginManifest;
-use crate::plugin::types::{PluginError, PluginId};
+use crate::plugin::host::{PluginHost, PluginHostBuilder};
+use crate::plugin::manifest::{PluginManifest, PluginPermissions};
+use crate::plugin::registry::PluginRegistry;
+use crate::plugin::runtime::rhai_runtime::RhaiPlugin;
+use crate::plugin::types::{Capability, PluginError, PluginId, PluginMeta, PluginVersion};
 use crate::strategy::execution::paper::PaperTrade;
+
+struct NoopMarketData;
+#[async_trait::async_trait]
+impl crate::plugin::api::MarketDataApi for NoopMarketData {
+    fn subscribe_ticks(&self, _s: &str, _cb: Arc<dyn Fn(crate::plugin::api::MarketDataEvent) + Send + Sync>) -> crate::plugin::PluginResult<crate::plugin::types::SubscriptionHandle> {
+        Err(PluginError::ApiError("noop".into()))
+    }
+    fn unsubscribe_ticks(&self, _h: crate::plugin::types::SubscriptionHandle) -> crate::plugin::PluginResult<()> { Ok(()) }
+    fn latest_candle(&self, _s: &str) -> crate::plugin::PluginResult<crate::plugin::api::Candle> {
+        Err(PluginError::ApiError("noop".into()))
+    }
+}
+// ...
 
 fn dummy_candle() -> Candle {
     Candle {
@@ -210,4 +231,71 @@ entry = "nonexistent.rhai"
         PluginManifest::load(dir.path()),
         Err(PluginError::ManifestParse(_))
     ));
+}
+
+async fn setup_test_registry(dir: tempfile::TempDir) -> (Arc<PluginRegistry>, Arc<CronScheduler>, Arc<EventBus>) {
+    let scheduler = CronScheduler::new();
+    let event_bus = EventBus::new();
+
+    let host_factory = Arc::new(move |id, caps, perms| {
+        PluginHostBuilder {
+            id,
+            market_data: Arc::new(NoopMarketData),
+            execution: Arc::new(crate::plugin::api::execution::NoopExecutionApi),
+            storage: Arc::new(PluginKvStore::new(PluginId::from("test"), dir.path().to_path_buf()).unwrap()),
+            event_bus: event_bus.clone(),
+            indicators: Arc::new(SharedIndicatorRegistry::new()),
+            analytics: Arc::new(crate::plugin::api::analytics::SharedAnalyticsRegistry::new()),
+            dsl: Arc::new(crate::plugin::api::dsl_extension::SharedDslExtensionRegistry::new()),
+            ui: crate::plugin::api::ui::TauriUiApi::new().0,
+            scheduler: scheduler.clone(),
+            log: Arc::new(crate::plugin::api::log::NoopLog),
+            capabilities: caps,
+            permissions: perms,
+        }.build()
+    });
+
+    let registry = PluginRegistry::new(dir.path().to_path_buf(), host_factory);
+    (registry, scheduler, event_bus)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rhai_callback_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let (registry, _, _) = setup_test_registry(dir).await;
+
+    let plugin_id = PluginId::from("callback-test");
+    let source = r#"
+        fn on_load() {
+            register_metric("my_metric", fn(trades) {
+                return trades.len() as float;
+            });
+            register_keyword("is_bullish", fn(candles, current) {
+                return current.close > current.open;
+            });
+        }
+    "#;
+
+    let source_path = dir.path().join("plugin.rhai");
+    std::fs::write(&source_path, source.as_bytes()).unwrap();
+
+    let manifest_path = dir.path().join("plugin.toml");
+    std::fs::write(&manifest_path, format!(r#"
+id = "{}"
+name = "Test"
+version = "0.1.0"
+description = "Test"
+author = "Test"
+capabilities = ["Analytics", "DslExtension"]
+entry = "plugin.rhai"
+[permissions]
+max_memory_mb = 8
+network = false
+file_system = false
+"#, plugin_id.as_str())).unwrap();
+
+    registry.scan_and_load().await;
+    registry.enable(&plugin_id).await.unwrap();
+
+    assert_eq!(registry.get_status(&plugin_id), Some(crate::plugin::types::PluginStatus::Enabled));
 }

@@ -273,6 +273,22 @@ impl PluginRegistry {
                 .remove(id)
                 .ok_or_else(|| PluginError::NotFound(id.to_string()))?
         };
+
+        // Use the host factory to get a handle to the shared APIs
+        // to clean up callbacks registered by this plugin.
+        let host = (self.host_factory)(
+            id.clone(),
+            vec![],
+            PluginPermissions {
+                network: false,
+                file_system: false,
+                max_memory_mb: 0,
+                allowed_symbols: vec![],
+            },
+        );
+        host.scheduler.cancel_all_for(id);
+        host.event_bus.unsubscribe_all_for(id);
+
         entry.plugin.on_unload();
         Ok(())
     }

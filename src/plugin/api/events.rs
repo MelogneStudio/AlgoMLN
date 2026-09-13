@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use parking_lot::RwLock;
 
@@ -25,7 +25,7 @@ pub enum EventKind {
     SystemShutdown,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventFilter {
     All,
     CandleProcessed,
@@ -54,6 +54,7 @@ pub struct EventBus {
         RwLock<
             Vec<(
                 SubscriptionHandle,
+                crate::plugin::types::PluginId,
                 EventFilter,
                 Arc<dyn Fn(EventKind) + Send + Sync>,
             )>,
@@ -70,17 +71,22 @@ impl EventBus {
 
     pub fn subscribe(
         &self,
+        plugin_id: crate::plugin::types::PluginId,
         filter: EventFilter,
         callback: Arc<dyn Fn(EventKind) + Send + Sync>,
     ) -> SubscriptionHandle {
         let handle = SubscriptionHandle(uuid::Uuid::new_v4());
         let mut guard = self.subscribers.write();
-        guard.push((handle, filter, callback));
+        guard.push((handle, plugin_id, filter, callback));
         handle
     }
 
     pub fn unsubscribe(&self, handle: &SubscriptionHandle) {
-        self.subscribers.write().retain(|(h, _, _)| h != handle);
+        self.subscribers.write().retain(|(h, _, _, _)| h != handle);
+    }
+
+    pub fn unsubscribe_all_for(&self, plugin_id: &crate::plugin::types::PluginId) {
+        self.subscribers.write().retain(|(_, id, _, _)| id != plugin_id);
     }
 
     pub fn publish(&self, event: EventKind) {
@@ -90,8 +96,8 @@ impl EventBus {
             let guard = self.subscribers.read();
             guard
                 .iter()
-                .filter(|(_, filter, _)| filter.matches(&event))
-                .map(|(_, _, cb)| cb.clone())
+                .filter(|(_, _, filter, _)| filter.matches(&event))
+                .map(|(_, _, _, cb)| cb.clone())
                 .collect()
         };
         for cb in to_spawn {
@@ -102,3 +108,5 @@ impl EventBus {
         }
     }
 }
+
+
