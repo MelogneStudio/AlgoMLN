@@ -904,10 +904,10 @@ impl Plugin for RhaiPlugin {
         // not an error — many plugins won't define one.
         let ast_ref = self.ast.as_ref().expect("just set");
         let scope = self.scope.as_mut().expect("just set");
-        let result: Result<(), Box<EvalAltResult>> =
+        let result: Result<Dynamic, Box<EvalAltResult>> =
             self.engine.call_fn(scope, ast_ref, "on_load", ());
         match result {
-            Ok(()) => Ok(()),
+            Ok(_) => Ok(()),
             Err(e) if matches!(*e, EvalAltResult::ErrorFunctionNotFound(_, _)) => Ok(()),
             Err(e) => Err(PluginError::LoadFailed(format!("on_load failed: {e}"))),
         }
@@ -922,10 +922,10 @@ impl Plugin for RhaiPlugin {
             .scope
             .as_mut()
             .ok_or_else(|| PluginError::ApiError("plugin not loaded".into()))?;
-        let result: Result<(), Box<EvalAltResult>> =
+        let result: Result<Dynamic, Box<EvalAltResult>> =
             self.engine.call_fn(scope, ast, "on_enable", ());
         match result {
-            Ok(()) => Ok(()),
+            Ok(_) => Ok(()),
             Err(e) if matches!(*e, EvalAltResult::ErrorFunctionNotFound(_, _)) => Ok(()),
             Err(e) => Err(PluginError::ApiError(format!("on_enable failed: {e}"))),
         }
@@ -940,10 +940,10 @@ impl Plugin for RhaiPlugin {
             .scope
             .as_mut()
             .ok_or_else(|| PluginError::ApiError("plugin not loaded".into()))?;
-        let result: Result<(), Box<EvalAltResult>> =
+        let result: Result<Dynamic, Box<EvalAltResult>> =
             self.engine.call_fn(scope, ast, "on_disable", ());
         match result {
-            Ok(()) => Ok(()),
+            Ok(_) => Ok(()),
             Err(e) if matches!(*e, EvalAltResult::ErrorFunctionNotFound(_, _)) => Ok(()),
             Err(e) => Err(PluginError::ApiError(format!("on_disable failed: {e}"))),
         }
