@@ -190,6 +190,7 @@ pub struct GatedLiveExecutionApi {
     symbol_map: Arc<RwLock<SymbolMap>>,
     holidays: Arc<NseHolidayCalendar>,
     handle: tokio::runtime::Handle,
+    test_bypass_market_hours: bool,
 }
 
 impl GatedLiveExecutionApi {
@@ -212,6 +213,7 @@ impl GatedLiveExecutionApi {
             symbol_map,
             holidays,
             handle,
+            test_bypass_market_hours: false,
         }
     }
 
@@ -256,7 +258,7 @@ impl GatedLiveExecutionApi {
             &FixedOffset::east_opt(crate::live::guard::IST_OFFSET_SECONDS)
                 .expect("IST offset is in range"),
         );
-        if !is_market_open(now_ist, &self.holidays) {
+        if !self.test_bypass_market_hours && !is_market_open(now_ist, &self.holidays) {
             return Err(
                 "plugin order rejected: market is closed; live trading is only \
                  allowed 09:15–15:30 IST on NSE trading days"
@@ -340,7 +342,7 @@ impl ExecutionApi for GatedLiveExecutionApi {
         // are intentionally not stomping on it — we only stamp the
         // `rule_id`/`notes` fields via `execute_with_meta`.)
         let _ctx_guard = PluginSessionContextGuard::new(
-            self.broker.clone(),
+            session.broker.clone(),
             SessionContext {
                 strategy_id: format!(
                     "plugin:{}",
@@ -354,7 +356,7 @@ impl ExecutionApi for GatedLiveExecutionApi {
             },
         );
 
-        let result = self
+        let result = session
             .broker
             .execute_with_meta(broker_order, "plugin", "")
             .await
@@ -441,13 +443,32 @@ mod tests {
     use crate::plugin::api::{OrderSide, OrderType};
     use crate::strategy::execution::DhanBroker;
 
+    // ---- Mocks for gated API tests ----
+    #[derive(Debug)]
+    struct MockOrderPlacer {
+        result: crate::models::OrderResult,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::strategy::execution::dhan::OrderPlacer for MockOrderPlacer {
+        async fn place(&self, _order: crate::models::Order) -> anyhow::Result<crate::models::OrderResult> {
+            Ok(self.result.clone())
+        }
+    }
+
+    fn temp_trade_log() -> (Arc<TradeLog>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trade_log.jsonl");
+        let log = Arc::new(TradeLog::open(path).unwrap());
+        (log, dir)
+    }
+
     fn dummy_broker() -> Arc<DhanBroker> {
         let auth = DhanAuth::new("test-token").unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let log_path = dir.path().join("trade_log.jsonl");
-        let log = Arc::new(TradeLog::open(log_path).unwrap());
+        let (log, _dir) = temp_trade_log();
         Arc::new(DhanBroker::new(Arc::new(DhanClient::new(auth)), log))
     }
+
 
     fn dummy_session_slot() -> Arc<Mutex<Option<Arc<LiveSession>>>> {
         Arc::new(Mutex::new(None))
@@ -463,13 +484,15 @@ mod tests {
         broker: Arc<DhanBroker>,
         session_slot: Arc<Mutex<Option<Arc<LiveSession>>>>,
     ) -> GatedLiveExecutionApi {
-        GatedLiveExecutionApi::new(
+        let mut api = GatedLiveExecutionApi::new(
             broker,
             session_slot,
             dummy_symbol_map(),
             Arc::new(NseHolidayCalendar::new()),
             tokio::runtime::Handle::current(),
-        )
+        );
+        api.test_bypass_market_hours = true;
+        api
     }
 
     /// Gate 1: a GatedLiveExecutionApi with an empty session slot must
@@ -613,7 +636,22 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_gate_uses_session_broker_not_global_broker() {
         let global_broker = dummy_broker();
-        let session_broker = dummy_broker();
+
+        // Use mocks for the session broker so we don't trip on Dhan client config/network.
+        let (log, _dir) = temp_trade_log();
+        let mut sb = DhanBroker::new(
+            Arc::new(DhanClient::new(DhanAuth::new("test-token").unwrap())),
+            log.clone(),
+        );
+        sb.order_placer = Arc::new(MockOrderPlacer {
+            result: crate::models::OrderResult {
+                order_id: "mock-order-1".to_string(),
+                status: crate::models::OrderStatus::Traded,
+                timestamp: 0,
+                correlation_id: "mock-corr".to_string(),
+            },
+        });
+        let session_broker = Arc::new(sb);
 
         let session_slot = Arc::new(Mutex::new(None));
 

@@ -73,7 +73,7 @@ impl PositionsSource for DhanClient {
 /// unit-tested without a live HTTP client. Production wires this to
 /// `Arc<DhanClient>`; tests inject a mock.
 #[async_trait]
-trait OrderPlacer: Send + Sync + std::fmt::Debug {
+pub(crate) trait OrderPlacer: Send + Sync + std::fmt::Debug {
     async fn place(&self, order: Order) -> anyhow::Result<OrderResult>;
 }
 
@@ -107,7 +107,7 @@ pub struct DhanBroker {
     positions_source: Arc<dyn PositionsSource>,
     /// Order placer used by `execute_with_meta`. Same object as `client` in
     /// production; a mock in tests.
-    order_placer: Arc<dyn OrderPlacer>,
+    pub(crate) order_placer: Arc<dyn OrderPlacer>,
     /// Funds source driving the available-cash refresh. Same object as
     /// `client` in production; a mock in tests.
     funds_source: Arc<dyn FundsSource>,

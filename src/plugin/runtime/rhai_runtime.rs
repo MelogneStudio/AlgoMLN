@@ -556,13 +556,16 @@ fn register_host_functions(
         let pid = plugin_id.clone();
         engine.register_fn(
             "submit_order",
-            move |symbol: &str, side: &str, qty: i64, order_type: &str, price: f64| -> String {
+            move |symbol: &str, side: &str, qty: i64, order_type: &str, price: f64| -> Result<String, Box<EvalAltResult>> {
                 let execution = match host.execution_guarded() {
                     Ok(e) => e.clone(),
-                    Err(_) => return String::new(),
+                    Err(e) => return Err(Box::new(EvalAltResult::ErrorRuntime(
+                        format!("execution capability denied: {e}").into(),
+                        rhai::Position::NONE,
+                    ))),
                 };
                 if qty <= 0 {
-                    return String::new();
+                    return Ok(String::new());
                 }
                 let side = match side.to_ascii_lowercase().as_str() {
                     "buy" => OrderSide::Buy,
@@ -570,7 +573,7 @@ fn register_host_functions(
                     other => {
                         host.log()
                             .error(&pid, &format!("submit_order: invalid side '{other}'"));
-                        return String::new();
+                        return Ok(String::new());
                     }
                 };
                 let (order_type, price) = match order_type.to_ascii_lowercase().as_str() {
@@ -579,7 +582,7 @@ fn register_host_functions(
                     other => {
                         host.log()
                             .error(&pid, &format!("submit_order: invalid order type '{other}'"));
-                        return String::new();
+                        return Ok(String::new());
                     }
                 };
                 let request = OrderRequest {
@@ -593,10 +596,13 @@ fn register_host_functions(
                     tokio::runtime::Handle::current().block_on(execution.submit_order(request))
                 });
                 match result {
-                    Ok(id) => id,
+                    Ok(id) => Ok(id),
                     Err(e) => {
                         host.log().error(&pid, &format!("submit_order: {e}"));
-                        String::new()
+                        Err(Box::new(EvalAltResult::ErrorRuntime(
+                            format!("submit_order failed: {e}").into(),
+                            rhai::Position::NONE,
+                        )))
                     }
                 }
             },
@@ -605,19 +611,25 @@ fn register_host_functions(
     {
         let host = host.clone();
         let pid = plugin_id.clone();
-        engine.register_fn("cancel_order", move |order_id: &str| -> bool {
+        engine.register_fn("cancel_order", move |order_id: &str| -> Result<bool, Box<EvalAltResult>> {
             let execution = match host.execution_guarded() {
                 Ok(e) => e.clone(),
-                Err(_) => return false,
+                Err(e) => return Err(Box::new(EvalAltResult::ErrorRuntime(
+                    format!("execution capability denied: {e}").into(),
+                    rhai::Position::NONE,
+                ))),
             };
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(execution.cancel_order(order_id))
             });
             match result {
-                Ok(()) => true,
+                Ok(()) => Ok(true),
                 Err(e) => {
                     host.log().error(&pid, &format!("cancel_order: {e}"));
-                    false
+                    Err(Box::new(EvalAltResult::ErrorRuntime(
+                        format!("cancel_order failed: {e}").into(),
+                        rhai::Position::NONE,
+                    )))
                 }
             }
         });
