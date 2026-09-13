@@ -161,6 +161,7 @@ AlgoMLN/
 | Plugin registry (in-memory map, lifecycle, host factory) | `src/plugin/registry.rs` (`PluginRegistry`) |
 | Rhai script runtime (engine budgets, host fns, lifecycle) | `src/plugin/runtime/rhai_runtime.rs` (`RhaiPlugin`) |
 | WASM plugin runtime (wasmtime, capability-gated host fns) | `src/plugin/runtime/wasm_runtime.rs` |
+| Capability → host-fn bridge (which script fns each runtime exposes) | Rhai: `rhai_runtime.rs::register_host_functions` (full surface — log/storage/ui/execution/market-data + callback registries via `FnPtr`); WASM: `wasm_runtime.rs::build_linker` (non-callback surface only — callbacks deferred, `Store` not `Sync`) |
 | Broadcast pub/sub for plugin subscribers (no engine coupling) | `src/plugin/api/events.rs` (`EventBus`, `EventKind`) |
 | Engine event-bus hook (publishes `RuleFired` / `TradeExecuted` / `CandleProcessed` from `on_candle`) | `src/strategy/runtime/engine.rs` (`StrategyEngine::event_bus`, `latest_paper_trade`) |
 | DSL keyword registration (plugin-extensible AST handlers) | `src/plugin/api/dsl_extension.rs` (`SharedDslExtensionRegistry`) |

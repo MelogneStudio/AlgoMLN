@@ -2,9 +2,17 @@
 //!
 //! A `RhaiPlugin` compiles a user-supplied `.rhai` source file with a
 //! heavily restricted `rhai::Engine` (tight operation / call / size
-//! budgets, no print, no module loading) and exposes a small set of
-//! capability-gated host functions (`log_*`, `storage_*`, `notify_*`,
-//! `register_indicator`).
+//! budgets, no print, no module loading) and exposes the **full**
+//! capability-gated host surface: logging (`log_debug/info/warn/error`),
+//! per-plugin storage (`storage_get/set/delete/list_keys`), UI
+//! (`notify_*`, `register_panel`, `emit_panel_data`), execution
+//! (`submit_order`, `cancel_order`, `get_positions`), market-data read
+//! (`get_latest_candle`), and the callback-based registries
+//! (`register_indicator`, `register_metric`, `register_keyword`,
+//! `schedule`/`cancel_schedule`, `subscribe_event`). Every function is
+//! gated by the plugin's declared capabilities via the host's
+//! `*_guarded` accessors and returns a benign fallback ("" / false / ()
+//! / NaN / no-op) when the capability is denied or the backend errors.
 //!
 //! Lifetime of a plugin script:
 //! 1. `on_load` — compile source, register host functions, invoke
@@ -13,16 +21,32 @@
 //! 3. `on_disable` — invoke `on_disable()` if defined.
 //! 4. `on_unload` — invoke `on_unload()` if defined (errors ignored),
 //!    drop the host handle and the AST.
+//!
+//! Callback dispatch: the registry/scheduler/event closures need to call
+//! the plugin's `FnPtr`s *later*, outside any rhai call context. They do
+//! so through a shared, lazily-filled `OnceLock<Weak<Engine>>` cell — the
+//! engine is wrapped in `Arc` only after all host functions are
+//! registered on the uniquely-owned `&mut Engine`, then the cell is
+//! populated with a `Weak` handle. Using `Weak` avoids a reference cycle
+//! (the engine owns the closures, the closures would otherwise own the
+//! engine) and makes every callback a no-op once the plugin is unloaded
+//! and the engine `Arc` is dropped.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, Map, Scope, AST};
 
 use crate::models::Candle;
+use crate::plugin::api::events::{EventBus, EventFilter, EventKind};
 use crate::plugin::api::indicator_registry::SharedIndicatorRegistry;
+use crate::plugin::api::{OrderRequest, OrderSide, OrderType, Position, UiPanel};
 use crate::plugin::host::PluginHost;
-use crate::plugin::types::{Capability, NotificationKind, PluginError, PluginMeta, PluginResult};
+use crate::plugin::types::{
+    Capability, NotificationKind, PluginError, PluginId, PluginMeta, PluginResult, ScheduleHandle,
+};
+use crate::strategy::execution::paper::PaperTrade;
+use crate::strategy::runtime::context::EvalContext;
 
 use super::super::Plugin;
 
@@ -65,45 +89,55 @@ pub struct RhaiPlugin {
     scope: Option<Scope<'static>>,
 }
 
+/// Build a freshly-hardened `rhai::Engine` with the containment budgets
+/// and the `Candle` custom type registered. Used by both `RhaiPlugin::new`
+/// (wrapped in `Arc`) and `on_load` (which registers host functions on the
+/// uniquely-owned engine before wrapping it), so the two never drift.
+fn build_hardened_engine() -> Engine {
+    let mut engine = Engine::new();
+    // Hard execution budgets — these are the primary containment
+    // mechanism for untrusted plugin code.
+    engine.set_max_operations(200_000);
+    engine.set_max_call_levels(32);
+    engine.set_max_string_size(65_536);
+    engine.set_max_array_size(10_000);
+    engine.set_max_map_size(1_000);
+    // Silently swallow plugin print() calls; the engine still parses
+    // them but they go nowhere.
+    engine.on_print(|_| {});
+    // Module loading is intentionally NOT installed — the spec says
+    // to leave it disabled by default. Plugins only see what we
+    // explicitly register below.
+
+    // Register the Candle newtype so plugin scripts can address
+    // candles by their public field names.
+    engine.register_type_with_name::<CandleWrapper>("Candle");
+    engine.register_get("open", |c: &mut CandleWrapper| c.0.open);
+    engine.register_get("high", |c: &mut CandleWrapper| c.0.high);
+    engine.register_get("low", |c: &mut CandleWrapper| c.0.low);
+    engine.register_get("close", |c: &mut CandleWrapper| c.0.close);
+    engine.register_get("volume", |c: &mut CandleWrapper| c.0.volume);
+    engine.register_get("timestamp", |c: &mut CandleWrapper| c.0.timestamp);
+
+    engine
+}
+
 impl RhaiPlugin {
     /// Build a new Rhai plugin with a hardened engine. The source file
-    /// is *not* compiled yet — that happens in `on_load`.
+    /// is *not* compiled yet — that happens in `on_load`, which builds a
+    /// fresh engine, registers the host functions on it while it is
+    /// uniquely owned, and replaces this placeholder engine.
     pub fn new(
         meta: PluginMeta,
         capabilities: Vec<Capability>,
         source_path: PathBuf,
     ) -> PluginResult<Self> {
-        let mut engine = Engine::new();
-        // Hard execution budgets — these are the primary containment
-        // mechanism for untrusted plugin code.
-        engine.set_max_operations(200_000);
-        engine.set_max_call_levels(32);
-        engine.set_max_string_size(65_536);
-        engine.set_max_array_size(10_000);
-        engine.set_max_map_size(1_000);
-        // Silently swallow plugin print() calls; the engine still parses
-        // them but they go nowhere.
-        engine.on_print(|_| {});
-        // Module loading is intentionally NOT installed — the spec says
-        // to leave it disabled by default. Plugins only see what we
-        // explicitly register below.
-
-        // Register the Candle newtype so plugin scripts can address
-        // candles by their public field names.
-        engine.register_type_with_name::<CandleWrapper>("Candle");
-        engine.register_get("open", |c: &mut CandleWrapper| c.0.open);
-        engine.register_get("high", |c: &mut CandleWrapper| c.0.high);
-        engine.register_get("low", |c: &mut CandleWrapper| c.0.low);
-        engine.register_get("close", |c: &mut CandleWrapper| c.0.close);
-        engine.register_get("volume", |c: &mut CandleWrapper| c.0.volume);
-        engine.register_get("timestamp", |c: &mut CandleWrapper| c.0.timestamp);
-
         Ok(Self {
             meta,
             capabilities,
             source_path,
             host: None,
-            engine: Arc::new(engine),
+            engine: Arc::new(build_hardened_engine()),
             ast: None,
             scope: None,
         })
@@ -142,15 +176,133 @@ fn dynamic_array_to_vec(arr: Array) -> Vec<f64> {
         .collect()
 }
 
+/// Coerce a Rhai `Dynamic` returned from a plugin callback into `f64`.
+/// `Dynamic::as_float` / `as_int` consume `self`, so we clone before each
+/// attempt; anything that is neither a float nor an int becomes `NaN`.
+fn dynamic_to_f64(d: &Dynamic) -> f64 {
+    d.clone()
+        .as_float()
+        .ok()
+        .or_else(|| d.clone().as_int().ok().map(|i| i as f64))
+        .unwrap_or(f64::NAN)
+}
+
+/// Build a Rhai `Map` from the plugin-API `Candle` (which uses
+/// `timestamp_ms` rather than the engine `Candle`'s `timestamp`). The
+/// script sees the field as `timestamp` for parity with `candle_to_map`.
+fn candle_api_to_map(c: &crate::plugin::api::Candle) -> Map {
+    let mut m = Map::new();
+    m.insert("open".into(), Dynamic::from(c.open));
+    m.insert("high".into(), Dynamic::from(c.high));
+    m.insert("low".into(), Dynamic::from(c.low));
+    m.insert("close".into(), Dynamic::from(c.close));
+    m.insert("volume".into(), Dynamic::from(c.volume));
+    m.insert("timestamp".into(), Dynamic::from(c.timestamp_ms));
+    m
+}
+
+/// Build a Rhai `Map` from a `PaperTrade` so analytics callbacks can
+/// iterate over trade history. `side` is lowered to `"buy"` / `"sell"`
+/// and `pnl` maps to a float or `()` when absent.
+fn paper_trade_to_map(t: &PaperTrade) -> Map {
+    let mut m = Map::new();
+    m.insert("id".into(), Dynamic::from(t.id.clone()));
+    m.insert("timestamp".into(), Dynamic::from(t.timestamp));
+    m.insert("symbol".into(), Dynamic::from(t.symbol.clone()));
+    let side = match t.side {
+        crate::models::OrderSide::Buy => "buy",
+        crate::models::OrderSide::Sell => "sell",
+    };
+    m.insert("side".into(), Dynamic::from(side.to_string()));
+    m.insert("quantity".into(), Dynamic::from(t.quantity as i64));
+    m.insert("price".into(), Dynamic::from(t.price));
+    m.insert("ruleId".into(), Dynamic::from(t.rule_id.clone()));
+    match t.pnl {
+        Some(p) => m.insert("pnl".into(), Dynamic::from(p)),
+        None => m.insert("pnl".into(), Dynamic::UNIT),
+    };
+    m
+}
+
+/// Build a Rhai `Map` from a broker `Position`.
+fn position_to_map(p: &Position) -> Map {
+    let mut m = Map::new();
+    m.insert("symbol".into(), Dynamic::from(p.symbol.clone()));
+    m.insert("quantity".into(), Dynamic::from(p.quantity));
+    m.insert("averagePrice".into(), Dynamic::from(p.average_price));
+    m
+}
+
+/// Build a Rhai `Map` from an `EventKind` so `subscribe_event` callbacks
+/// receive a self-describing record keyed by `type`.
+fn event_to_map(e: &EventKind) -> Map {
+    let mut m = Map::new();
+    match e {
+        EventKind::CandleProcessed(c) => {
+            m.insert("type".into(), Dynamic::from("candleProcessed".to_string()));
+            m.insert("candle".into(), Dynamic::from(candle_to_map(c)));
+        }
+        EventKind::TradeExecuted(t) => {
+            m.insert("type".into(), Dynamic::from("tradeExecuted".to_string()));
+            m.insert("trade".into(), Dynamic::from(paper_trade_to_map(t)));
+        }
+        EventKind::RuleFired {
+            rule_id,
+            strategy_id,
+        } => {
+            m.insert("type".into(), Dynamic::from("ruleFired".to_string()));
+            m.insert("ruleId".into(), Dynamic::from(rule_id.clone()));
+            m.insert("strategyId".into(), Dynamic::from(strategy_id.clone()));
+        }
+        EventKind::StrategyStatusChanged {
+            strategy_id,
+            new_status,
+        } => {
+            m.insert(
+                "type".into(),
+                Dynamic::from("strategyStatusChanged".to_string()),
+            );
+            m.insert("strategyId".into(), Dynamic::from(strategy_id.clone()));
+            m.insert("newStatus".into(), Dynamic::from(new_status.clone()));
+        }
+        EventKind::SystemShutdown => {
+            m.insert("type".into(), Dynamic::from("systemShutdown".to_string()));
+        }
+    }
+    m
+}
+
+/// Parse a script-supplied event filter string into an `EventFilter`.
+/// Unknown values default to `All` so a typo subscribes broadly rather
+/// than silently receiving nothing.
+fn parse_event_filter(s: &str) -> EventFilter {
+    match s.to_ascii_lowercase().as_str() {
+        "candle" => EventFilter::CandleProcessed,
+        "trade" => EventFilter::TradeExecuted,
+        "rule" => EventFilter::RuleFired,
+        "status" => EventFilter::StrategyStatusChanged,
+        "shutdown" => EventFilter::SystemShutdown,
+        _ => EventFilter::All,
+    }
+}
+
 /// Register all host-facing functions onto the given engine. Each
 /// function captures a clone of the host's `Arc`, so the engine owns
 /// the references it needs and dropping the engine drops the closures.
+///
+/// Callback-based functions (`register_indicator` / `register_metric` /
+/// `register_keyword` / `schedule` / `subscribe_event`) also capture the
+/// shared `engine_cell` — a lazily-filled `OnceLock<Weak<Engine>>` — and
+/// the plugin's `AST`. When the registered callback fires later, it
+/// upgrades the `Weak` to reach the engine; if the plugin has been
+/// unloaded (engine `Arc` dropped) the upgrade fails and the callback
+/// returns its benign fallback.
 fn register_host_functions(
     engine: &mut Engine,
     host: Arc<PluginHost>,
-    engine_arc: Arc<Engine>,
+    engine_cell: Arc<OnceLock<Weak<Engine>>>,
     ast_arc: Arc<AST>,
-    plugin_id: crate::plugin::types::PluginId,
+    plugin_id: PluginId,
 ) {
     // ---- Logging (unguarded by capability, namespaced to the plugin). ----
     {
@@ -253,7 +405,7 @@ fn register_host_functions(
     // fails, the registration is best-effort no-op.
     {
         let host_for_ind = host.clone();
-        let engine_clone = engine_arc.clone();
+        let cell = engine_cell.clone();
         let ast_clone = ast_arc.clone();
         let pid_clone = plugin_id.clone();
         engine.register_fn(
@@ -265,20 +417,24 @@ fn register_host_functions(
                 };
                 // Try the spec-shaped path first (plugin-id-attributed).
                 if let Some(shared) = registry.as_any().downcast_ref::<SharedIndicatorRegistry>() {
-                    let engine_for_call = engine_clone.clone();
+                    let cell_for_call = cell.clone();
                     let ast_for_call = ast_clone.clone();
                     let func_for_call = func.clone();
                     let indicator_fn: std::sync::Arc<
                         dyn Fn(&[Candle], usize) -> Vec<f64> + Send + Sync,
                     > = std::sync::Arc::new(move |candles: &[Candle], period: usize| -> Vec<f64> {
                         let n = candles.len();
+                        let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
+                            Some(e) => e,
+                            None => return vec![f64::NAN; n],
+                        };
                         let candles_array: Array = candles
                             .iter()
                             .map(candle_to_map)
                             .map(Dynamic::from)
                             .collect();
                         let call_result: Result<Array, Box<EvalAltResult>> = func_for_call.call(
-                            &engine_for_call,
+                            &engine,
                             &ast_for_call,
                             (candles_array, period as i64),
                         );
@@ -299,6 +455,384 @@ fn register_host_functions(
                 false
             },
         );
+    }
+
+    // ---- Extra logging level (unguarded). ----
+    {
+        let host = host.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn("log_debug", move |msg: &str| {
+            host.log().debug(&pid, msg);
+        });
+    }
+
+    // ---- Storage: delete + list_keys (Storage capability). ----
+    {
+        let host = host.clone();
+        engine.register_fn("storage_delete", move |key: &str| -> bool {
+            let storage = match host.storage_guarded() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            storage.delete(key).is_ok()
+        });
+    }
+    {
+        let host = host.clone();
+        engine.register_fn("storage_list_keys", move |prefix: &str| -> Array {
+            let storage = match host.storage_guarded() {
+                Ok(s) => s,
+                Err(_) => return Array::new(),
+            };
+            match storage.list_keys(prefix) {
+                Ok(keys) => keys.into_iter().map(Dynamic::from).collect(),
+                Err(_) => Array::new(),
+            }
+        });
+    }
+
+    // ---- UI panels (UiPanels capability). ----
+    {
+        let host = host.clone();
+        engine.register_fn(
+            "register_panel",
+            move |id: &str, title: &str, route: &str| -> bool {
+                let ui = match host.ui_guarded() {
+                    Ok(u) => u,
+                    Err(_) => return false,
+                };
+                ui.register_panel(UiPanel {
+                    id: id.to_string(),
+                    title: title.to_string(),
+                    route: route.to_string(),
+                })
+                .is_ok()
+            },
+        );
+    }
+    // Panel data emit downcasts to the Tauri-backed impl so the broadcast
+    // channel picks the value up — same path the WASM runtime uses.
+    {
+        let host = host.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn(
+            "emit_panel_data",
+            move |panel_id: &str, json_string: &str| -> bool {
+                let ui = match host.ui_guarded() {
+                    Ok(u) => u,
+                    Err(_) => return false,
+                };
+                let value: serde_json::Value = match serde_json::from_str(json_string) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        host.log()
+                            .error(&pid, &format!("emit_panel_data: invalid json: {e}"));
+                        return false;
+                    }
+                };
+                if let Some(tauri_ui) = ui
+                    .as_any()
+                    .downcast_ref::<crate::plugin::api::ui::TauriUiApi>()
+                {
+                    tauri_ui.emit_panel_data(panel_id.to_string(), value).is_ok()
+                } else {
+                    host.log()
+                        .error(&pid, "emit_panel_data: host ui is not a TauriUiApi");
+                    false
+                }
+            },
+        );
+    }
+
+    // ---- Execution (Execution capability). ----
+    //
+    // `submit_order` / `cancel_order` are async on the trait; we bridge
+    // them synchronously via `block_in_place + Handle::block_on`, which
+    // requires a multi-thread runtime (Tauri default; tests use
+    // `#[tokio::test(flavor = "multi_thread")]`). `positions()` is sync
+    // and self-manages any blocking internally, so it is called directly.
+    {
+        let host = host.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn(
+            "submit_order",
+            move |symbol: &str, side: &str, qty: i64, order_type: &str, price: f64| -> String {
+                let execution = match host.execution_guarded() {
+                    Ok(e) => e.clone(),
+                    Err(_) => return String::new(),
+                };
+                if qty <= 0 {
+                    return String::new();
+                }
+                let side = match side.to_ascii_lowercase().as_str() {
+                    "buy" => OrderSide::Buy,
+                    "sell" => OrderSide::Sell,
+                    other => {
+                        host.log()
+                            .error(&pid, &format!("submit_order: invalid side '{other}'"));
+                        return String::new();
+                    }
+                };
+                let (order_type, price) = match order_type.to_ascii_lowercase().as_str() {
+                    "market" => (OrderType::Market, None),
+                    "limit" => (OrderType::Limit, Some(price)),
+                    other => {
+                        host.log()
+                            .error(&pid, &format!("submit_order: invalid order type '{other}'"));
+                        return String::new();
+                    }
+                };
+                let request = OrderRequest {
+                    symbol: symbol.to_string(),
+                    side,
+                    quantity: qty as u32,
+                    order_type,
+                    price,
+                };
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(execution.submit_order(request))
+                });
+                match result {
+                    Ok(id) => id,
+                    Err(e) => {
+                        host.log().error(&pid, &format!("submit_order: {e}"));
+                        String::new()
+                    }
+                }
+            },
+        );
+    }
+    {
+        let host = host.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn("cancel_order", move |order_id: &str| -> bool {
+            let execution = match host.execution_guarded() {
+                Ok(e) => e.clone(),
+                Err(_) => return false,
+            };
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(execution.cancel_order(order_id))
+            });
+            match result {
+                Ok(()) => true,
+                Err(e) => {
+                    host.log().error(&pid, &format!("cancel_order: {e}"));
+                    false
+                }
+            }
+        });
+    }
+    {
+        let host = host.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn("get_positions", move || -> Array {
+            let execution = match host.execution_guarded() {
+                Ok(e) => e,
+                Err(_) => return Array::new(),
+            };
+            match execution.positions() {
+                Ok(positions) => positions
+                    .iter()
+                    .map(position_to_map)
+                    .map(Dynamic::from)
+                    .collect(),
+                Err(e) => {
+                    host.log().error(&pid, &format!("get_positions: {e}"));
+                    Array::new()
+                }
+            }
+        });
+    }
+
+    // ---- Market-data read (MarketData capability). ----
+    //
+    // `latest_candle` is sync but its impl calls a bare `block_on`
+    // internally, so we wrap the call in `block_in_place` to avoid
+    // nesting a runtime inside the current worker.
+    {
+        let host = host.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn("get_latest_candle", move |symbol: &str| -> Dynamic {
+            let md = match host.market_data_guarded() {
+                Ok(m) => m.clone(),
+                Err(_) => return Dynamic::UNIT,
+            };
+            let result = tokio::task::block_in_place(|| md.latest_candle(symbol));
+            match result {
+                Ok(candle) => Dynamic::from(candle_api_to_map(&candle)),
+                Err(e) => {
+                    host.log().error(&pid, &format!("get_latest_candle: {e}"));
+                    Dynamic::UNIT
+                }
+            }
+        });
+    }
+
+    // ---- Analytics metric registration (Analytics capability). ----
+    //
+    // The script's `FnPtr` is invoked later as `fn(trades_array) -> number`
+    // whenever the metric is evaluated. Like `register_indicator`, the
+    // callback upgrades the shared engine `Weak` at call time.
+    {
+        let host = host.clone();
+        let cell = engine_cell.clone();
+        let ast_clone = ast_arc.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn("register_metric", move |name: String, func: FnPtr| -> bool {
+            let analytics = match host.analytics_guarded() {
+                Ok(a) => a,
+                Err(_) => return false,
+            };
+            let cell_for_call = cell.clone();
+            let ast_for_call = ast_clone.clone();
+            let func_for_call = func.clone();
+            let metric_fn: Arc<dyn Fn(&[PaperTrade]) -> f64 + Send + Sync> =
+                Arc::new(move |trades: &[PaperTrade]| -> f64 {
+                    let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
+                        Some(e) => e,
+                        None => return f64::NAN,
+                    };
+                    let trades_array: Array = trades
+                        .iter()
+                        .map(paper_trade_to_map)
+                        .map(Dynamic::from)
+                        .collect();
+                    let call_result: Result<Dynamic, Box<EvalAltResult>> =
+                        func_for_call.call(&engine, &ast_for_call, (trades_array,));
+                    match call_result {
+                        Ok(d) => dynamic_to_f64(&d),
+                        Err(_) => f64::NAN,
+                    }
+                });
+            analytics.register_metric(name, pid.clone(), metric_fn).is_ok()
+        });
+    }
+
+    // ---- DSL keyword registration (DslExtension capability). ----
+    //
+    // The script's `FnPtr` is invoked later as
+    // `fn(candles_array, current_map) -> bool` from the strategy
+    // evaluator. `EvalContext` borrows its slices, so we materialize the
+    // candle array and the current-candle map before calling.
+    {
+        let host = host.clone();
+        let cell = engine_cell.clone();
+        let ast_clone = ast_arc.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn("register_keyword", move |keyword: String, func: FnPtr| -> bool {
+            let dsl = match host.dsl_guarded() {
+                Ok(d) => d,
+                Err(_) => return false,
+            };
+            let cell_for_call = cell.clone();
+            let ast_for_call = ast_clone.clone();
+            let func_for_call = func.clone();
+            let handler: Arc<dyn Fn(&EvalContext) -> bool + Send + Sync> =
+                Arc::new(move |ctx: &EvalContext| -> bool {
+                    let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
+                        Some(e) => e,
+                        None => return false,
+                    };
+                    let candles_array: Array = ctx
+                        .candles
+                        .iter()
+                        .map(candle_to_map)
+                        .map(Dynamic::from)
+                        .collect();
+                    let current_map = candle_to_map(ctx.current);
+                    let call_result: Result<Dynamic, Box<EvalAltResult>> = func_for_call.call(
+                        &engine,
+                        &ast_for_call,
+                        (candles_array, current_map),
+                    );
+                    match call_result {
+                        Ok(d) => d.as_bool().unwrap_or(false),
+                        Err(_) => false,
+                    }
+                });
+            dsl.register_keyword(keyword, pid.clone(), handler).is_ok()
+        });
+    }
+
+    // ---- Cron scheduling (Scheduler capability). ----
+    //
+    // The task closure is spawned on a tokio task by the scheduler and
+    // calls the plugin `FnPtr` as `fn()`. It upgrades the shared engine
+    // `Weak` at fire time and no-ops if the plugin has been unloaded.
+    {
+        let host = host.clone();
+        let cell = engine_cell.clone();
+        let ast_clone = ast_arc.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn("schedule", move |cron_expr: &str, func: FnPtr| -> String {
+            let scheduler = match host.scheduler_guarded() {
+                Ok(s) => s,
+                Err(_) => return String::new(),
+            };
+            let cell_for_call = cell.clone();
+            let ast_for_call = ast_clone.clone();
+            let func_for_call = func.clone();
+            let task: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
+                    Some(e) => e,
+                    None => return,
+                };
+                let _: Result<Dynamic, Box<EvalAltResult>> =
+                    func_for_call.call(&engine, &ast_for_call, ());
+            });
+            match scheduler.schedule(pid.clone(), cron_expr, task) {
+                Ok(handle) => handle.to_string(),
+                Err(e) => {
+                    host.log().error(&pid, &format!("schedule: {e}"));
+                    String::new()
+                }
+            }
+        });
+    }
+    {
+        let host = host.clone();
+        let pid = plugin_id.clone();
+        engine.register_fn("cancel_schedule", move |handle_string: &str| -> bool {
+            let scheduler = match host.scheduler_guarded() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let uuid = match uuid::Uuid::parse_str(handle_string) {
+                Ok(u) => u,
+                Err(_) => return false,
+            };
+            scheduler.cancel(ScheduleHandle(uuid)).is_ok()
+        });
+    }
+
+    // ---- Event subscription (Events capability). ----
+    //
+    // The callback is invoked from a tokio task by the event bus and
+    // calls the plugin `FnPtr` as `fn(event_map)`. It upgrades the shared
+    // engine `Weak` at delivery time.
+    {
+        let host = host.clone();
+        let cell = engine_cell.clone();
+        let ast_clone = ast_arc.clone();
+        engine.register_fn("subscribe_event", move |filter: &str, func: FnPtr| -> String {
+            let bus: &Arc<EventBus> = match host.event_bus_guarded() {
+                Ok(b) => b,
+                Err(_) => return String::new(),
+            };
+            let cell_for_call = cell.clone();
+            let ast_for_call = ast_clone.clone();
+            let func_for_call = func.clone();
+            let callback: Arc<dyn Fn(EventKind) + Send + Sync> = Arc::new(move |event: EventKind| {
+                let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
+                    Some(e) => e,
+                    None => return,
+                };
+                let event_map = event_to_map(&event);
+                let _: Result<Dynamic, Box<EvalAltResult>> =
+                    func_for_call.call(&engine, &ast_for_call, (event_map,));
+            });
+            bus.subscribe(parse_event_filter(filter), callback).to_string()
+        });
     }
 }
 
@@ -327,32 +861,41 @@ impl Plugin for RhaiPlugin {
         // Stash the host so lifecycle hooks can use it.
         self.host = Some(host.clone());
 
-        // Compile the user source *first* so we can hand a shared Arc
-        // to the registered host functions.
-        let ast = self
-            .engine
+        // Build a FRESH, uniquely-owned engine so host functions can be
+        // registered on `&mut Engine` before it is shared. (The engine
+        // created in `new()` is only a placeholder — trying to recover a
+        // `&mut` from its `Arc` via `Arc::get_mut` always failed once any
+        // clone existed, which broke every Rhai plugin load.)
+        let mut engine = build_hardened_engine();
+
+        // Compile the user source with the fresh engine.
+        let ast = engine
             .compile_file(self.source_path.clone())
             .map_err(|e| PluginError::LoadFailed(format!("compile_file failed: {e}")))?;
         let ast_arc = Arc::new(ast);
         self.ast = Some(ast_arc.clone());
 
-        // Register host-facing functions on the engine. The
-        // registration must happen *before* any other Arc clone of the
-        // engine is taken, which is why we use `Arc::get_mut` to
-        // recover a `&mut Engine` — only possible while the Arc's
-        // strong count is one.
-        let engine_arc = self.engine.clone();
-        {
-            let engine_mut = Arc::get_mut(&mut self.engine)
-                .ok_or_else(|| PluginError::LoadFailed("engine Arc unexpectedly shared".into()))?;
-            register_host_functions(
-                engine_mut,
-                host,
-                engine_arc,
-                ast_arc.clone(),
-                self.meta.id.clone(),
-            );
-        }
+        // Shared, lazily-filled cell holding a `Weak<Engine>`. Callback
+        // closures (indicator / metric / keyword / schedule / event)
+        // capture a clone of this and upgrade it at fire time. Using a
+        // `Weak` avoids a reference cycle (the engine owns the closures)
+        // and makes callbacks no-op after the plugin is unloaded.
+        let engine_cell: Arc<OnceLock<Weak<Engine>>> = Arc::new(OnceLock::new());
+
+        register_host_functions(
+            &mut engine,
+            host,
+            engine_cell.clone(),
+            ast_arc.clone(),
+            self.meta.id.clone(),
+        );
+
+        // Wrap the now fully-configured engine in an `Arc` and populate
+        // the cell with a `Weak` handle so registered callbacks can reach
+        // it later.
+        let engine_arc = Arc::new(engine);
+        let _ = engine_cell.set(Arc::downgrade(&engine_arc));
+        self.engine = engine_arc;
 
         // Initialize the call scope.
         self.scope = Some(Scope::new());
@@ -415,5 +958,139 @@ impl Plugin for RhaiPlugin {
         self.host = None;
         self.ast = None;
         self.scope = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression guard for the `Arc::get_mut`-on-a-cloned-`Arc` bug that
+    /// made *every* Rhai plugin fail to load with "engine Arc unexpectedly
+    /// shared". This drives a tiny `.rhai` plugin through the full
+    /// `on_load` → `on_enable` → `on_unload` lifecycle against a real
+    /// `PluginHost` and asserts that (1) no lifecycle call errors and
+    /// (2) a `storage_set` inside `on_load` round-trips through the host.
+    ///
+    /// Mirrors the WASM end-to-end smoke test's host construction.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rhai_plugin_loads_and_drives_host_fns_end_to_end() {
+        use std::path::PathBuf;
+
+        use crate::plugin::api::analytics::SharedAnalyticsRegistry;
+        use crate::plugin::api::dsl_extension::SharedDslExtensionRegistry;
+        use crate::plugin::api::events::EventBus;
+        use crate::plugin::api::indicator_registry::SharedIndicatorRegistry;
+        use crate::plugin::api::log_file::{RateLimitedFileLog, RollingLog};
+        use crate::plugin::api::scheduler::CronScheduler;
+        use crate::plugin::api::storage::PluginKvStore;
+        use crate::plugin::api::ui::TauriUiApi;
+        use crate::plugin::api::StorageApi;
+        use crate::plugin::host::PluginHostBuilder;
+        use crate::plugin::manifest::PluginPermissions;
+        use crate::plugin::types::{PluginId, PluginMeta, PluginVersion};
+
+        // Tiny Rhai plugin: logs on load and writes a storage key.
+        let source = r#"
+            fn on_load() {
+                log_info("loaded");
+                storage_set("k", "v");
+            }
+        "#;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_path: PathBuf = dir.path().join("plugin.rhai");
+        let log_path: PathBuf = dir.path().join("plugin.log");
+        let storage_dir: PathBuf = dir.path().join("storage");
+        std::fs::create_dir_all(&storage_dir).expect("mkdir storage");
+        std::fs::write(&source_path, source.as_bytes()).expect("write .rhai");
+
+        let plugin_id = PluginId::from("rhai-smoke");
+        let meta = PluginMeta {
+            id: plugin_id.clone(),
+            name: "rhai-smoke".into(),
+            version: PluginVersion {
+                major: 0,
+                minor: 1,
+                patch: 0,
+            },
+            description: "Rhai lifecycle smoke fixture".into(),
+            author: "tests".into(),
+        };
+        let mut plugin =
+            RhaiPlugin::new(meta, vec![Capability::Storage], source_path).expect("RhaiPlugin::new");
+
+        // Host-side services the plugin never touches get minimal stubs so
+        // the test does not pull in a broker.
+        struct NoopMarketData;
+        #[async_trait::async_trait]
+        impl crate::plugin::api::MarketDataApi for NoopMarketData {
+            fn subscribe_ticks(
+                &self,
+                _symbol: &str,
+                _callback: std::sync::Arc<
+                    dyn Fn(crate::plugin::api::MarketDataEvent) + Send + Sync,
+                >,
+            ) -> crate::plugin::PluginResult<crate::plugin::types::SubscriptionHandle> {
+                Err(crate::plugin::types::PluginError::ApiError("noop".into()))
+            }
+            fn unsubscribe_ticks(
+                &self,
+                _handle: crate::plugin::types::SubscriptionHandle,
+            ) -> crate::plugin::PluginResult<()> {
+                Ok(())
+            }
+            fn latest_candle(
+                &self,
+                _symbol: &str,
+            ) -> crate::plugin::PluginResult<crate::plugin::api::Candle> {
+                Err(crate::plugin::types::PluginError::ApiError("noop".into()))
+            }
+        }
+
+        let log = std::sync::Arc::new(RateLimitedFileLog::with_log(
+            plugin_id.clone(),
+            RollingLog::open(log_path.clone()).expect("open log file"),
+        ));
+        let storage = std::sync::Arc::new(
+            PluginKvStore::new(plugin_id.clone(), storage_dir.clone()).expect("kv store"),
+        );
+        let (tauri_ui_api, _rx) = TauriUiApi::new();
+        let host = PluginHostBuilder {
+            id: plugin_id.clone(),
+            market_data: std::sync::Arc::new(NoopMarketData),
+            execution: std::sync::Arc::new(crate::plugin::api::execution::NoopExecutionApi),
+            storage,
+            event_bus: EventBus::new(),
+            indicators: std::sync::Arc::new(SharedIndicatorRegistry::new()),
+            analytics: std::sync::Arc::new(SharedAnalyticsRegistry::new()),
+            dsl: std::sync::Arc::new(SharedDslExtensionRegistry::new()),
+            ui: tauri_ui_api,
+            scheduler: CronScheduler::new(),
+            log,
+            capabilities: vec![Capability::Storage],
+            permissions: PluginPermissions {
+                network: false,
+                file_system: false,
+                max_memory_mb: 8,
+                allowed_symbols: Vec::new(),
+            },
+        }
+        .build();
+
+        // The core regression: on_load must NOT error (the old
+        // Arc::get_mut path always did).
+        plugin.on_load(host.clone()).await.expect("on_load");
+        plugin.on_enable().await.expect("on_enable");
+        plugin.on_unload();
+
+        // The storage write inside on_load should have landed.
+        let re_open =
+            PluginKvStore::new(plugin_id.clone(), storage_dir.clone()).expect("re-open kv");
+        assert_eq!(
+            re_open.read("k").expect("read k"),
+            Some(b"v".to_vec()),
+            "storage_set through the Rhai host fn should leave 'k' -> 'v'"
+        );
     }
 }
