@@ -1,0 +1,3 @@
+- [ ] Hardening TradeLog: Replace std::sync::Mutex with parking_lot::Mutex and use sync_all() instead of flush()
+- [ ] Clean up RiskState: Remove dead write daily_realized_loss field and associated updates in engine.rs
+- [ ] Update documentation in CLAUDE.md and plans/total_audit/total-audit.txt to reflect these changes
