@@ -595,10 +595,8 @@ impl StrategyEngine {
                 }
             }
         }
-    }
-
-        None
-    }
+    None
+}
 
     /// Run the strategy-level stop-loss / take-profit pass on the current
     /// candle. For each open position (`quantity > 0`) on the engine's
