@@ -2,8 +2,8 @@ use std::{
     fs::OpenOptions,
     io::{BufRead, BufReader, Write},
     path::PathBuf,
-    sync::Mutex,
 };
+use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -51,12 +51,9 @@ impl TradeLog {
     /// Append one entry. Takes the file lock, writes one JSON line + '\n', flushes.
     pub fn append(&self, entry: TradeLogEntry) -> Result<(), std::io::Error> {
         let json = serde_json::to_string(&entry).map_err(std::io::Error::other)?;
-        let mut file = self
-            .file
-            .lock()
-            .map_err(|_| std::io::Error::other("trade log file lock poisoned"))?;
+        let mut file = self.file.lock();
         writeln!(file, "{json}")?;
-        file.flush()
+        file.sync_all()
     }
 
     /// Read all entries from disk (for the IPC get_trade_log command).

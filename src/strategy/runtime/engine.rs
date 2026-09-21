@@ -137,10 +137,7 @@ pub struct StrategyEngine {
     risk_state: Option<RiskState>,
 }
 
-/// Tracks the limits declared via `RISK MAX_ORDERS` and the cumulative
-/// realized loss. `daily_realized_loss` is session-scoped (in a backtest
-/// "session" = the whole run; in a live paper run = the lifetime of the
-/// strategy instance).
+/// Tracks the per-run counters declared via `RISK`.
 ///
 /// `session_orders` counts **entry orders only** (BUYs). Exits (SELL /
 /// SELL ALL, including the strategy-level SL/TP synthetic closes) are
@@ -153,9 +150,7 @@ struct RiskState {
 
 impl RiskState {
     fn new() -> Self {
-        Self {
-            session_orders: 0,
-        }
+        Self { session_orders: 0 }
     }
 }
 
@@ -595,8 +590,8 @@ impl StrategyEngine {
                 }
             }
         }
-    None
-}
+        None
+    }
 
     /// Run the strategy-level stop-loss / take-profit pass on the current
     /// candle. For each open position (`quantity > 0`) on the engine's

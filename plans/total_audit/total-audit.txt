@@ -87,6 +87,13 @@
   This ensures that equalities are correctly evaluated for large values (e.g. prices around 20,000) where bitwise
   equality is too strict. Guarded by `test_compare_float_tolerance` in `engine.rs`.
 
+  A5 — Fixed: removed the dead `daily_realized_loss` field and writes from
+  RiskState. `MAX_DAILY_LOSS` still recomputes realized loss from the broker
+  and returns MaxDailyLossReached directly when the limit is hit.
+
+  B5 — Fixed: TradeLog now uses a non-poisoning parking_lot::Mutex and calls
+  sync_all() after each append so live trade-log rows are fsynced to disk.
+
   Clean / no issue found
 
   - DSL parser/validator/lexer: no panics on malformed input, ranges (0,100] correct, wire boundary
@@ -95,10 +102,10 @@
   Clean.
   - on_candle/plan_candle equivalence, determinism (BTreeMap usage), and SL/TP bypass-of-trigger-state are all correct.
 
-Status as of 2026-08-21
+Audit complete — Status as of 2026-09-21
 
   Resolved (committed):
-    A1, A2, A4, B1, B2, B4 — see "Resolved" block above.
+    A1, A2, A4, A5, B1, B2, B4, B5 — see "Resolved" block above.
     Phase 8 Tasks #1–#4 — plan_candle / execute_intent split (C2), H3 cancellation
     plumbing, GatedLiveExecutionApi plugin order gateway (Task #4).
 
@@ -113,13 +120,6 @@ Status as of 2026-08-21
   epoch_watchdog_traps_infinite_loop and epoch_watchdog_stops_on_drop in
   wasm_runtime.rs::tests. The old inert set_epoch_deadline(1) one-shot is
   gone.
-
-  Open (lower-confidence, not yet patched):
-    A5 — daily_realized_loss is a dead write (engine.rs:549-556). Never read; comment
-    misleading; no "daily" reset. Harmless but worth removing or wiring up.
-    B5 — Trade-log durability + poison (trade_log.rs:52-60). Append uses flush() not
-    fsync; a panic while holding the mutex poisons it. Fix: fsync after append + a
-    parking_lot Mutex that doesn't poison.
 
   Out of scope / deferred:
     - Phase 8 Task #5 (W1/W2/W5 wiring comments + batch refresh_realized_loss).
