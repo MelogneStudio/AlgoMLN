@@ -128,3 +128,39 @@ Status as of 2026-08-21
       state in GatedLiveExecutionApi).
 
   Test baseline: cargo test --lib → 341 passed, 1 ignored, 0 failed.
+  =========================================================
+  2026-09-13 — Plugin capability-bridge pass (branch: bridge-plugin-apis)
+  =========================================================
+  (1) FIXED: RhaiPlugin::on_load always failed. It cloned the engine Arc, then
+      called Arc::get_mut(&mut self.engine) to get a &mut Engine for host-fn
+      registration. Arc::get_mut returns Some only when strong==1 && weak==0, but
+      the live clone kept strong==2, so it returned None on EVERY load and every
+      Rhai plugin errored with "engine Arc unexpectedly shared". No test exercised
+      the Rhai runtime end-to-end, so it shipped. Fix: build a fresh engine via
+      build_hardened_engine() inside on_load, register host fns while uniquely
+      owned, then wrap in Arc; callbacks reach the engine via a lazily-filled
+      Arc<OnceLock<Weak<Engine>>> cell (Weak avoids a reference cycle and makes
+      callbacks no-op after unload). Guarded by
+      rhai_plugin_loads_and_drives_host_fns_end_to_end.
+  (2) NEW: full Rhai capability bridge. Added log_debug, storage_delete,
+      storage_list_keys, register_panel, emit_panel_data, submit_order,
+      cancel_order, get_positions, get_latest_candle, register_metric,
+      register_keyword, schedule/cancel_schedule, subscribe_event alongside the
+      pre-existing log_*/storage_get/set/notify_*/register_indicator. Async
+      backends bridged via block_in_place + Handle::block_on; every fn returns a
+      benign fallback on capability-denied / error.
+  (3) NEW: WASM non-callback bridge. Added log_debug, storage_delete,
+      register_panel, submit_order, cancel_order, get_positions,
+      get_latest_candle to build_linker (now 12 algomln::* host fns).
+      String-returning fns use a shared write_string_result ABI
+      (0 fit / 1 too-small / -1 error).
+  (4) KNOWN LIMITATION: WASM callback capabilities deferred (custom indicators,
+      analytics metrics, DSL keywords, cron tasks, event subscriptions,
+      market-data tick subscribe). They require host->guest re-entrant calls
+      across a non-Sync, non-re-entrant wasmtime Store, which needs a
+      message-queue / re-entrant-store redesign. Faked nowhere. Rhai bridges them
+      because its engine is Sync under the "sync" feature.
+
+  NOTE: toolchain was absent in the authoring environment — code written to the
+  documented signatures but not compiled. Run `cargo test --lib plugin::` and
+  `cargo build --lib` to verify.

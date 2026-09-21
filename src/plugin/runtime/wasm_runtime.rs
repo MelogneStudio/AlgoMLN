@@ -6,10 +6,26 @@
 //! `_algomln_on_disable` / `_algomln_on_unload` functions at the
 //! corresponding lifecycle events.
 //!
-//! The host surface is intentionally minimal: logging, per-plugin KV
-//! storage, notifications, and a panel-data emit hook. WASI is intentionally
-//! not linked — plugins interact with the platform exclusively through the
-//! `algomln::*` host functions below.
+//! The host surface bridges the **non-callback** capabilities. Twelve
+//! `algomln::*` host functions are linked: logging
+//! (`log_info`/`log_warn`/`log_error`/`log_debug`), per-plugin KV storage
+//! (`storage_get`/`storage_set`/`storage_delete`), UI
+//! (`notify`/`register_panel`/`emit_panel_data`), execution
+//! (`submit_order`/`cancel_order`/`get_positions`), and market-data read
+//! (`get_latest_candle`). WASI is intentionally not linked — plugins
+//! interact with the platform exclusively through the `algomln::*` host
+//! functions below.
+//!
+//! **Deferred for WASM: callback-based capabilities.** Custom indicators,
+//! analytics metrics, DSL keywords, cron tasks, event subscriptions, and
+//! market-data tick subscriptions all require the host to call *back into*
+//! the guest module later, on another thread. wasmtime's `Store` is not
+//! `Sync` and is not re-entrant that way, so those capabilities cannot be
+//! bridged without a message-queue / re-entrant-store redesign and are
+//! intentionally NOT exposed here (they are faked nowhere). The Rhai
+//! runtime, whose engine is `Sync` under the `sync` feature, bridges the
+//! full surface including these callbacks. See `build_linker` for the
+//! matching in-code note.
 //!
 //! Memory is bounded by a `ResourceLimiter` that refuses linear-memory
 //! growth past the configured `memory_limit_bytes`. CPU is bounded by
@@ -41,6 +57,7 @@ const EPOCH_TICK_MS: u64 = 100;
 /// store's deadline is reached and the call traps. 50 ticks × 100 ms ≈ 5 s.
 const LIFECYCLE_CPU_BUDGET_TICKS: u64 = 50;
 
+use crate::plugin::api::{OrderRequest, OrderSide, OrderType, UiPanel};
 use crate::plugin::host::PluginHost;
 use crate::plugin::types::{Capability, NotificationKind, PluginError, PluginMeta, PluginResult};
 
@@ -253,6 +270,28 @@ fn read_bytes_from_memory(
         return None;
     }
     Some(data[start..end].to_vec())
+}
+
+/// Write a UTF-8 string result into a caller-provided output buffer, using
+/// the guest ABI shared by every string-returning host fn: the required
+/// byte length is always written to `out_len_ptr`, and the bytes are copied
+/// into `[out_ptr..out_ptr+len]` only if they fit within `out_max`.
+/// Returns `0` on success, `1` if the buffer was too small (the guest can
+/// re-call with a larger buffer using the length just written).
+fn write_string_result(
+    caller: &mut Caller<'_, WasmState>,
+    out_ptr: i32,
+    out_max: i32,
+    out_len_ptr: i32,
+    s: &str,
+) -> i32 {
+    let b = s.as_bytes();
+    write_i32(caller, out_len_ptr, b.len() as i32);
+    if (b.len() as i32) > out_max {
+        return 1;
+    }
+    write_bytes_to_memory(caller, out_ptr, b);
+    0
 }
 
 /// Build a linker pre-populated with the `algomln` host functions.
@@ -468,6 +507,286 @@ fn build_linker(engine: &Engine) -> PluginResult<Linker<WasmState>> {
             },
         )
         .map_err(|e| PluginError::LoadFailed(format!("link algomln::emit_panel_data: {e}")))?;
+
+    // ---- Extra logging level (unguarded). ----
+    linker
+        .func_wrap(
+            "algomln",
+            "log_debug",
+            |mut caller: Caller<'_, WasmState>, ptr: i32, len: i32| {
+                let msg = read_string_from_memory(&mut caller, ptr, len);
+                let host = caller.data().host.clone();
+                let pid = host.id.clone();
+                host.log().debug(&pid, &msg);
+            },
+        )
+        .map_err(|e| PluginError::LoadFailed(format!("link algomln::log_debug: {e}")))?;
+
+    // ---- Storage delete (Storage capability). ----
+    linker
+        .func_wrap(
+            "algomln",
+            "storage_delete",
+            |mut caller: Caller<'_, WasmState>, key_ptr: i32, key_len: i32| -> i32 {
+                let key = read_string_from_memory(&mut caller, key_ptr, key_len);
+                let storage = match caller.data().host.storage_guarded() {
+                    Ok(s) => s.clone(),
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("storage_delete: {e}"));
+                        return -1;
+                    }
+                };
+                match storage.delete(&key) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("storage_delete: {e}"));
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| PluginError::LoadFailed(format!("link algomln::storage_delete: {e}")))?;
+
+    // ---- UI panel registration (UiPanels capability). ----
+    linker
+        .func_wrap(
+            "algomln",
+            "register_panel",
+            |mut caller: Caller<'_, WasmState>,
+             id_ptr: i32,
+             id_len: i32,
+             title_ptr: i32,
+             title_len: i32,
+             route_ptr: i32,
+             route_len: i32|
+             -> i32 {
+                let id = read_string_from_memory(&mut caller, id_ptr, id_len);
+                let title = read_string_from_memory(&mut caller, title_ptr, title_len);
+                let route = read_string_from_memory(&mut caller, route_ptr, route_len);
+                let ui = match caller.data().host.ui_guarded() {
+                    Ok(u) => u.clone(),
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("register_panel: {e}"));
+                        return -1;
+                    }
+                };
+                match ui.register_panel(UiPanel { id, title, route }) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("register_panel: {e}"));
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| PluginError::LoadFailed(format!("link algomln::register_panel: {e}")))?;
+
+    // ---- Execution (Execution capability). ----
+    //
+    // `submit_order` / `cancel_order` are async on the trait; we bridge
+    // them synchronously via `block_in_place + Handle::block_on`, which
+    // requires a multi-thread runtime (Tauri default). `get_positions`
+    // calls the sync `positions()` directly.
+    linker
+        .func_wrap(
+            "algomln",
+            "submit_order",
+            |mut caller: Caller<'_, WasmState>,
+             sym_ptr: i32,
+             sym_len: i32,
+             side: i32,
+             qty: i32,
+             order_type: i32,
+             price: f64,
+             out_ptr: i32,
+             out_max: i32,
+             out_len_ptr: i32|
+             -> i32 {
+                let symbol = read_string_from_memory(&mut caller, sym_ptr, sym_len);
+                let execution = match caller.data().host.execution_guarded() {
+                    Ok(e) => e.clone(),
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("submit_order: {e}"));
+                        return -1;
+                    }
+                };
+                if qty <= 0 {
+                    return -1;
+                }
+                let side = match side {
+                    0 => OrderSide::Buy,
+                    1 => OrderSide::Sell,
+                    _ => return -1,
+                };
+                let (order_type, price) = match order_type {
+                    0 => (OrderType::Market, None),
+                    1 => (OrderType::Limit, Some(price)),
+                    _ => return -1,
+                };
+                let request = OrderRequest {
+                    symbol,
+                    side,
+                    quantity: qty as u32,
+                    order_type,
+                    price,
+                };
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(execution.submit_order(request))
+                });
+                match result {
+                    Ok(id) => write_string_result(&mut caller, out_ptr, out_max, out_len_ptr, &id),
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("submit_order: {e}"));
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| PluginError::LoadFailed(format!("link algomln::submit_order: {e}")))?;
+
+    linker
+        .func_wrap(
+            "algomln",
+            "cancel_order",
+            |mut caller: Caller<'_, WasmState>, id_ptr: i32, id_len: i32| -> i32 {
+                let order_id = read_string_from_memory(&mut caller, id_ptr, id_len);
+                let execution = match caller.data().host.execution_guarded() {
+                    Ok(e) => e.clone(),
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("cancel_order: {e}"));
+                        return -1;
+                    }
+                };
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(execution.cancel_order(&order_id))
+                });
+                match result {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("cancel_order: {e}"));
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| PluginError::LoadFailed(format!("link algomln::cancel_order: {e}")))?;
+
+    linker
+        .func_wrap(
+            "algomln",
+            "get_positions",
+            |mut caller: Caller<'_, WasmState>,
+             out_ptr: i32,
+             out_max: i32,
+             out_len_ptr: i32|
+             -> i32 {
+                let execution = match caller.data().host.execution_guarded() {
+                    Ok(e) => e.clone(),
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("get_positions: {e}"));
+                        return -1;
+                    }
+                };
+                let positions = match execution.positions() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("get_positions: {e}"));
+                        return -1;
+                    }
+                };
+                let json = serde_json::json!(positions
+                    .iter()
+                    .map(|p| serde_json::json!({
+                        "symbol": p.symbol,
+                        "quantity": p.quantity,
+                        "averagePrice": p.average_price,
+                    }))
+                    .collect::<Vec<_>>());
+                write_string_result(&mut caller, out_ptr, out_max, out_len_ptr, &json.to_string())
+            },
+        )
+        .map_err(|e| PluginError::LoadFailed(format!("link algomln::get_positions: {e}")))?;
+
+    // ---- Market-data read (MarketData capability). ----
+    //
+    // `latest_candle` is sync but its impl calls a bare `block_on`
+    // internally, so we wrap the call in `block_in_place`.
+    linker
+        .func_wrap(
+            "algomln",
+            "get_latest_candle",
+            |mut caller: Caller<'_, WasmState>,
+             sym_ptr: i32,
+             sym_len: i32,
+             out_ptr: i32,
+             out_max: i32,
+             out_len_ptr: i32|
+             -> i32 {
+                let symbol = read_string_from_memory(&mut caller, sym_ptr, sym_len);
+                let md = match caller.data().host.market_data_guarded() {
+                    Ok(m) => m.clone(),
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("get_latest_candle: {e}"));
+                        return -1;
+                    }
+                };
+                let candle = match tokio::task::block_in_place(|| md.latest_candle(&symbol)) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("get_latest_candle: {e}"));
+                        return -1;
+                    }
+                };
+                let json = serde_json::json!({
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                    "timestampMs": candle.timestamp_ms,
+                });
+                write_string_result(&mut caller, out_ptr, out_max, out_len_ptr, &json.to_string())
+            },
+        )
+        .map_err(|e| PluginError::LoadFailed(format!("link algomln::get_latest_candle: {e}")))?;
+
+    // ---- Callback-based capabilities are intentionally NOT bridged for
+    // WASM. ----
+    //
+    // Custom indicators, analytics metrics, DSL keywords, cron tasks,
+    // event subscriptions, and market-data tick subscriptions all require
+    // the host to call *back into* the guest module later, from another
+    // thread (a scheduler tick, an event-bus publish, an indicator
+    // evaluation). wasmtime's `Store` is neither `Sync` nor re-entrant,
+    // so a host→guest callback across it would need a message-queue or a
+    // re-entrant-store redesign. Rather than fake these (register a
+    // handler that can never fire), they are deferred. The Rhai runtime,
+    // whose engine is `Sync` under the `sync` feature, bridges the full
+    // callback surface — see `rhai_runtime.rs::register_host_functions`.
 
     Ok(linker)
 }

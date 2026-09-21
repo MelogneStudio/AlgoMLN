@@ -29,3 +29,13 @@ impl LogApi for NamespacedLog {
         eprintln!("[plugin:{}] [ERROR] {}", self.plugin_id, message);
     }
 }
+
+pub struct NoopLog;
+
+#[async_trait::async_trait]
+impl LogApi for NoopLog {
+    fn debug(&self, _plugin_id: &PluginId, _message: &str) {}
+    fn info(&self, _plugin_id: &PluginId, _message: &str) {}
+    fn warn(&self, _plugin_id: &PluginId, _message: &str) {}
+    fn error(&self, _plugin_id: &PluginId, _message: &str) {}
+}
