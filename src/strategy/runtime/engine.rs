@@ -149,14 +149,12 @@ pub struct StrategyEngine {
 #[derive(Debug, Clone)]
 struct RiskState {
     session_orders: u32,
-    daily_realized_loss: f64,
 }
 
 impl RiskState {
     fn new() -> Self {
         Self {
             session_orders: 0,
-            daily_realized_loss: 0.0,
         }
     }
 }
@@ -593,16 +591,11 @@ impl StrategyEngine {
                 let realized = self.instance.execution_target.realized_loss();
                 let loss_pct = realized / initial * 100.0;
                 if loss_pct >= limit_pct {
-                    if let Some(state) = self.risk_state.as_mut() {
-                        state.daily_realized_loss = realized;
-                    }
                     return Some(RiskBreachReason::MaxDailyLossReached);
-                }
-                if let Some(state) = self.risk_state.as_mut() {
-                    state.daily_realized_loss = realized;
                 }
             }
         }
+    }
 
         None
     }

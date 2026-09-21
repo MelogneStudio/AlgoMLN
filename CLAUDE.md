@@ -10,6 +10,7 @@ Data → Indicators → Strategy Engine → Backtesting → Execution → UI
 > - **`ARCHITECTURE.md`** — file tree + "where to look for X" lookup tables (DSL → which files, indicators → which files, IPC → which files, etc.)
 > - **`BACKEND.md`** — narrative on the Rust crate: DSL pipeline, runtime/evaluation loop, execution targets, Tauri commands, CLI, data flow
 > - **`FRONTEND.md`** — narrative on the React app: shell/scaling, screen state machine, builder↔coder round-trip, IPC hooks, wire types
+> - **`docs/dsl.md`** — comprehensive reference for the Strategy DSL grammar and rules
 
 ## Common Commands
 

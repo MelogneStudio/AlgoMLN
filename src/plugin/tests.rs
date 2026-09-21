@@ -113,6 +113,7 @@ async fn event_bus_filter() {
     let cc = call_count.clone();
 
     bus.subscribe(
+        PluginId::from("test-plugin"),
         EventFilter::TradeExecuted,
         Arc::new(move |_| {
             cc.fetch_add(1, Ordering::SeqCst);
@@ -233,53 +234,60 @@ entry = "nonexistent.rhai"
     ));
 }
 
-async fn setup_test_registry(dir: tempfile::TempDir) -> (Arc<PluginRegistry>, Arc<CronScheduler>, Arc<EventBus>) {
+async fn setup_test_registry(path: PathBuf) -> (Arc<PluginRegistry>, Arc<CronScheduler>, Arc<EventBus>) {
     let scheduler = CronScheduler::new();
     let event_bus = EventBus::new();
+    let path_clone = path.clone();
+    let scheduler_clone = scheduler.clone();
+    let event_bus_clone = event_bus.clone();
 
     let host_factory = Arc::new(move |id, caps, perms| {
         PluginHostBuilder {
             id,
             market_data: Arc::new(NoopMarketData),
             execution: Arc::new(crate::plugin::api::execution::NoopExecutionApi),
-            storage: Arc::new(PluginKvStore::new(PluginId::from("test"), dir.path().to_path_buf()).unwrap()),
-            event_bus: event_bus.clone(),
+            storage: Arc::new(PluginKvStore::new(PluginId::from("test"), path_clone.clone()).unwrap()),
+            event_bus: event_bus_clone.clone(),
             indicators: Arc::new(SharedIndicatorRegistry::new()),
             analytics: Arc::new(crate::plugin::api::analytics::SharedAnalyticsRegistry::new()),
             dsl: Arc::new(crate::plugin::api::dsl_extension::SharedDslExtensionRegistry::new()),
             ui: crate::plugin::api::ui::TauriUiApi::new().0,
-            scheduler: scheduler.clone(),
+            scheduler: scheduler_clone.clone(),
             log: Arc::new(crate::plugin::api::log::NoopLog),
             capabilities: caps,
             permissions: perms,
         }.build()
     });
 
-    let registry = PluginRegistry::new(dir.path().to_path_buf(), host_factory);
+    let registry = PluginRegistry::new(path, host_factory);
     (registry, scheduler, event_bus)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rhai_callback_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
-    let (registry, _, _) = setup_test_registry(dir).await;
+    let plugin_dir = dir.path().join("callback-test");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    let (registry, _, _) = setup_test_registry(plugin_dir.parent().unwrap().to_path_buf()).await;
 
     let plugin_id = PluginId::from("callback-test");
     let source = r#"
+        fn my_metric(trades) {
+            1.0
+        }
+        fn is_bullish(candles, current) {
+            true
+        }
         fn on_load() {
-            register_metric("my_metric", fn(trades) {
-                return trades.len() as float;
-            });
-            register_keyword("is_bullish", fn(candles, current) {
-                return current.close > current.open;
-            });
+            register_metric("my_metric", my_metric);
+            register_keyword("is_bullish", is_bullish);
         }
     "#;
 
-    let source_path = dir.path().join("plugin.rhai");
+    let source_path = plugin_dir.join("plugin.rhai");
     std::fs::write(&source_path, source.as_bytes()).unwrap();
 
-    let manifest_path = dir.path().join("plugin.toml");
+    let manifest_path = plugin_dir.join("plugin.toml");
     std::fs::write(&manifest_path, format!(r#"
 id = "{}"
 name = "Test"

@@ -1,15 +1,29 @@
-use std::sync::Arc;
+﻿use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::plugin::manifest::PluginPermissions;
 use crate::plugin::types::{Capability, PluginError, PluginId, PluginResult};
+use rhai::{AST, Engine, FnPtr};
 
 use super::api::{
     AnalyticsApi, DslExtensionApi, ExecutionApi, IndicatorRegistryApi, LogApi, MarketDataApi,
     SchedulerApi, StorageApi, UiApi,
 };
 
+/// Registry of stateless Rhai callbacks for a single plugin load.
+/// Callbacks are plain functions (not closures) invoked with a fresh execution scope.
+#[derive(Default)]
+pub(crate) struct PluginCallbacks {
+    pub(crate) indicators: Mutex<HashMap<String, FnPtr>>,
+    pub(crate) metrics: Mutex<HashMap<String, FnPtr>>,
+    pub(crate) keywords: Mutex<HashMap<String, FnPtr>>,
+    pub(crate) schedules: Mutex<HashMap<crate::plugin::types::ScheduleHandle, FnPtr>>,
+    pub(crate) events: Mutex<HashMap<crate::plugin::api::events::EventFilter, Vec<FnPtr>>>,
+    pub(crate) schedule_failures: Mutex<HashMap<crate::plugin::types::ScheduleHandle, u32>>,
+}
+
 /// The runtime handle given to a plugin when it is loaded. The host exposes
-/// capability-gated access to platform services — plugins must request the
+/// capability-gated access to platform services â€” plugins must request the
 /// `*_guarded` accessor corresponding to each capability listed in their
 /// manifest, and any undeclared access is denied.
 pub struct PluginHost {
@@ -24,6 +38,9 @@ pub struct PluginHost {
     pub ui: Arc<dyn UiApi>,
     pub scheduler: Arc<dyn SchedulerApi>,
     pub log: Arc<dyn LogApi>,
+    pub(crate) callbacks: Arc<PluginCallbacks>,
+    pub(crate) engine: OnceLock<Arc<Engine>>,
+    pub(crate) ast: OnceLock<Arc<AST>>,
     pub(crate) capabilities: Vec<Capability>,
     pub(crate) permissions: PluginPermissions,
 }
@@ -94,7 +111,7 @@ impl PluginHost {
         Ok(&self.scheduler)
     }
 
-    /// Logging is intentionally unguarded — every plugin can always log,
+    /// Logging is intentionally unguarded â€” every plugin can always log,
     /// regardless of declared capabilities.
     pub fn log(&self) -> &Arc<dyn LogApi> {
         &self.log
@@ -134,8 +151,12 @@ impl PluginHostBuilder {
             ui: self.ui,
             scheduler: self.scheduler,
             log: self.log,
+            callbacks: Arc::new(PluginCallbacks::default()),
+            engine: OnceLock::new(),
+            ast: OnceLock::new(),
             capabilities: self.capabilities,
             permissions: self.permissions,
         })
     }
 }
+

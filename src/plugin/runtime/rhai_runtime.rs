@@ -33,10 +33,10 @@
 //! and the engine `Arc` is dropped.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc};
 use parking_lot::Mutex;
 
-use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, Map, Scope, AST};
+use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, Map, Scope};
 
 use crate::models::Candle;
 use crate::plugin::api::events::{EventBus, EventFilter, EventKind};
@@ -138,7 +138,6 @@ impl RhaiPlugin {
             source_path,
             host: None,
             engine: Arc::new(build_hardened_engine()),
-            ast: None,
             scope: None,
         })
     }
@@ -425,8 +424,6 @@ fn register_host_functions(
     // fails, the registration is best-effort no-op.
     {
         let host_for_ind = host.clone();
-        let cell = engine_cell.clone();
-        let ast_clone = ast_arc.clone();
         let pid_clone = plugin_id.clone();
         engine.register_fn(
             "register_indicator",
@@ -437,15 +434,18 @@ fn register_host_functions(
                 };
                 // Try the spec-shaped path first (plugin-id-attributed).
                 if let Some(shared) = registry.as_any().downcast_ref::<SharedIndicatorRegistry>() {
-                    let cell_for_call = cell.clone();
-                    let ast_for_call = ast_clone.clone();
+                    let host_for_call = host_for_ind.clone();
                     let func_for_call = func.clone();
                     let indicator_fn: std::sync::Arc<
                         dyn Fn(&[Candle], usize) -> Vec<f64> + Send + Sync,
                     > = std::sync::Arc::new(move |candles: &[Candle], period: usize| -> Vec<f64> {
                         let n = candles.len();
-                        let engine = match cell_for_call.get().and_then(|w| w.upgrade()) {
+                        let engine = match host_for_call.engine.get() {
                             Some(e) => e,
+                            None => return vec![f64::NAN; n],
+                        };
+                        let ast = match host_for_call.ast.get() {
+                            Some(a) => a,
                             None => return vec![f64::NAN; n],
                         };
                         let candles_array: Array = candles
@@ -454,8 +454,8 @@ fn register_host_functions(
                             .map(Dynamic::from)
                             .collect();
                         let call_result: Result<Array, Box<EvalAltResult>> = func_for_call.call(
-                            &engine,
-                            &ast_for_call,
+                            engine,
+                            ast,
                             (candles_array, period as i64),
                         );
                         match call_result {
@@ -735,7 +735,7 @@ fn register_host_functions(
                     }
                 });
 
-            host.callbacks.metrics.lock().insert(name.clone(), func.clone());
+            host.callbacks.metrics.lock().unwrap().insert(name.clone(), func.clone());
             analytics.register_metric(name, pid.clone(), metric_fn).is_ok()
         });
     }
@@ -777,7 +777,7 @@ fn register_host_functions(
                         }
                     }
                 });
-            host.callbacks.keywords.lock().insert(keyword.clone(), func.clone());
+            host.callbacks.keywords.lock().unwrap().insert(keyword.clone(), func.clone());
             dsl.register_keyword(keyword, pid.clone(), handler).is_ok()
         });
     }
@@ -829,7 +829,7 @@ fn register_host_functions(
             match scheduler.schedule(pid.clone(), cron_expr, task) {
                 Ok(handle) => {
                     *handle_cell.lock() = Some(handle.clone());
-                    host.callbacks.schedules.lock().insert(handle.clone(), func.clone());
+                    host.callbacks.schedules.lock().unwrap().insert(handle.clone(), func.clone());
                     handle.to_string()
                 }
                 Err(e) => {
@@ -839,9 +839,8 @@ fn register_host_functions(
             }
         });
     }
-    {
+        {
         let host = host.clone();
-        let pid = plugin_id.clone();
         engine.register_fn("cancel_schedule", move |handle_string: &str| -> bool {
             let scheduler = match host.scheduler_guarded() {
                 Ok(s) => s,
@@ -884,7 +883,7 @@ fn register_host_functions(
                 }
             });
             let handle = bus.subscribe(pid.clone(), parse_event_filter(filter), callback);
-            host.callbacks.events.lock().insert(
+            host.callbacks.events.lock().unwrap().insert(
                 parse_event_filter(filter),
                 {
                     let mut vec = Vec::new();
@@ -961,9 +960,13 @@ impl Plugin for RhaiPlugin {
     }
 
     async fn on_enable(&mut self) -> PluginResult<()> {
-        let ast = self
-            .ast
+        let host = self
+            .host
             .as_ref()
+            .ok_or_else(|| PluginError::ApiError("plugin not loaded".into()))?;
+        let ast = host
+            .ast
+            .get()
             .ok_or_else(|| PluginError::ApiError("plugin not loaded".into()))?;
         let scope = self
             .scope
@@ -979,9 +982,13 @@ impl Plugin for RhaiPlugin {
     }
 
     async fn on_disable(&mut self) -> PluginResult<()> {
-        let ast = self
-            .ast
+        let host = self
+            .host
             .as_ref()
+            .ok_or_else(|| PluginError::ApiError("plugin not loaded".into()))?;
+        let ast = host
+            .ast
+            .get()
             .ok_or_else(|| PluginError::ApiError("plugin not loaded".into()))?;
         let scope = self
             .scope
@@ -997,13 +1004,14 @@ impl Plugin for RhaiPlugin {
     }
 
     fn on_unload(&mut self) {
-        if let (Some(ast), Some(scope)) = (self.ast.as_ref(), self.scope.as_mut()) {
-            // Errors from on_unload are intentionally ignored per spec.
-            let _: Result<(), Box<EvalAltResult>> =
-                self.engine.call_fn(scope, ast, "on_unload", ());
+        if let (Some(host), Some(scope)) = (self.host.as_ref(), self.scope.as_mut()) {
+            if let Some(ast) = host.ast.get() {
+                // Errors from on_unload are intentionally ignored per spec.
+                let _: Result<(), Box<EvalAltResult>> =
+                    self.engine.call_fn(scope, ast, "on_unload", ());
+            }
         }
         self.host = None;
-        self.ast = None;
         self.scope = None;
     }
 }
