@@ -6,7 +6,7 @@
 //! `_algomln_on_disable` / `_algomln_on_unload` functions at the
 //! corresponding lifecycle events.
 //!
-//! The host surface bridges the **non-callback** capabilities. Twelve
+//! The host surface bridges the **non-callback** capabilities. Fourteen
 //! `algomln::*` host functions are linked: logging
 //! (`log_info`/`log_warn`/`log_error`/`log_debug`), per-plugin KV storage
 //! (`storage_get`/`storage_set`/`storage_delete`), UI
@@ -211,6 +211,9 @@ impl WasmPlugin {
 /// Returns lossy-decoded data on invalid UTF-8 so a buggy plugin
 /// still produces a log line rather than crashing the host.
 fn read_string_from_memory(caller: &mut Caller<'_, WasmState>, ptr: i32, len: i32) -> String {
+    if ptr < 0 || len < 0 {
+        return String::new();
+    }
     let memory = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(m)) => m,
         _ => return String::new(),
@@ -224,20 +227,24 @@ fn read_string_from_memory(caller: &mut Caller<'_, WasmState>, ptr: i32, len: i3
     String::from_utf8_lossy(&data[start..end]).into_owned()
 }
 
-/// Write raw bytes into WASM linear memory at `ptr`. Out-of-bounds
-/// writes will trap the WASM instance; we let wasmtime surface the
-/// trap rather than pre-validating, matching the host's other
-/// "let it trap" patterns.
-fn write_bytes_to_memory(caller: &mut Caller<'_, WasmState>, ptr: i32, bytes: &[u8]) {
+/// Write raw bytes into WASM linear memory at `ptr`. Returns `Err(())` if the write
+/// would be out-of-bounds or if the `memory` export is missing.
+fn write_bytes_to_memory(caller: &mut Caller<'_, WasmState>, ptr: i32, bytes: &[u8]) -> Result<(), ()> {
+    if ptr < 0 {
+        return Err(());
+    }
     let memory = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(m)) => m,
-        _ => panic!("algomln host call invoked without a `memory` export"),
+        _ => return Err(()),
     };
     let mem_data = memory.data_mut(caller);
     let start = ptr as usize;
-    let end = start + bytes.len();
-    assert!(end <= mem_data.len(), "algomln host write out of bounds");
+    let end = start.checked_add(bytes.len()).ok_or(())?;
+    if end > mem_data.len() {
+        return Err(());
+    }
     mem_data[start..end].copy_from_slice(bytes);
+    Ok(())
 }
 
 fn memory_of(caller: &mut Caller<'_, WasmState>) -> Option<Memory> {
@@ -248,11 +255,16 @@ fn memory_of(caller: &mut Caller<'_, WasmState>) -> Option<Memory> {
 }
 
 fn write_i32(caller: &mut Caller<'_, WasmState>, ptr: i32, value: i32) {
+    if ptr < 0 {
+        return;
+    }
     if let Some(mem) = memory_of(caller) {
         let data = mem.data_mut(caller);
         let slot = ptr as usize;
-        if slot + 4 <= data.len() {
-            data[slot..slot + 4].copy_from_slice(&value.to_le_bytes());
+        if let Some(end) = slot.checked_add(4) {
+            if end <= data.len() {
+                data[slot..end].copy_from_slice(&value.to_le_bytes());
+            }
         }
     }
 }
@@ -262,6 +274,9 @@ fn read_bytes_from_memory(
     ptr: i32,
     len: i32,
 ) -> Option<Vec<u8>> {
+    if ptr < 0 || len < 0 {
+        return None;
+    }
     let mem = memory_of(caller)?;
     let data = mem.data(caller);
     let start = ptr as usize;
@@ -424,6 +439,44 @@ fn build_linker(engine: &Engine) -> PluginResult<Linker<WasmState>> {
             },
         )
         .map_err(|e| PluginError::LoadFailed(format!("link algomln::storage_set: {e}")))?;
+
+    linker
+        .func_wrap(
+            "algomln",
+            "storage_list_keys",
+            |mut caller: Caller<'_, WasmState>,
+             prefix_ptr: i32,
+             prefix_len: i32,
+             out_ptr: i32,
+             out_max: i32,
+             out_len_ptr: i32|
+             -> i32 {
+                let prefix = read_string_from_memory(&mut caller, prefix_ptr, prefix_len);
+                let storage = match caller.data().host.storage_guarded() {
+                    Ok(s) => s.clone(),
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("storage_list_keys: {e}"));
+                        return -1;
+                    }
+                };
+                match storage.list_keys(&prefix) {
+                    Ok(keys) => {
+                        let json = serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string());
+                        write_string_result(&mut caller, out_ptr, out_max, out_len_ptr, &json)
+                    }
+                    Err(e) => {
+                        let host = caller.data().host.clone();
+                        let pid = host.id.clone();
+                        host.log().error(&pid, &format!("storage_list_keys: {e}"));
+                        -1
+                    }
+                }
+            },
+        )
+        .map_err(|e| PluginError::LoadFailed(format!("link algomln::storage_list_keys: {e}")))?;
+
 
     // ---- UI notifications (UiPanels capability). ----
     linker
@@ -1027,8 +1080,8 @@ mod tests {
                 (func $log_info (param i32 i32)))
               (import "algomln" "storage_set"
                 (func $storage_set (param i32 i32 i32 i32) (result i32)))
-              (import "algomln" "storage_get"
-                (func $storage_get (param i32 i32 i32 i32) (result i32)))
+                (import "algomln" "storage_get"
+                (func $storage_get (param i32 i32 i32 i32 i32) (result i32)))
 
               (memory (export "memory") 1)
               (data (i32.const  256) "loaded")
@@ -1047,7 +1100,7 @@ mod tests {
 
               (func (export "_algomln_on_enable") (local $r i32)
                 i32.const 512  i32.const 1
-                i32.const 2048 i32.const 1536
+                i32.const 2048 i32.const 1536 i32.const 1536
                 call $storage_get
                 local.set $r
                 ;; Always log success on the happy path; surface the

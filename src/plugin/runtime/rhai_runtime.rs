@@ -574,70 +574,59 @@ fn register_host_functions(
     {
         let host = host.clone();
         let pid = plugin_id.clone();
-        engine.register_fn(
-            "submit_order",
-            move |symbol: &str, side: &str, qty: i64, order_type: &str, price: f64| -> Result<String, Box<EvalAltResult>> {
-                let execution = match host.execution_guarded() {
-                    Ok(e) => e.clone(),
-                    Err(e) => return Err(Box::new(EvalAltResult::ErrorRuntime(
-                        format!("execution capability denied: {e}").into(),
-                        rhai::Position::NONE,
-                    ))),
-                };
-                if qty <= 0 {
+        engine.register_fn("submit_order", move |symbol: &str, side: &str, qty: i64, order_type: &str, price: f64| -> Result<String, Box<EvalAltResult>> {
+            let execution = match host.execution_guarded() {
+                Ok(e) => e.clone(),
+                Err(_) => return Ok(String::new()),
+            };
+            if qty <= 0 {
+                return Ok(String::new());
+            }
+            let side = match side.to_ascii_lowercase().as_str() {
+                "buy" => OrderSide::Buy,
+                "sell" => OrderSide::Sell,
+                other => {
+                    host.log()
+                        .error(&pid, &format!("submit_order: invalid side '{other}'"));
                     return Ok(String::new());
                 }
-                let side = match side.to_ascii_lowercase().as_str() {
-                    "buy" => OrderSide::Buy,
-                    "sell" => OrderSide::Sell,
-                    other => {
-                        host.log()
-                            .error(&pid, &format!("submit_order: invalid side '{other}'"));
-                        return Ok(String::new());
-                    }
-                };
-                let (order_type, price) = match order_type.to_ascii_lowercase().as_str() {
-                    "market" => (OrderType::Market, None),
-                    "limit" => (OrderType::Limit, Some(price)),
-                    other => {
-                        host.log()
-                            .error(&pid, &format!("submit_order: invalid order type '{other}'"));
-                        return Ok(String::new());
-                    }
-                };
-                let request = OrderRequest {
-                    symbol: symbol.to_string(),
-                    side,
-                    quantity: qty as u32,
-                    order_type,
-                    price,
-                };
-                let result = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(execution.submit_order(request))
-                });
-                match result {
-                    Ok(id) => Ok(id),
-                    Err(e) => {
-                        host.log().error(&pid, &format!("submit_order: {e}"));
-                        Err(Box::new(EvalAltResult::ErrorRuntime(
-                            format!("submit_order failed: {e}").into(),
-                            rhai::Position::NONE,
-                        )))
-                    }
+            };
+            let (order_type, price) = match order_type.to_ascii_lowercase().as_str() {
+                "market" => (OrderType::Market, None),
+                "limit" => (OrderType::Limit, Some(price)),
+                other => {
+                    host.log()
+                        .error(&pid, &format!("submit_order: invalid order type '{other}'"));
+                    return Ok(String::new());
                 }
-            },
-        );
-    }
+            };
+            let request = OrderRequest {
+                symbol: symbol.to_string(),
+                side,
+                quantity: qty as u32,
+                order_type,
+                price,
+            };
+            let result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(execution.submit_order(request))
+            });
+            match result {
+                Ok(id) => Ok(id),
+                Err(e) => {
+                    host.log().error(&pid, &format!("submit_order: {e}"));
+                    Ok(String::new())
+                }
+            }
+        },
+    );
+
     {
         let host = host.clone();
         let pid = plugin_id.clone();
         engine.register_fn("cancel_order", move |order_id: &str| -> Result<bool, Box<EvalAltResult>> {
             let execution = match host.execution_guarded() {
                 Ok(e) => e.clone(),
-                Err(e) => return Err(Box::new(EvalAltResult::ErrorRuntime(
-                    format!("execution capability denied: {e}").into(),
-                    rhai::Position::NONE,
-                ))),
+                Err(_) => return Ok(false),
             };
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(execution.cancel_order(order_id))
@@ -646,10 +635,7 @@ fn register_host_functions(
                 Ok(()) => Ok(true),
                 Err(e) => {
                     host.log().error(&pid, &format!("cancel_order: {e}"));
-                    Err(Box::new(EvalAltResult::ErrorRuntime(
-                        format!("cancel_order failed: {e}").into(),
-                        rhai::Position::NONE,
-                    )))
+                    Ok(false)
                 }
             }
         });
@@ -883,15 +869,12 @@ fn register_host_functions(
                 }
             });
             let handle = bus.subscribe(pid.clone(), parse_event_filter(filter), callback);
-            host.callbacks.events.lock().unwrap().insert(
-                parse_event_filter(filter),
-                {
-                    let mut vec = Vec::new();
-                    vec.push(func.clone());
-                    vec
-                },
-            );
+            host.callbacks.events.lock().unwrap()
+                .entry(parse_event_filter(filter))
+                .or_default()
+                .push(func.clone());
             handle.to_string()
+
         });
     }
 }
@@ -1010,6 +993,15 @@ impl Plugin for RhaiPlugin {
                 let _: Result<(), Box<EvalAltResult>> =
                     self.engine.call_fn(scope, ast, "on_unload", ());
             }
+
+            // Explicitly clear registries to break Arc cycles between
+            // callbacks and the host/engine.
+            host.callbacks.indicators.lock().clear();
+            host.callbacks.metrics.lock().clear();
+            host.callbacks.keywords.lock().clear();
+            host.callbacks.schedules.lock().clear();
+            host.callbacks.events.lock().clear();
+            host.callbacks.schedule_failures.lock().clear();
         }
         self.host = None;
         self.scope = None;
