@@ -1,5 +1,0 @@
-WHEN rsi(14) < 30
-BUY 5
-
-WHEN rel_vol(14) > 70
-SELL ALL
