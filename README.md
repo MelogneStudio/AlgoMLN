@@ -4,6 +4,10 @@
 
 Built engine-first, not UI-first. Every layer is tested, deterministic, and production-grade before the next layer is added.
 
+> [!IMPORTANT]
+> AlgoMLN is getting a full rewrite in the branch [`AlgoMLN2`](https://github.com/MelogneStudio/AlgoMLN/tree/AlgoMLN2) due to some bugs too big to fix manually.
+
+
 ---
 
 ## Philosophy
