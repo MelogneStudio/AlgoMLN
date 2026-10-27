@@ -78,7 +78,7 @@ pub fn validate(s: &Strategy) -> Result<(), FrontendError> {
                 });
             }
         }
-        condition(&r.condition, &mut d);
+        condition(&r.condition, r.condition_span, &mut d);
     }
     if d.is_empty() {
         Ok(())
@@ -97,13 +97,18 @@ fn percent_valid(x: &Decimal) -> bool {
     let hundred = crate::source::NumericLiteral::parse("100".into(), x.span).unwrap();
     x.value.coefficient != "0" && !x.value.negative && x.compare_value(&hundred).is_le()
 }
-fn condition(c: &Condition, d: &mut Vec<Diagnostic>) {
+fn condition(c: &Condition, span: crate::source::Span, d: &mut Vec<Diagnostic>) {
     match c {
         Condition::And(a, b) | Condition::Or(a, b) => {
-            condition(a, d);
-            condition(b, d)
+            condition(a, span, d);
+            condition(b, span, d)
         }
-        Condition::Not(a) => condition(a, d),
+        Condition::Not(a) => condition(a, span, d),
+        Condition::InPosition => d.push(Diagnostic {
+            code: "VAL_UNSUPPORTED_PREDICATE",
+            message: "in_position() is parsed but not yet supported by the engine".into(),
+            span: Some(span),
+        }),
         Condition::Cross { left, right, .. } => {
             let a = matches!(left, NumericExpr::Indicator(_));
             let b = matches!(right, NumericExpr::Indicator(_));
@@ -123,24 +128,21 @@ fn condition(c: &Condition, d: &mut Vec<Diagnostic>) {
             validate_expr(left, d);
             validate_expr(right, d);
         }
-        Condition::Between { start, end }
-            if start.hour > 23 || end.hour > 23 || start.minute > 59 || end.minute > 59 =>
-        {
-            d.push(diag("VAL_TIME", "time must be within 00:00..23:59"))
+        Condition::Between { start, end } => {
+            d.push(Diagnostic {
+                code: "VAL_UNSUPPORTED_PREDICATE",
+                message: "between() is parsed but not yet supported by the engine".into(),
+                span: Some(span),
+            });
+            if start.hour > 23 || end.hour > 23 || start.minute > 59 || end.minute > 59 {
+                d.push(diag("VAL_TIME", "time must be within 00:00..23:59"));
+            } else if (start.hour, start.minute) > (end.hour, end.minute) {
+                d.push(diag(
+                    "VAL_TIME_ORDER",
+                    "start time must not follow end time",
+                ));
+            }
         }
-        Condition::Between { start, end }
-            if start.hour <= 23
-                && end.hour <= 23
-                && start.minute <= 59
-                && end.minute <= 59
-                && (start.hour, start.minute) > (end.hour, end.minute) =>
-        {
-            d.push(diag(
-                "VAL_TIME_ORDER",
-                "start time must not follow end time",
-            ))
-        }
-        _ => {}
     }
 }
 fn validate_expr(e: &NumericExpr, d: &mut Vec<Diagnostic>) {
