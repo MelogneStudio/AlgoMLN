@@ -85,7 +85,7 @@ impl<'a> Parser<'a> {
         self.newlines();
         let name = if self.take_word("STRATEGY") {
             match self.bump().kind {
-                TokenKind::Word(w) => {
+                TokenKind::Word(w) | TokenKind::String(w) => {
                     if !matches!(self.k(), TokenKind::Newline) {
                         return self.fail(
                             "strategy name is one identifier and header must end at newline",
@@ -238,6 +238,7 @@ impl<'a> Parser<'a> {
         loop {
             match self.bump().kind {
                 TokenKind::Word(w) if !w.eq_ignore_ascii_case("INDEX") => xs.push(w),
+                TokenKind::String(w) => xs.push(w),
                 _ => return self.fail("expected symbol or INDEX"),
             };
             if !matches!(self.k(), TokenKind::Comma) {
@@ -331,7 +332,7 @@ impl<'a> Parser<'a> {
         let n = self.number()?;
         let number_end = self.span().start;
         let amount = if self.take_word("WORTH") {
-            if n.starts_with(['-', '+']) || n.contains('.') {
+            if n.starts_with(['-', '+']) {
                 return self.fail("WORTH requires an unsigned decimal amount");
             }
             TradeAmount::Worth(self.decimal(n)?)
@@ -340,7 +341,11 @@ impl<'a> Parser<'a> {
                 return self.fail("% must immediately follow number");
             }
             self.bump();
-            TradeAmount::Percentage(self.decimal(n)?)
+            if buy {
+                TradeAmount::BuyCapitalPercentage(self.decimal(n)?)
+            } else {
+                TradeAmount::SellPositionPercentage(self.decimal(n)?)
+            }
         } else {
             let q = n.parse::<u64>().map_err(|_| FrontendError::Parse {
                 code: "PARSE_INTEGER",
@@ -638,6 +643,28 @@ mod tests {
         }
         assert!(!compile_err(
             "STRATEGY Momentum\nTRADE_IN INDEX NIFTY\n\nWHEN SMA(14) > 1\n\nBUY 00010\n"
+        ));
+    }
+    #[test]
+    fn quoted_symbols_fractional_worth_and_price_crossovers_parse() {
+        let s = crate::compile("TRADE_IN \"M&M\", \"BAJAJ-AUTO\", \"3MINDIA\", \"360ONE\"\nWHEN CROSS_ABOVE(close, ema(20))\nBUY 10.50 WORTH\nWHEN close > 0\nSELL 12.5%\n").unwrap();
+        assert_eq!(
+            s.trade_in,
+            TradeIn::Symbols(vec![
+                "M&M".into(),
+                "BAJAJ-AUTO".into(),
+                "3MINDIA".into(),
+                "360ONE".into()
+            ])
+        );
+        assert!(matches!(s.rules[0].condition, Condition::Cross { .. }));
+        assert!(matches!(
+            s.rules[0].action,
+            Action::Buy(TradeAmount::Worth(_))
+        ));
+        assert!(matches!(
+            s.rules[1].action,
+            Action::Sell(TradeAmount::SellPositionPercentage(_))
         ));
     }
     fn compile_err(s: &str) -> bool {

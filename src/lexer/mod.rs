@@ -8,6 +8,7 @@ pub struct Token {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Word(String),
+    String(String),
     Number(String),
     Time(String),
     LParen,
@@ -69,6 +70,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             continue;
         }
         if c.is_whitespace() {
+            if matches!(c, '\u{2028}' | '\u{2029}' | '\u{0085}') {
+                out.push(Token {
+                    kind: TokenKind::Newline,
+                    span: Span::new(i, i + c.len_utf8(), line, col),
+                });
+                i += c.len_utf8();
+                line += 1;
+                col = 1;
+                continue;
+            }
             i += c.len_utf8();
             col += 1;
             continue;
@@ -79,6 +90,54 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             '(' => {
                 i += 1;
                 TokenKind::LParen
+            }
+            '"' => {
+                i += 1;
+                let mut value = String::new();
+                let mut closed = false;
+                while i < source.len() {
+                    let ch = source[i..].chars().next().expect("valid UTF-8 boundary");
+                    if ch == '"' {
+                        i += 1;
+                        closed = true;
+                        break;
+                    }
+                    if matches!(ch, '\\' | '\n' | '\r') {
+                        return Err(err(
+                            "LEX_STRING",
+                            "invalid escape or newline in quoted identifier",
+                            line,
+                            start_col,
+                        ));
+                    }
+                    value.push(ch);
+                    i += ch.len_utf8();
+                }
+                if !closed {
+                    return Err(err(
+                        "LEX_STRING",
+                        "unterminated quoted identifier",
+                        line,
+                        start_col,
+                    ));
+                }
+                if value.is_empty() {
+                    return Err(err(
+                        "LEX_STRING",
+                        "quoted identifier cannot be empty",
+                        line,
+                        start_col,
+                    ));
+                }
+                if i - start > MAX_TOKEN_BYTES {
+                    return Err(err(
+                        "LEX_LIMIT",
+                        "quoted identifier exceeds 256-byte limit",
+                        line,
+                        start_col,
+                    ));
+                }
+                TokenKind::String(value)
             }
             ')' => {
                 i += 1;
@@ -146,6 +205,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                     i += 1;
                 }
                 if source[i..].starts_with(':') {
+                    let hour_digits = i - start;
                     i += 1;
                     let minute_start = i;
                     while source
@@ -155,7 +215,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                     {
                         i += 1;
                     }
-                    if i - minute_start != 2
+                    if hour_digits != 2
+                        || i - minute_start != 2
                         || source
                             .get(i..)
                             .and_then(|s| s.chars().next())
@@ -311,6 +372,27 @@ mod tests {
         assert!(lex("10:3").is_err());
         assert!(lex("# comment").is_err());
         assert!(lex("\rTRADE_IN A").is_err());
+        assert!(lex("09:30").is_ok());
+        assert!(lex("9:30").is_err());
+    }
+
+    #[test]
+    fn quoted_names_and_unicode_line_separators_are_lexed() {
+        assert!(matches!(
+            lex("\"M&M\"").unwrap()[0].kind,
+            TokenKind::String(_)
+        ));
+        assert!(matches!(
+            lex("\"BAJAJ-AUTO\"").unwrap()[0].kind,
+            TokenKind::String(_)
+        ));
+        assert!(matches!(
+            lex("\"360ONE\"").unwrap()[0].kind,
+            TokenKind::String(_)
+        ));
+        let tokens = lex("A\u{2028}B").unwrap();
+        assert!(matches!(tokens[1].kind, TokenKind::Newline));
+        assert_eq!(tokens[2].span.line, 2);
     }
     #[test]
     fn source_positions_and_limits_are_explicit() {

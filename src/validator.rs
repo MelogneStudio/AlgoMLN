@@ -46,10 +46,15 @@ pub fn validate(s: &Strategy) -> Result<(), FrontendError> {
                     message: "quantity must be positive".into(),
                     span: Some(r.span),
                 }),
-                TradeAmount::Worth(x) | TradeAmount::Percentage(x)
+                TradeAmount::Worth(x)
+                | TradeAmount::BuyCapitalPercentage(x)
+                | TradeAmount::SellPositionPercentage(x)
                     if !x.cmp_integer("0").is_some_and(|v| v.is_gt())
-                        || (matches!(amount, TradeAmount::Percentage(_))
-                            && !x.cmp_integer("100").is_some_and(|v| v.is_le())) =>
+                        || (matches!(
+                            amount,
+                            TradeAmount::BuyCapitalPercentage(_)
+                                | TradeAmount::SellPositionPercentage(_)
+                        ) && !x.cmp_integer("100").is_some_and(|v| v.is_le())) =>
                 {
                     d.push(Diagnostic {
                         code: "VAL_AMOUNT",
@@ -61,9 +66,8 @@ pub fn validate(s: &Strategy) -> Result<(), FrontendError> {
             }
         }
         if let Some(value) = match &r.action {
-            Action::Buy(TradeAmount::Percentage(x)) | Action::Sell(TradeAmount::Percentage(x)) => {
-                Some(x)
-            }
+            Action::Buy(TradeAmount::BuyCapitalPercentage(x))
+            | Action::Sell(TradeAmount::SellPositionPercentage(x)) => Some(x),
             _ => None,
         } {
             if !percent_valid(value) {
@@ -103,10 +107,13 @@ fn condition(c: &Condition, d: &mut Vec<Diagnostic>) {
         Condition::Cross { left, right, .. } => {
             let a = matches!(left, NumericExpr::Indicator(_));
             let b = matches!(right, NumericExpr::Indicator(_));
-            if !a || !b {
+            if (!a && !matches!(left, NumericExpr::Price(_)))
+                || (!b && !matches!(right, NumericExpr::Price(_)))
+                || (!a && !b)
+            {
                 d.push(diag(
                     "VAL_CROSS_TYPES",
-                    "crossovers require two indicator expressions",
+                    "crossovers require at least one indicator and otherwise price fields",
                 ));
             }
             validate_expr(left, d);

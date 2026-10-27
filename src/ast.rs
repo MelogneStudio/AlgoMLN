@@ -127,7 +127,8 @@ pub enum Action {
 pub enum TradeAmount {
     Quantity(u64),
     Worth(Decimal),
-    Percentage(Decimal),
+    BuyCapitalPercentage(Decimal),
+    SellPositionPercentage(Decimal),
 }
 
 #[cfg(test)]
@@ -143,7 +144,7 @@ mod tests {
             rules: vec![Rule {
                 id: "rule_1".into(),
                 condition: Condition::InPosition,
-                action: Action::Buy(TradeAmount::Percentage(
+                action: Action::Buy(TradeAmount::BuyCapitalPercentage(
                     Decimal::parse("2.5".into(), Span::default()).unwrap(),
                 )),
                 span: Span::default(),
