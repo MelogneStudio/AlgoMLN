@@ -1,0 +1,203 @@
+{
+  "name": null,
+  "trade_in": {
+    "Symbols": [
+      "RELIANCE",
+      "TCS"
+    ]
+  },
+  "stop_loss": null,
+  "take_profit": null,
+  "rules": [
+    {
+      "id": "rule_1",
+      "condition": {
+        "Compare": {
+          "left": {
+            "Price": "Close"
+          },
+          "op": "Gt",
+          "right": {
+            "Indicator": {
+              "kind": "BbUpper",
+              "period": 20,
+              "multiplier": {
+                "spelling": "2.0",
+                "value": {
+                  "negative": false,
+                  "coefficient": "2",
+                  "scale": 0
+                },
+                "span": {
+                  "start": 47,
+                  "end": 48,
+                  "line": 2,
+                  "column": 25
+                }
+              }
+            }
+          }
+        }
+      },
+      "action": {
+        "Sell": {
+          "Quantity": 10
+        }
+      },
+      "span": {
+        "start": 23,
+        "end": 56,
+        "line": 2,
+        "column": 1
+      },
+      "condition_span": {
+        "start": 28,
+        "end": 48,
+        "line": 2,
+        "column": 6
+      },
+      "action_span": {
+        "start": 49,
+        "end": 56,
+        "line": 3,
+        "column": 1
+      }
+    },
+    {
+      "id": "rule_2",
+      "condition": {
+        "Compare": {
+          "left": {
+            "Price": "Close"
+          },
+          "op": "Lt",
+          "right": {
+            "Indicator": {
+              "kind": "BbLower",
+              "period": 20,
+              "multiplier": {
+                "spelling": "2.0",
+                "value": {
+                  "negative": false,
+                  "coefficient": "2",
+                  "scale": 0
+                },
+                "span": {
+                  "start": 81,
+                  "end": 82,
+                  "line": 4,
+                  "column": 25
+                }
+              }
+            }
+          }
+        }
+      },
+      "action": {
+        "Buy": {
+          "Quantity": 10
+        }
+      },
+      "span": {
+        "start": 57,
+        "end": 89,
+        "line": 4,
+        "column": 1
+      },
+      "condition_span": {
+        "start": 62,
+        "end": 82,
+        "line": 4,
+        "column": 6
+      },
+      "action_span": {
+        "start": 83,
+        "end": 89,
+        "line": 5,
+        "column": 1
+      }
+    },
+    {
+      "id": "rule_3",
+      "condition": {
+        "And": [
+          {
+            "Compare": {
+              "left": {
+                "Indicator": {
+                  "kind": "Ema",
+                  "period": 9,
+                  "multiplier": null
+                }
+              },
+              "op": "Gt",
+              "right": {
+                "Indicator": {
+                  "kind": "Ema",
+                  "period": 21,
+                  "multiplier": null
+                }
+              }
+            }
+          },
+          {
+            "Compare": {
+              "left": {
+                "Indicator": {
+                  "kind": "Rsi",
+                  "period": 14,
+                  "multiplier": null
+                }
+              },
+              "op": "Lt",
+              "right": {
+                "Literal": {
+                  "spelling": "60",
+                  "value": {
+                    "negative": false,
+                    "coefficient": "60",
+                    "scale": 0
+                  },
+                  "span": {
+                    "start": 126,
+                    "end": 128,
+                    "line": 6,
+                    "column": 37
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "action": {
+        "Buy": {
+          "Quantity": 5
+        }
+      },
+      "span": {
+        "start": 90,
+        "end": 134,
+        "line": 6,
+        "column": 1
+      },
+      "condition_span": {
+        "start": 95,
+        "end": 128,
+        "line": 6,
+        "column": 6
+      },
+      "action_span": {
+        "start": 129,
+        "end": 134,
+        "line": 7,
+        "column": 1
+      }
+    }
+  ],
+  "risk": {
+    "max_orders": null,
+    "max_positions": null,
+    "max_daily_loss": null
+  }
+}

@@ -13,6 +13,9 @@ pub struct Strategy {
     pub risk: RiskConfig,
 }
 
+// Domain-explicit names for consumers that prefer the `*Node` vocabulary.
+pub type StrategyNode = Strategy;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TradeIn {
     Symbols(Vec<String>),
@@ -35,6 +38,7 @@ pub struct Rule {
     pub condition_span: Span,
     pub action_span: Span,
 }
+pub type RuleNode = Rule;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Condition {
@@ -57,6 +61,7 @@ pub enum Condition {
         end: Time,
     },
 }
+pub type ConditionNode = Condition;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NumericExpr {
@@ -123,6 +128,7 @@ pub enum Action {
     Sell(TradeAmount),
     SellAll,
 }
+pub type ActionNode = Action;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TradeAmount {
     Quantity(u64),
@@ -163,5 +169,22 @@ mod tests {
         assert_eq!(a.spelling, "001.500");
         assert_eq!(a.value, b.value);
         assert_eq!(a.cmp_integer("2"), Some(std::cmp::Ordering::Less));
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn parsed_ast_survives_serde_round_trip_and_reparse(period in 1u32..=1000, value in 1u32..=10000) {
+            let source = format!("TRADE_IN ABC\nWHEN ema({period}) > {value}\nBUY {value}\n");
+            let parsed = crate::compile(&source).unwrap();
+            let encoded = serde_json::to_vec(&parsed).unwrap();
+            let decoded: crate::ast::Strategy = serde_json::from_slice(&encoded).unwrap();
+            prop_assert_eq!(&parsed, &decoded);
+            prop_assert_eq!(crate::compile(&source).unwrap(), decoded);
+        }
     }
 }

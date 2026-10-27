@@ -76,6 +76,15 @@ impl<'a> Parser<'a> {
             span: p,
         })
     }
+    fn fail_at<T>(&self, msg: &str, span: Span) -> Result<T, FrontendError> {
+        Err(FrontendError::Parse {
+            code: "PARSE_SYNTAX",
+            message: msg.into(),
+            line: span.line,
+            column: span.column,
+            span,
+        })
+    }
     fn newlines(&mut self) {
         while matches!(self.k(), TokenKind::Newline) {
             self.bump();
@@ -122,9 +131,10 @@ impl<'a> Parser<'a> {
             if self.take_word("TRADE_IN") {
                 return self.fail("duplicate TRADE_IN declaration");
             }
-            if self.take_word("STOP_LOSS") {
+            if self.word("STOP_LOSS") {
+                let declaration_span = self.bump().span;
                 if stop_loss.is_some() {
-                    return self.fail("duplicate STOP_LOSS");
+                    return self.fail_at("duplicate STOP_LOSS", declaration_span);
                 }
                 stop_loss = Some(self.percent()?);
                 if !matches!(self.k(), TokenKind::Newline | TokenKind::Eof) {
@@ -133,9 +143,10 @@ impl<'a> Parser<'a> {
                 self.newlines();
                 continue;
             }
-            if self.take_word("TAKE_PROFIT") {
+            if self.word("TAKE_PROFIT") {
+                let declaration_span = self.bump().span;
                 if take_profit.is_some() {
-                    return self.fail("duplicate TAKE_PROFIT");
+                    return self.fail_at("duplicate TAKE_PROFIT", declaration_span);
                 }
                 take_profit = Some(self.percent()?);
                 if !matches!(self.k(), TokenKind::Newline | TokenKind::Eof) {

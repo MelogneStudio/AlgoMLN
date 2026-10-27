@@ -44,7 +44,7 @@ pub fn validate(s: &Strategy) -> Result<(), FrontendError> {
                 TradeAmount::Quantity(q) if *q == 0 => d.push(Diagnostic {
                     code: "VAL_AMOUNT",
                     message: "quantity must be positive".into(),
-                    span: Some(r.span),
+                    span: Some(r.action_span),
                 }),
                 TradeAmount::Worth(x)
                 | TradeAmount::BuyCapitalPercentage(x)
@@ -59,7 +59,7 @@ pub fn validate(s: &Strategy) -> Result<(), FrontendError> {
                     d.push(Diagnostic {
                         code: "VAL_AMOUNT",
                         message: "amount and percentage must be positive".into(),
-                        span: Some(r.span),
+                        span: Some(r.action_span),
                     })
                 }
                 _ => {}
@@ -135,12 +135,17 @@ fn condition(c: &Condition, span: crate::source::Span, d: &mut Vec<Diagnostic>) 
                 span: Some(span),
             });
             if start.hour > 23 || end.hour > 23 || start.minute > 59 || end.minute > 59 {
-                d.push(diag("VAL_TIME", "time must be within 00:00..23:59"));
+                d.push(Diagnostic {
+                    code: "VAL_TIME",
+                    message: "time must be within 00:00..23:59".into(),
+                    span: Some(span),
+                });
             } else if (start.hour, start.minute) > (end.hour, end.minute) {
-                d.push(diag(
-                    "VAL_TIME_ORDER",
-                    "start time must not follow end time",
-                ));
+                d.push(Diagnostic {
+                    code: "VAL_TIME_ORDER",
+                    message: "start time must not follow end time".into(),
+                    span: Some(span),
+                });
             }
         }
     }
@@ -204,6 +209,15 @@ mod tests {
         ] {
             let s = parse(&lex(src).unwrap()).unwrap();
             assert!(validate(&s).is_err());
+        }
+    }
+    #[test]
+    fn unsupported_predicates_fail_compile_with_spans() {
+        for predicate in ["in_position()", "between(09:30, 15:30)"] {
+            let error =
+                crate::compile(&format!("TRADE_IN ABC\nWHEN {predicate}\nBUY 1\n")).unwrap_err();
+            assert_eq!(error.code(), "VAL_UNSUPPORTED_PREDICATE");
+            assert!(error.span().is_some());
         }
     }
     #[test]

@@ -123,7 +123,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 }
                 if value.is_empty() {
                     return Err(err(
-                        "LEX_STRING",
+                        "LEX_EMPTY_IDENTIFIER",
                         "quoted identifier cannot be empty",
                         line,
                         start_col,
@@ -393,6 +393,8 @@ mod tests {
         let tokens = lex("A\u{2028}B").unwrap();
         assert!(matches!(tokens[1].kind, TokenKind::Newline));
         assert_eq!(tokens[2].span.line, 2);
+        let empty = lex("\"\"").unwrap_err();
+        assert_eq!(empty.code(), "LEX_EMPTY_IDENTIFIER");
     }
     #[test]
     fn source_positions_and_limits_are_explicit() {

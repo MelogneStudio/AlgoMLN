@@ -12,6 +12,10 @@ thiserror = "2"
 
 [dev-dependencies]
 serde_json = "1"
+proptest = "1"
 
 [lib]
 path = "src/lib.rs"
+
+[workspace]
+exclude = ["fuzz"]
