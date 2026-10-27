@@ -8,6 +8,13 @@ pub struct Diagnostic {
     pub span: Option<Span>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorStage {
+    Lexing,
+    Parsing,
+    Validation,
+}
+
 #[derive(Debug, Error)]
 pub enum FrontendError {
     #[error("lex error {code} at {line}:{column}: {message}")]
@@ -16,6 +23,7 @@ pub enum FrontendError {
         message: String,
         line: u32,
         column: u32,
+        span: Span,
     },
     #[error("parse error {code} at {line}:{column}: {message}")]
     Parse {
@@ -23,6 +31,7 @@ pub enum FrontendError {
         message: String,
         line: u32,
         column: u32,
+        span: Span,
     },
     #[error("validation failed: {0:?}")]
     Validation(Vec<Diagnostic>),

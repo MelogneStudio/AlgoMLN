@@ -1,14 +1,14 @@
 //! Typed, serializable syntax tree. Decimal values are stored as their exact
 //! source spelling to avoid floating point rounding in the frontend.
-use crate::source::Span;
+use crate::source::{NumericLiteral, Span};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Strategy {
     pub name: Option<String>,
     pub trade_in: TradeIn,
-    pub stop_loss: Option<Decimal>,
-    pub take_profit: Option<Decimal>,
+    pub stop_loss: Option<NumericLiteral>,
+    pub take_profit: Option<NumericLiteral>,
     pub rules: Vec<Rule>,
     pub risk: RiskConfig,
 }
@@ -23,7 +23,7 @@ pub enum TradeIn {
 pub struct RiskConfig {
     pub max_orders: Option<u64>,
     pub max_positions: Option<u64>,
-    pub max_daily_loss: Option<Decimal>,
+    pub max_daily_loss: Option<NumericLiteral>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +32,8 @@ pub struct Rule {
     pub condition: Condition,
     pub action: Action,
     pub span: Span,
+    pub condition_span: Span,
+    pub action_span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,8 +65,7 @@ pub enum NumericExpr {
     Indicator(IndicatorCall),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Decimal(pub String);
+pub type Decimal = NumericLiteral;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PriceField {
@@ -142,12 +143,24 @@ mod tests {
             rules: vec![Rule {
                 id: "rule_1".into(),
                 condition: Condition::InPosition,
-                action: Action::Buy(TradeAmount::Percentage(Decimal("2.5".into()))),
+                action: Action::Buy(TradeAmount::Percentage(
+                    Decimal::parse("2.5".into(), Span::default()).unwrap(),
+                )),
                 span: Span::default(),
+                condition_span: Span::default(),
+                action_span: Span::default(),
             }],
             risk: RiskConfig::default(),
         };
         let value = serde_json::to_value(&strategy).unwrap();
         assert_eq!(serde_json::from_value::<Strategy>(value).unwrap(), strategy);
+    }
+    #[test]
+    fn exact_decimal_keeps_spelling_and_normalizes_value() {
+        let a = crate::source::NumericLiteral::parse("001.500".into(), Span::default()).unwrap();
+        let b = crate::source::NumericLiteral::parse("1.5".into(), Span::default()).unwrap();
+        assert_eq!(a.spelling, "001.500");
+        assert_eq!(a.value, b.value);
+        assert_eq!(a.cmp_integer("2"), Some(std::cmp::Ordering::Less));
     }
 }

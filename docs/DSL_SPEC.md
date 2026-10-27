@@ -4,9 +4,11 @@ This file defines the language accepted by this crate. The supplied requirements
 
 ## Lexical contract
 
-Keywords are case-insensitive ASCII words; symbols and strategy names preserve spelling. Identifiers begin with a Unicode alphabetic character or `_` and continue with Unicode alphanumeric characters or `_`. Whitespace separates tokens; LF and CRLF are declaration/rule separators. Blank lines are ignored. `#` comments are not supported. Columns are one-based Unicode scalar counts and spans also retain UTF-8 byte offsets. A final newline is optional.
+Keywords, price fields, indicator names, and crossover names are ASCII case-insensitive. Strategy names, symbols, and index aliases preserve source spelling and are opaque; no Unicode normalization or confusable-character mapping is performed. Identifiers begin with a Unicode alphabetic scalar or `_` and continue with Unicode alphanumeric scalars or `_`. Columns count Unicode scalars (including a tab as one scalar, not visual tab stops), not grapheme clusters; spans also retain UTF-8 byte offsets. Space, tab, and Unicode whitespace separate tokens. LF and CRLF are accepted, including mixed styles; lone CR is `LEX_NEWLINE`. Blank lines are ignored. `#` is rejected as `LEX_CHAR`; comments are not supported. A final newline is optional.
 
-Numbers are unsigned decimal spellings lexically; unary `+`/`-` is accepted in numeric positions. Integers are digits; decimals require digits on both sides of `.`. No exponent, NaN, infinity, leading/trailing decimal point, or separator is supported. Leading zeroes are retained. A number adjacent to identifier characters is an error. `%` is a separate immediately adjacent suffix. Times are `HH:MM`, validated semantically as 00:00–23:59. Operators are `< > <= >= == !=`; standalone `=` and `!` are invalid. Punctuation includes `(`, `)`, `,`, `%`, `+`, `-`.
+Numbers are unsigned decimal tokens; unary `+`/`-` is accepted by numeric grammar positions only. Integers are digits; decimals require digits on both sides of `.`. No exponent, NaN, infinity, or separator is supported. Leading zeroes are retained. A number adjacent to identifier characters, another dot, or exponent-like text is a `LEX_NUMBER` error. `%` is a separate immediately adjacent suffix; whitespace before it is a parse error. Times require exactly two digits on each side of `:` and are validated as 00:00–23:59. Operators are `< > <= >= == !=`; standalone `=` and `!` are `LEX_OPERATOR`. `#` is `LEX_CHAR`. Punctuation includes `(`, `)`, `,`, `%`, `+`, `-`.
+
+Resource limits: source 1 MiB, 100,000 tokens, and each identifier or numeric/time token 256 UTF-8 bytes. Exceeding a limit returns `LEX_LIMIT`. Parser nesting is capped at 128 constructs (`PARSE_DEPTH`).
 
 ## Grammar (EBNF)
 
@@ -18,11 +20,11 @@ declaration = "STOP_LOSS", signed_number, "%", newline
             | "TAKE_PROFIT", signed_number, "%", newline
             | "RISK", ("MAX_ORDERS" | "MAX_POSITIONS"), integer, newline
             | "RISK", "MAX_DAILY_LOSS", signed_number, "%", newline ;
-rule = "WHEN", condition, newline, action, newline ;
+rule = "WHEN", condition, newline, { newline }, action, (newline | EOF) ;
 condition = disjunction ;
 disjunction = conjunction, { "OR", conjunction } ;
 conjunction = unary, { "AND", unary } ;
-unary = ["NOT"], ("(", condition, ")" | predicate) ;
+unary = {"NOT"}, ("(", condition, ")" | predicate) ;
 predicate = numeric, comparison, numeric
           | ("CROSS_ABOVE" | "CROSS_BELOW" | cross_function), "(", numeric, ",", numeric, ")"
           | "IN_POSITION", "(", ")"
@@ -42,20 +44,20 @@ signed_number = ["+" | "-"], number ; integer = digit, { digit } ;
 time = digit, digit, ":", digit, digit ; identifier = letter_or_underscore, { letter_digit_or_underscore } ;
 ```
 
-`AND` binds more tightly than `OR`; both are left-associative. `NOT` binds more tightly than either and applies to a parenthesized condition or predicate. Numeric comparisons bind within predicates. Function calls and parentheses bind highest. Thus `A AND B OR C` means `(A AND B) OR C`.
+`AND` binds more tightly than `OR`; both are left-associative. Repeated `NOT` is permitted and nests right-to-left. `NOT` binds more tightly than either and applies to a parenthesized condition or predicate. Numeric comparisons bind within predicates; chained comparisons are rejected. Function calls and parentheses bind highest. Thus `A AND B OR C` means `(A AND B) OR C`.
 
 ## Declarations and AST mapping
 
-`TRADE_IN` is required and comes first (after optional `STRATEGY name`). An index is written `TRADE_IN INDEX alias`; otherwise a comma-separated explicit symbol list is used. Global stop/take/risk declarations may appear anywhere after the header, including between rules, but each setting may occur at most once. Rules and their `rule_1`, `rule_2`, … IDs preserve source order. Each rule is `WHEN condition` followed by an action on the next nonempty line. Conditions cannot span lines in v0.1. Rule/action expressions are represented by typed AST variants. Numeric source spellings are retained as strings for exact decimal round-trip.
+`TRADE_IN` is required exactly once and comes first (after optional `STRATEGY name`); the strategy name is one identifier and its header is only legal at the beginning. An index is written `TRADE_IN INDEX alias`; otherwise a comma-separated explicit symbol list is used. Duplicate symbols are retained in order. Global stop/take/risk declarations may appear anywhere after the header, including between rules, but each setting may occur at most once. Rules and their `rule_1`, `rule_2`, … IDs preserve source order. Each rule is `WHEN condition` followed by an action on the next nonempty line. Conditions cannot span lines in v0.1. Each AST decimal retains its original spelling and exact coefficient/scale; numeric equality and bounds use exact base-10 comparison. Serde encodes the AST structure and spelling, not original whitespace/capitalization/parentheses; canonical formatting and exact source reproduction are separate and not provided.
 
-Price fields are enumerated above; `prev_*` denotes a prior observation without defining offset/history availability. All indicators require a positive integer period. Bollinger functions accept `period` and optional positive multiplier; default multiplier is 2.0. Other indicators accept exactly one period. Runtime calculation is not part of the frontend. Crossover accepts exactly two indicator invocations; mixed literal/indicator and literal/literal are rejected. `in_position()` and `between(HH:MM, HH:MM)` are represented but require future engine capabilities. Time windows are inclusive syntax with no wrap-around semantics specified.
+Price fields are enumerated above; `prev_*` denotes a prior observation without defining offset/history availability. All indicators require a positive `u32` integer period. Period zero, negative/fractional periods, and values above `u32::MAX` are rejected; all positive periods are syntactically supported and practical history requirements belong to runtime. Bollinger functions accept `period` and optional positive decimal multiplier; omitted multiplier is represented by effective `2.0`, so omitted and explicit `2.0` have equal ASTs. Other indicators accept exactly one period. Runtime calculation is not part of the frontend. Crossover accepts exactly two indicator invocations; mixed literal/indicator and literal/literal are rejected. `in_position()` and `between(HH:MM, HH:MM)` are represented but require future engine capabilities. Equal endpoints are allowed; start-after-end is rejected because wrap-around is not supported. Timezone/session interpretation remains engine work.
 
-Actions distinguish integer quantity, decimal `WORTH`, percentage, and `SELL ALL`. Quantities must be positive; worth and percentage must be positive; percentages and stop/take/risk daily-loss are `(0,100]`. Risk integer limits are positive. A strategy needs one or more rules. External symbol/index resolution is out of scope. Engine edge triggering, risk enforcement, crossover state, fills, and stop/take execution remain future work.
+Actions distinguish integer quantity, decimal `WORTH`, percentage, and `SELL ALL`. Quantities are positive `u64` integer spellings; worth is a positive exact decimal amount in an unspecified account-currency unit; percentage is exact decimal `(0,100]`. Stop/take/risk daily-loss are `(0,100]`. Risk integer limits are positive `u64`. A strategy needs one or more rules after validation. Explicit source ASTs may be built before validation and are not guaranteed valid; a successful `compile()` guarantees these syntax and frontend semantic invariants. External symbol/index resolution is out of scope. Engine edge triggering, risk enforcement, crossover state, fills, and stop/take execution remain future work.
 
 ## Diagnostics and limits
 
-The lexer/parser stop at the first unrecoverable error and return a structured stage/code/location; no partial AST is successful. The parser requires EOF. Duplicate global settings are parse errors. Validation errors carry stable codes and spans when available. Unsupported names, punctuation, malformed numbers, trailing tokens and invalid UTF-8 character positions cannot be silently ignored. Implementation currently uses recursive descent; a nesting/resource limit and fuzz harness are future hardening work.
+The lexer/parser stop at the first unrecoverable error and return a structured stage/code/location/span; no partial AST is successful. Error spans cover offending tokens; missing-token errors use a zero-width span at the insertion point (EOF included). The parser requires EOF. Duplicate global settings are parse errors at the second declaration. Validation errors carry stable codes and spans. Unsupported names, punctuation, malformed numbers, trailing tokens and invalid UTF-8 character positions cannot be silently ignored. Fuzzing and property-based tests remain separate follow-up work.
 
 ## Known limitations / unresolved source ambiguities
 
-The source brief does not establish exact header spelling, list delimiters, index aliases, comment syntax, action-line boundaries, Bollinger defaults, or lowercase crossover call aliases. v0.1 chooses the forms above. Symbols are opaque identifiers; no exchange normalization is performed. Decimal validation currently uses finite `f64` range checks, while AST serialization preserves original spelling.
+The source brief does not establish exact header spelling, list delimiters, index aliases, comment syntax, action-line boundaries, Bollinger defaults, or lowercase crossover call aliases. v0.1 chooses the forms above. Symbols are opaque identifiers; no exchange normalization is performed. AST serialization preserves numeric spelling, but does not reproduce original source formatting.

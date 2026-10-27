@@ -13,7 +13,12 @@ pub fn validate(s: &Strategy) -> Result<(), FrontendError> {
         ("MAX_DAILY_LOSS", s.risk.max_daily_loss.as_ref()),
     ] {
         if v.is_some_and(|x| !percent_valid(x)) {
-            d.push(diag("VAL_PERCENT", format!("{name} must be in (0, 100]")));
+            let value = v.unwrap();
+            d.push(Diagnostic {
+                code: "VAL_PERCENT",
+                message: format!("{name} must be in (0, 100]"),
+                span: Some(value.span),
+            });
         }
     }
     if s.risk.max_orders == Some(0) || s.risk.max_positions == Some(0) {
@@ -42,7 +47,9 @@ pub fn validate(s: &Strategy) -> Result<(), FrontendError> {
                     span: Some(r.span),
                 }),
                 TradeAmount::Worth(x) | TradeAmount::Percentage(x)
-                    if !decimal_cmp(&x.0, "0").is_some_and(|v| v > 0) =>
+                    if !x.cmp_integer("0").is_some_and(|v| v.is_gt())
+                        || (matches!(amount, TradeAmount::Percentage(_))
+                            && !x.cmp_integer("100").is_some_and(|v| v.is_le())) =>
                 {
                     d.push(Diagnostic {
                         code: "VAL_AMOUNT",
@@ -51,6 +58,20 @@ pub fn validate(s: &Strategy) -> Result<(), FrontendError> {
                     })
                 }
                 _ => {}
+            }
+        }
+        if let Some(value) = match &r.action {
+            Action::Buy(TradeAmount::Percentage(x)) | Action::Sell(TradeAmount::Percentage(x)) => {
+                Some(x)
+            }
+            _ => None,
+        } {
+            if !percent_valid(value) {
+                d.push(Diagnostic {
+                    code: "VAL_PERCENT",
+                    message: "action percentage must be in (0, 100]".into(),
+                    span: Some(r.action_span),
+                });
             }
         }
         condition(&r.condition, &mut d);
@@ -69,57 +90,8 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
     }
 }
 fn percent_valid(x: &Decimal) -> bool {
-    decimal_cmp(&x.0, "0").is_some_and(|v| v > 0)
-        && decimal_cmp(&x.0, "100").is_some_and(|v| v <= 0)
-}
-fn decimal_cmp(a: &str, b: &str) -> Option<i8> {
-    fn parts(s: &str) -> Option<(bool, String, String)> {
-        let (neg, s) = if let Some(x) = s.strip_prefix('-') {
-            (true, x)
-        } else {
-            (false, s.strip_prefix('+').unwrap_or(s))
-        };
-        let mut split = s.split('.');
-        let whole = split.next()?;
-        let frac = split.next().unwrap_or("");
-        if split.next().is_some()
-            || whole.is_empty()
-            || !whole.bytes().all(|x| x.is_ascii_digit())
-            || !frac.bytes().all(|x| x.is_ascii_digit())
-        {
-            return None;
-        }
-        let whole = whole.trim_start_matches('0');
-        let frac = frac.trim_end_matches('0');
-        Some((
-            neg,
-            if whole.is_empty() { "0" } else { whole }.to_owned(),
-            frac.to_owned(),
-        ))
-    }
-    let (an, aw, af) = parts(a)?;
-    let (bn, bw, bf) = parts(b)?;
-    if an != bn {
-        return Some(if an { -1 } else { 1 });
-    }
-    let mag = aw
-        .len()
-        .cmp(&bw.len())
-        .then_with(|| aw.cmp(&bw))
-        .then_with(|| {
-            let n = af.len().max(bf.len());
-            af.chars()
-                .chain(std::iter::repeat('0'))
-                .take(n)
-                .cmp(bf.chars().chain(std::iter::repeat('0')).take(n))
-        });
-    Some(match (an, mag) {
-        (true, std::cmp::Ordering::Less) => 1,
-        (true, std::cmp::Ordering::Greater) => -1,
-        (false, std::cmp::Ordering::Less) => -1,
-        (false, std::cmp::Ordering::Greater) => 1,
-        _ => 0,
-    })
+    let hundred = crate::source::NumericLiteral::parse("100".into(), x.span).unwrap();
+    x.value.coefficient != "0" && !x.value.negative && x.compare_value(&hundred).is_le()
 }
 fn condition(c: &Condition, d: &mut Vec<Diagnostic>) {
     match c {
@@ -137,13 +109,61 @@ fn condition(c: &Condition, d: &mut Vec<Diagnostic>) {
                     "crossovers require two indicator expressions",
                 ));
             }
+            validate_expr(left, d);
+            validate_expr(right, d);
+        }
+        Condition::Compare { left, right, .. } => {
+            validate_expr(left, d);
+            validate_expr(right, d);
         }
         Condition::Between { start, end }
             if start.hour > 23 || end.hour > 23 || start.minute > 59 || end.minute > 59 =>
         {
             d.push(diag("VAL_TIME", "time must be within 00:00..23:59"))
         }
+        Condition::Between { start, end }
+            if start.hour <= 23
+                && end.hour <= 23
+                && start.minute <= 59
+                && end.minute <= 59
+                && (start.hour, start.minute) > (end.hour, end.minute) =>
+        {
+            d.push(diag(
+                "VAL_TIME_ORDER",
+                "start time must not follow end time",
+            ))
+        }
         _ => {}
+    }
+}
+fn validate_expr(e: &NumericExpr, d: &mut Vec<Diagnostic>) {
+    if let NumericExpr::Indicator(i) = e {
+        if i.period == 0 {
+            d.push(diag(
+                "VAL_INDICATOR_PERIOD",
+                "indicator period must be positive",
+            ));
+        }
+        if matches!(
+            i.kind,
+            IndicatorKind::BbUpper | IndicatorKind::BbLower | IndicatorKind::BbMid
+        ) {
+            if !i
+                .multiplier
+                .as_ref()
+                .is_some_and(|m| m.cmp_integer("0").is_some_and(|v| v.is_gt()))
+            {
+                d.push(diag(
+                    "VAL_BB_MULTIPLIER",
+                    "Bollinger multiplier must be positive",
+                ));
+            }
+        } else if i.multiplier.is_some() {
+            d.push(diag(
+                "VAL_INDICATOR_ARITY",
+                "this indicator takes exactly one argument",
+            ));
+        }
     }
 }
 
@@ -175,6 +195,18 @@ mod tests {
         ] {
             let s = parse(&lex(src).unwrap()).unwrap();
             assert!(validate(&s).is_err());
+        }
+    }
+    #[test]
+    fn extreme_exact_percentages_do_not_round_through_float() {
+        for x in [
+            "0.00000000000000000000000000000001",
+            "100.0000000000000000000000000001",
+        ] {
+            let literal =
+                crate::source::NumericLiteral::parse(x.to_string(), crate::source::Span::default())
+                    .unwrap();
+            assert_eq!(percent_valid(&literal), x.starts_with("0."), "{x}");
         }
     }
 }

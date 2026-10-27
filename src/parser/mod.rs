@@ -2,7 +2,7 @@ use crate::{
     ast::*,
     diagnostics::FrontendError,
     lexer::{Token, TokenKind},
-    source::Span,
+    source::{NumericLiteral, Span},
 };
 
 pub fn parse(tokens: &[Token]) -> Result<Strategy, FrontendError> {
@@ -26,6 +26,35 @@ impl<'a> Parser<'a> {
         }
         x
     }
+    fn nesting(&self) -> usize {
+        let mut depth = 0usize;
+        let mut max = 0usize;
+        for t in self.t[..self.i.min(self.t.len())].iter() {
+            match t.kind {
+                TokenKind::LParen => {
+                    depth += 1;
+                    max = max.max(depth)
+                }
+                TokenKind::RParen => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        max
+    }
+    fn check_depth(&self) -> Result<(), FrontendError> {
+        if self.nesting() > 128 {
+            let p = self.span();
+            Err(FrontendError::Parse {
+                code: "PARSE_DEPTH",
+                message: "nesting exceeds 128 levels".into(),
+                line: p.line,
+                column: p.column,
+                span: p,
+            })
+        } else {
+            Ok(())
+        }
+    }
     fn word(&self, s: &str) -> bool {
         matches!(self.k(),TokenKind::Word(w) if w.eq_ignore_ascii_case(s))
     }
@@ -44,6 +73,7 @@ impl<'a> Parser<'a> {
             message: msg.into(),
             line: p.line,
             column: p.column,
+            span: p,
         })
     }
     fn newlines(&mut self) {
@@ -56,6 +86,11 @@ impl<'a> Parser<'a> {
         let name = if self.take_word("STRATEGY") {
             match self.bump().kind {
                 TokenKind::Word(w) => {
+                    if !matches!(self.k(), TokenKind::Newline) {
+                        return self.fail(
+                            "strategy name is one identifier and header must end at newline",
+                        );
+                    }
                     self.newlines();
                     Some(w)
                 }
@@ -68,6 +103,9 @@ impl<'a> Parser<'a> {
             return self.fail("expected TRADE_IN declaration");
         }
         let trade_in = self.trade_in()?;
+        if !matches!(self.k(), TokenKind::Newline | TokenKind::Eof) {
+            return self.fail("TRADE_IN must end at newline");
+        }
         self.newlines();
         let mut stop_loss = None;
         let mut take_profit = None;
@@ -78,11 +116,20 @@ impl<'a> Parser<'a> {
             if matches!(self.k(), TokenKind::Eof) {
                 break;
             }
+            if self.take_word("STRATEGY") {
+                return self.fail("STRATEGY is only allowed before TRADE_IN");
+            }
+            if self.take_word("TRADE_IN") {
+                return self.fail("duplicate TRADE_IN declaration");
+            }
             if self.take_word("STOP_LOSS") {
                 if stop_loss.is_some() {
                     return self.fail("duplicate STOP_LOSS");
                 }
                 stop_loss = Some(self.percent()?);
+                if !matches!(self.k(), TokenKind::Newline | TokenKind::Eof) {
+                    return self.fail("unexpected token after declaration");
+                }
                 self.newlines();
                 continue;
             }
@@ -91,6 +138,9 @@ impl<'a> Parser<'a> {
                     return self.fail("duplicate TAKE_PROFIT");
                 }
                 take_profit = Some(self.percent()?);
+                if !matches!(self.k(), TokenKind::Newline | TokenKind::Eof) {
+                    return self.fail("unexpected token after declaration");
+                }
                 self.newlines();
                 continue;
             }
@@ -120,16 +170,25 @@ impl<'a> Parser<'a> {
                     }
                     _ => return self.fail("unknown risk setting"),
                 };
+                if !matches!(self.k(), TokenKind::Newline | TokenKind::Eof) {
+                    return self.fail("unexpected token after risk declaration");
+                }
                 self.newlines();
                 continue;
             }
             if self.take_word("WHEN") {
                 let start = self.t[self.i - 1].span;
+                let condition_start = self.span();
                 let condition = self.condition()?;
+                let condition_end = self.t[self.i - 1].span;
                 if !matches!(self.k(), TokenKind::Newline) {
                     return self.fail("rule condition must end at newline");
                 }
                 self.newlines();
+                if matches!(self.k(), TokenKind::Eof) {
+                    return self.fail("expected action after condition");
+                }
+                let action_start = self.span();
                 let action = self.action()?;
                 let end = self.t[self.i - 1].span;
                 let n = rules.len() + 1;
@@ -138,6 +197,18 @@ impl<'a> Parser<'a> {
                     condition,
                     action,
                     span: Span::new(start.start, end.end, start.line, start.column),
+                    condition_span: Span::new(
+                        condition_start.start,
+                        condition_end.end,
+                        condition_start.line,
+                        condition_start.column,
+                    ),
+                    action_span: Span::new(
+                        action_start.start,
+                        end.end,
+                        action_start.line,
+                        action_start.column,
+                    ),
                 });
                 if !matches!(self.k(), TokenKind::Newline | TokenKind::Eof) {
                     return self.fail("expected newline after action");
@@ -166,7 +237,7 @@ impl<'a> Parser<'a> {
         let mut xs = Vec::new();
         loop {
             match self.bump().kind {
-                TokenKind::Word(w) => xs.push(w),
+                TokenKind::Word(w) if !w.eq_ignore_ascii_case("INDEX") => xs.push(w),
                 _ => return self.fail("expected symbol or INDEX"),
             };
             if !matches!(self.k(), TokenKind::Comma) {
@@ -181,12 +252,37 @@ impl<'a> Parser<'a> {
         }
     }
     fn percent(&mut self) -> Result<Decimal, FrontendError> {
+        let token_start = self.span();
         let n = self.number()?;
         if !matches!(self.k(), TokenKind::Percent) {
             return self.fail("expected %");
         };
+        if self.i > 0 && self.t[self.i - 1].span.end != self.span().start {
+            return self.fail("% must immediately follow number");
+        }
         self.bump();
-        Ok(Decimal(n))
+        let end = self.t[self.i - 1].span.end;
+        NumericLiteral::parse(
+            n,
+            Span::new(token_start.start, end, token_start.line, token_start.column),
+        )
+        .ok_or_else(|| FrontendError::Parse {
+            code: "PARSE_NUMBER",
+            message: "invalid decimal".into(),
+            line: token_start.line,
+            column: token_start.column,
+            span: token_start,
+        })
+    }
+    fn decimal(&self, n: String) -> Result<Decimal, FrontendError> {
+        let span = self.t[self.i.saturating_sub(1)].span;
+        NumericLiteral::parse(n, span).ok_or_else(|| FrontendError::Parse {
+            code: "PARSE_NUMBER",
+            message: "invalid decimal".into(),
+            line: span.line,
+            column: span.column,
+            span,
+        })
     }
     fn number(&mut self) -> Result<String, FrontendError> {
         let sign = if matches!(self.k(), TokenKind::Minus | TokenKind::Plus) {
@@ -215,6 +311,7 @@ impl<'a> Parser<'a> {
             message: "integer out of range".into(),
             line: self.span().line,
             column: self.span().column,
+            span: self.span(),
         })
     }
     fn action(&mut self) -> Result<Action, FrontendError> {
@@ -226,23 +323,37 @@ impl<'a> Parser<'a> {
             return self.fail("expected BUY or SELL action");
         };
         if !buy && self.take_word("ALL") {
+            if !matches!(self.k(), TokenKind::Newline | TokenKind::Eof) {
+                return self.fail("SELL ALL cannot have an amount or suffix");
+            }
             return Ok(Action::SellAll);
         }
         let n = self.number()?;
+        let number_end = self.span().start;
         let amount = if self.take_word("WORTH") {
-            TradeAmount::Worth(Decimal(n))
+            if n.starts_with(['-', '+']) || n.contains('.') {
+                return self.fail("WORTH requires an unsigned decimal amount");
+            }
+            TradeAmount::Worth(self.decimal(n)?)
         } else if matches!(self.k(), TokenKind::Percent) {
+            if number_end != self.span().start {
+                return self.fail("% must immediately follow number");
+            }
             self.bump();
-            TradeAmount::Percentage(Decimal(n))
+            TradeAmount::Percentage(self.decimal(n)?)
         } else {
             let q = n.parse::<u64>().map_err(|_| FrontendError::Parse {
                 code: "PARSE_INTEGER",
                 message: "quantity must be a nonnegative integer".into(),
                 line: self.span().line,
                 column: self.span().column,
+                span: self.span(),
             })?;
             TradeAmount::Quantity(q)
         };
+        if !matches!(self.k(), TokenKind::Newline | TokenKind::Eof) {
+            return self.fail("unexpected token after action");
+        }
         Ok(if buy {
             Action::Buy(amount)
         } else {
@@ -268,10 +379,19 @@ impl<'a> Parser<'a> {
     }
     fn not(&mut self) -> Result<Condition, FrontendError> {
         if self.take_word("NOT") {
-            return Ok(Condition::Not(Box::new(self.not()?)));
+            let mut count = 1;
+            while self.take_word("NOT") {
+                count += 1;
+            }
+            let mut c = self.not()?;
+            for _ in 0..count {
+                c = Condition::Not(Box::new(c));
+            }
+            return Ok(c);
         }
         if matches!(self.k(), TokenKind::LParen) {
             self.bump();
+            self.check_depth()?;
             let x = self.condition()?;
             if !matches!(self.k(), TokenKind::RParen) {
                 return self.fail("expected closing parenthesis");
@@ -293,6 +413,7 @@ impl<'a> Parser<'a> {
                 return self.fail("cross predicate requires parentheses");
             }
             self.bump();
+            self.check_depth()?;
             let left = self.numeric()?;
             if !matches!(self.k(), TokenKind::Comma) {
                 return self.fail("cross predicate expects two arguments");
@@ -310,13 +431,14 @@ impl<'a> Parser<'a> {
             });
         }
         if self.take_word("IN_POSITION") {
-            if matches!(self.k(), TokenKind::LParen) {
-                self.bump();
-                if !matches!(self.k(), TokenKind::RParen) {
-                    return self.fail("in_position takes no arguments");
-                }
-                self.bump();
+            if !matches!(self.k(), TokenKind::LParen) {
+                return self.fail("in_position requires parentheses");
             }
+            self.bump();
+            if !matches!(self.k(), TokenKind::RParen) {
+                return self.fail("in_position takes no arguments");
+            }
+            self.bump();
             return Ok(Condition::InPosition);
         }
         if self.take_word("BETWEEN") {
@@ -348,6 +470,17 @@ impl<'a> Parser<'a> {
         };
         self.bump();
         let right = self.numeric()?;
+        if matches!(
+            self.k(),
+            TokenKind::Lt
+                | TokenKind::Le
+                | TokenKind::Gt
+                | TokenKind::Ge
+                | TokenKind::Eq
+                | TokenKind::Ne
+        ) {
+            return self.fail("chained comparisons are not supported");
+        }
         Ok(Condition::Compare { left, op, right })
     }
     fn time(&mut self) -> Result<Time, FrontendError> {
@@ -365,7 +498,8 @@ impl<'a> Parser<'a> {
             self.k(),
             TokenKind::Number(_) | TokenKind::Minus | TokenKind::Plus
         ) {
-            return Ok(NumericExpr::Literal(Decimal(self.number()?)));
+            let n = self.number()?;
+            return Ok(NumericExpr::Literal(self.decimal(n)?));
         }
         let name = match self.bump().kind {
             TokenKind::Word(w) => w,
@@ -402,28 +536,35 @@ impl<'a> Parser<'a> {
             return self.fail("indicator requires parentheses");
         }
         self.bump();
-        let period = match self.bump().kind {
-            TokenKind::Number(n) => n.parse::<u32>().map_err(|_| FrontendError::Parse {
-                code: "PARSE_PERIOD",
-                message: "indicator period must be a positive integer".into(),
-                line: self.span().line,
-                column: self.span().column,
-            })?,
+        let period_token = self.bump();
+        let period = match period_token.kind {
+            TokenKind::Number(n) if !n.contains('.') => {
+                n.parse::<u32>().map_err(|_| FrontendError::Parse {
+                    code: "PARSE_PERIOD",
+                    message: "indicator period must be a positive integer".into(),
+                    line: self.span().line,
+                    column: self.span().column,
+                    span: self.span(),
+                })?
+            }
             _ => return self.fail("indicator period must be an integer"),
         };
         let multiplier = if matches!(self.k(), TokenKind::Comma) {
             self.bump();
-            Some(Decimal(self.number()?))
+            let n = self.number()?;
+            Some(self.decimal(n)?)
         } else {
             None
         };
-        if matches!(
+        let multiplier = if matches!(
             kind,
             IndicatorKind::BbUpper | IndicatorKind::BbLower | IndicatorKind::BbMid
         ) && multiplier.is_none()
         {
-            return self.fail("Bollinger indicator requires period and multiplier");
-        }
+            Some(NumericLiteral::parse("2.0".into(), self.span()).unwrap())
+        } else {
+            multiplier
+        };
         if !matches!(
             kind,
             IndicatorKind::BbUpper | IndicatorKind::BbLower | IndicatorKind::BbMid
@@ -431,10 +572,21 @@ impl<'a> Parser<'a> {
         {
             return self.fail("this indicator accepts only a period");
         }
+        if multiplier.is_some() && matches!(self.k(), TokenKind::Comma) {
+            return self.fail("too many indicator arguments");
+        }
         if !matches!(self.k(), TokenKind::RParen) {
             return self.fail("expected closing indicator parenthesis");
         }
         self.bump();
+        if period == 0 {
+            return self.fail("indicator period must be positive");
+        }
+        if let Some(m) = &multiplier {
+            if !m.cmp_integer("0").is_some_and(|v| v.is_gt()) {
+                return self.fail("Bollinger multiplier must be positive");
+            }
+        }
         Ok(NumericExpr::Indicator(IndicatorCall {
             kind,
             period,
@@ -461,7 +613,7 @@ mod tests {
         let src = "TRADE_IN ABC\nWHEN close > 1\nBUY 2\nSTOP_LOSS 5%\nWHEN low < 1\nSELL ALL\n";
         assert_eq!(
             parse(&lex(src).unwrap()).unwrap().stop_loss,
-            Some(Decimal("5".into()))
+            Some(NumericLiteral::parse("5".into(), Span::new(44, 46, 4, 11)).unwrap())
         );
         assert!(parse(&lex("TRADE_IN ABC\nSTOP_LOSS 2%\nSTOP_LOSS 3%\n").unwrap()).is_err());
     }
@@ -469,5 +621,30 @@ mod tests {
     fn trailing_input_and_missing_rule_newline_are_rejected() {
         assert!(parse(&lex("TRADE_IN ABC\nWHEN close > 1 BUY 2\n").unwrap()).is_err());
         assert!(lex("TRADE_IN ABC\nWHEN close > 1\nBUY 2\n@\n").is_err());
+    }
+    #[test]
+    fn headers_actions_suffixes_and_eof_are_strict() {
+        for src in [
+            "TRADE_IN ABC\nTRADE_IN XYZ\n",
+            "TRADE_IN ABC\nSTRATEGY late\n",
+            "TRADE_IN ABC\nSTOP_LOSS 2 %\n",
+            "TRADE_IN ABC\nWHEN close > 1\nBUY 1%WORTH\n",
+            "TRADE_IN ABC\nWHEN close > 1\nSELL ALL 1\n",
+            "TRADE_IN ABC\nWHEN 1 < close < 10\nBUY 1\n",
+            "TRADE_IN ABC,\n",
+            "TRADE_IN ABC\nWHEN close > 1\nBUY 1\nGARBAGE\n",
+        ] {
+            assert!(compile_err(src), "{src}");
+        }
+        assert!(!compile_err(
+            "STRATEGY Momentum\nTRADE_IN INDEX NIFTY\n\nWHEN SMA(14) > 1\n\nBUY 00010\n"
+        ));
+    }
+    fn compile_err(s: &str) -> bool {
+        let t = lex(s);
+        match t {
+            Err(_) => true,
+            Ok(t) => parse(&t).is_err(),
+        }
     }
 }

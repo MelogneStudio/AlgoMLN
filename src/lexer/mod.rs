@@ -26,7 +26,14 @@ pub enum TokenKind {
     Eof,
 }
 
+pub const MAX_SOURCE_BYTES: usize = 1_048_576;
+pub const MAX_TOKENS: usize = 100_000;
+pub const MAX_TOKEN_BYTES: usize = 256;
+
 pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(err("LEX_LIMIT", "source exceeds 1 MiB limit", 1, 1));
+    }
     let mut out = Vec::new();
     let mut i = 0;
     let mut line = 1u32;
@@ -42,6 +49,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             line += 1;
             col = 1;
             continue;
+        }
+        if c == '\r' {
+            return Err(err(
+                "LEX_NEWLINE",
+                "lone carriage return is not a newline; use LF or CRLF",
+                line,
+                col,
+            ));
         }
         if c == '\n' {
             out.push(Token {
@@ -107,15 +122,20 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 .nth(1)
                 .is_some_and(|x| x.is_ascii_digit()) =>
             {
-                i += 1;
-                while source
-                    .get(i..)
-                    .and_then(|s| s.chars().next())
-                    .is_some_and(|x| x.is_ascii_digit())
-                {
-                    i += 1;
-                }
-                TokenKind::Number(source[start..i].to_owned())
+                return Err(err(
+                    "LEX_NUMBER",
+                    "leading decimal point is not permitted",
+                    line,
+                    start_col,
+                ));
+            }
+            '.' => {
+                return Err(err(
+                    "LEX_NUMBER",
+                    "unexpected decimal point",
+                    line,
+                    start_col,
+                ))
             }
             x if x.is_ascii_digit() => {
                 while source
@@ -127,12 +147,26 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 }
                 if source[i..].starts_with(':') {
                     i += 1;
+                    let minute_start = i;
                     while source
                         .get(i..)
                         .and_then(|s| s.chars().next())
                         .is_some_and(|x| x.is_ascii_digit())
                     {
                         i += 1;
+                    }
+                    if i - minute_start != 2
+                        || source
+                            .get(i..)
+                            .and_then(|s| s.chars().next())
+                            .is_some_and(|x| x == ':' || x.is_ascii_alphanumeric() || x == '_')
+                    {
+                        return Err(err(
+                            "LEX_TIME",
+                            "time must have exactly two minute digits and a token boundary",
+                            line,
+                            start_col,
+                        ));
                     }
                     TokenKind::Time(source[start..i].to_owned())
                 } else {
@@ -182,6 +216,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 {
                     i += source[i..].chars().next().unwrap().len_utf8();
                 }
+                if i - start > MAX_TOKEN_BYTES {
+                    return Err(err(
+                        "LEX_LIMIT",
+                        "identifier exceeds 256-byte limit",
+                        line,
+                        start_col,
+                    ));
+                }
                 TokenKind::Word(source[start..i].to_owned())
             }
             _ => {
@@ -193,11 +235,43 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 ))
             }
         };
+        if i - start > MAX_TOKEN_BYTES && matches!(kind, TokenKind::Number(_) | TokenKind::Time(_))
+        {
+            return Err(err(
+                "LEX_LIMIT",
+                "numeric or time literal exceeds 256-byte limit",
+                line,
+                start_col,
+            ));
+        }
         col += source[start..i].chars().count() as u32;
+        if matches!(kind, TokenKind::Time(_)) {
+            let tail = source.get(i..).and_then(|s| s.chars().next());
+            if tail.is_some_and(|x| x.is_ascii_digit() || x == ':' || x.is_alphabetic() || x == '_')
+            {
+                return Err(err("LEX_TIME", "malformed time literal", line, start_col));
+            }
+        }
+        if matches!(kind, TokenKind::Number(_))
+            && source
+                .get(i..)
+                .and_then(|s| s.chars().next())
+                .is_some_and(|x| x.is_ascii_alphanumeric() || x == '_')
+        {
+            return Err(err(
+                "LEX_NUMBER",
+                "malformed numeric suffix",
+                line,
+                start_col,
+            ));
+        }
         out.push(Token {
             kind,
             span: Span::new(start, i, line, start_col),
         });
+        if out.len() > MAX_TOKENS {
+            return Err(err("LEX_LIMIT", "token count exceeds 100,000", line, col));
+        }
     }
     out.push(Token {
         kind: TokenKind::Eof,
@@ -206,11 +280,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
     Ok(out)
 }
 fn err(code: &'static str, message: impl Into<String>, line: u32, column: u32) -> FrontendError {
+    let span = Span::new(0, 0, line, column);
     FrontendError::Lex {
         code,
         message: message.into(),
         line,
         column,
+        span,
     }
 }
 
@@ -229,5 +305,18 @@ mod tests {
     fn malformed_numbers_fail() {
         assert!(lex("12.3.4").is_err());
         assert!(lex("1abc").is_err());
+        assert!(lex("1e5").is_err());
+        assert!(lex(".5").is_err());
+        assert!(lex("1..5").is_err());
+        assert!(lex("10:3").is_err());
+        assert!(lex("# comment").is_err());
+        assert!(lex("\rTRADE_IN A").is_err());
+    }
+    #[test]
+    fn source_positions_and_limits_are_explicit() {
+        let tokens = lex("λ\tA\r\nB").unwrap();
+        assert_eq!(tokens[1].span.column, 3);
+        assert_eq!(tokens[3].span.line, 2);
+        assert!(lex(&"a".repeat(MAX_TOKEN_BYTES + 1)).is_err());
     }
 }
