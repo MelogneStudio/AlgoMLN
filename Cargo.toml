@@ -13,6 +13,11 @@ thiserror = "2"
 [dev-dependencies]
 serde_json = "1"
 proptest = "1"
+criterion = "0.5"
+
+[[bench]]
+name = "indicators"
+harness = false
 
 [lib]
 path = "src/lib.rs"
