@@ -9,6 +9,8 @@ pub mod lexer;
 pub mod parser;
 pub mod source;
 pub mod validator;
+pub mod trader;
+pub use trader::{ExecutionPort, FrameOutput, InstrumentRule, Mode, OrderEvent, OrderId, OrderReason, OrderRequest, PortError, Position, Side, Trader, TraderConfig, TraderError, TraderEvent};
 pub use engine::Program;
 pub use engine::{evaluate_series, Engine, EngineError, LevelFrame, RuleId, Symbol};
 
