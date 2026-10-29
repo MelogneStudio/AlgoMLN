@@ -63,7 +63,7 @@ pub enum Condition {
 }
 pub type ConditionNode = Condition;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NumericExpr {
     Literal(Decimal),
     Price(PriceField),
@@ -72,7 +72,7 @@ pub enum NumericExpr {
 
 pub type Decimal = NumericLiteral;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PriceField {
     Close,
     Open,
@@ -84,13 +84,13 @@ pub enum PriceField {
     PrevHigh,
     PrevLow,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IndicatorCall {
     pub kind: IndicatorKind,
     pub period: u32,
     pub multiplier: Option<Decimal>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IndicatorKind {
     Sma,
     Ema,
@@ -181,10 +181,11 @@ mod property_tests {
         fn parsed_ast_survives_serde_round_trip_and_reparse(period in 1u32..=1000, value in 1u32..=10000) {
             let source = format!("TRADE_IN ABC\nWHEN ema({period}) > {value}\nBUY {value}\n");
             let parsed = crate::compile(&source).unwrap();
-            let encoded = serde_json::to_vec(&parsed).unwrap();
+            let encoded = serde_json::to_vec(parsed.strategy()).unwrap();
             let decoded: crate::ast::Strategy = serde_json::from_slice(&encoded).unwrap();
-            prop_assert_eq!(&parsed, &decoded);
-            prop_assert_eq!(crate::compile(&source).unwrap(), decoded);
+            prop_assert_eq!(parsed.strategy(), &decoded);
+            let reparsed = crate::compile(&source).unwrap();
+            prop_assert_eq!(reparsed.strategy(), &decoded);
         }
     }
 }

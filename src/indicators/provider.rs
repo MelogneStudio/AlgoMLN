@@ -13,6 +13,42 @@ pub trait IndicatorProvider {
     fn price(&self, field: PriceField) -> Option<f64>;
     fn reset(&mut self);
 }
+/// Provider interface for deterministic, precomputed indicator series.
+pub struct PrecomputedProvider {
+    inner: IncrementalProvider,
+}
+impl PrecomputedProvider {
+    pub fn new() -> Self {
+        Self {
+            inner: IncrementalProvider::new(),
+        }
+    }
+    pub(crate) fn advance_unchecked(&mut self, c: &Candle) {
+        self.inner.advance_unchecked(c)
+    }
+}
+impl Default for PrecomputedProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl IndicatorProvider for PrecomputedProvider {
+    fn register(&mut self, s: IndicatorSpec) -> Result<IndicatorHandle, IndicatorError> {
+        self.inner.register(s)
+    }
+    fn advance(&mut self, c: &Candle) -> Result<(), IndicatorError> {
+        self.inner.advance(c)
+    }
+    fn get(&self, h: IndicatorHandle) -> Option<f64> {
+        self.inner.get(h)
+    }
+    fn price(&self, f: PriceField) -> Option<f64> {
+        self.inner.price(f)
+    }
+    fn reset(&mut self) {
+        self.inner.reset()
+    }
+}
 pub struct IncrementalProvider {
     states: Vec<IndicatorState>,
     specs: Vec<IndicatorSpec>,
@@ -56,15 +92,16 @@ impl IndicatorProvider for IncrementalProvider {
         Ok(h)
     }
     fn advance(&mut self, c: &Candle) -> Result<(), IndicatorError> {
-        c.is_valid(self.previous.as_ref())
+        c.is_valid(None)
             .map_err(|reason| IndicatorError::InvalidCandle { reason })?;
-        self.started = true;
-        for (state, value) in self.states.iter_mut().zip(self.values.iter_mut()) {
-            *value = state.update(c).filter(|x| x.is_finite());
-            debug_assert!(value.map_or(true, |x| x.is_finite()));
+        if let Some(prev) = self.previous {
+            if c.timestamp <= prev.timestamp {
+                return Err(IndicatorError::InvalidCandle {
+                    reason: "timestamp must increase",
+                });
+            }
         }
-        self.prior = self.previous;
-        self.previous = Some(*c);
+        self.advance_unchecked(c);
         Ok(())
     }
     fn get(&self, h: IndicatorHandle) -> Option<f64> {
@@ -98,6 +135,14 @@ impl IndicatorProvider for IncrementalProvider {
     }
 }
 impl IncrementalProvider {
+    pub(crate) fn advance_unchecked(&mut self, c: &Candle) {
+        self.started = true;
+        for (state, value) in self.states.iter_mut().zip(self.values.iter_mut()) {
+            *value = state.update(c).filter(|x| x.is_finite());
+        }
+        self.prior = self.previous;
+        self.previous = Some(*c);
+    }
     fn previous_prev_field(&self, f: PriceField) -> Option<f64> {
         let c = self.prior?;
         Some(match f {

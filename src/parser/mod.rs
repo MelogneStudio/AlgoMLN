@@ -660,7 +660,7 @@ mod tests {
     fn quoted_symbols_fractional_worth_and_price_crossovers_parse() {
         let s = crate::compile("TRADE_IN \"M&M\", \"BAJAJ-AUTO\", \"3MINDIA\", \"360ONE\"\nWHEN CROSS_ABOVE(close, ema(20))\nBUY 10.50 WORTH\nWHEN close > 0\nSELL 12.5%\n").unwrap();
         assert_eq!(
-            s.trade_in,
+            s.strategy().trade_in,
             TradeIn::Symbols(vec![
                 "M&M".into(),
                 "BAJAJ-AUTO".into(),
@@ -668,13 +668,13 @@ mod tests {
                 "360ONE".into()
             ])
         );
-        assert!(matches!(s.rules[0].condition, Condition::Cross { .. }));
+        assert!(matches!(s.rules()[0].condition, Condition::Cross { .. }));
         assert!(matches!(
-            s.rules[0].action,
+            s.rules()[0].action,
             Action::Buy(TradeAmount::Worth(_))
         ));
         assert!(matches!(
-            s.rules[1].action,
+            s.rules()[1].action,
             Action::Sell(TradeAmount::SellPositionPercentage(_))
         ));
     }

@@ -9,7 +9,11 @@ fn golden_strategy_samples_match_serialized_ast() {
         )
         .unwrap();
         let actual = algomln::compile(&source).unwrap();
-        assert_eq!(serde_json::to_value(actual).unwrap(), expected, "{name}");
+        assert_eq!(
+            serde_json::to_value(actual.strategy()).unwrap(),
+            expected,
+            "{name}"
+        );
     }
 }
 

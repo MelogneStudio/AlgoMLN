@@ -3,11 +3,14 @@
 
 pub mod ast;
 pub mod diagnostics;
+pub mod engine;
 pub mod indicators;
 pub mod lexer;
 pub mod parser;
 pub mod source;
 pub mod validator;
+pub use engine::Program;
+pub use engine::{evaluate_series, Engine, EngineError, LevelFrame, RuleId, Symbol};
 
 pub use ast::Strategy;
 pub use diagnostics::{Diagnostic, FrontendError};
@@ -35,9 +38,9 @@ impl FrontendError {
 }
 
 /// Parse and validate a complete AlgoMLN source file.
-pub fn compile(source: &str) -> Result<Strategy, FrontendError> {
+pub fn compile(source: &str) -> Result<Program, FrontendError> {
     let tokens = lexer::lex(source)?;
     let strategy = parser::parse(&tokens)?;
     validator::validate(&strategy)?;
-    Ok(strategy)
+    Ok(Program::new(strategy))
 }

@@ -14,7 +14,7 @@ pub mod error;
 pub mod spec;
 pub use candle::Candle;
 pub use error::IndicatorError;
-pub use provider::{IncrementalProvider, IndicatorHandle, IndicatorProvider};
+pub use provider::{IncrementalProvider, IndicatorHandle, IndicatorProvider, PrecomputedProvider};
 pub use spec::{IndicatorSpec, IndicatorType, PriceField};
 
 #[cfg(test)]
