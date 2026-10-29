@@ -22,6 +22,7 @@ pub enum OrderReason {
     Rule(RuleId),
     StopLoss,
     TakeProfit,
+    DailyLossFlatten,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct OrderRequest {
@@ -159,6 +160,8 @@ pub enum TraderEvent {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FrameOutput {
     pub orders: Vec<OrderRequest>,
+    /// Broker order IDs the adapter should cancel after this frame.
+    pub cancels: Vec<OrderId>,
     pub events: Vec<TraderEvent>,
 }
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -201,8 +204,10 @@ pub struct Trader {
     prev_levels: BTreeMap<(Symbol, RuleId), bool>,
     positions: BTreeMap<Symbol, Position>,
     orders: BTreeMap<OrderId, Pending>,
+    last_prices: BTreeMap<Symbol, (f64, i64)>,
     cash: f64,
     realized_pnl_today: f64,
+    realized_loss_today: f64,
     accepted_buys_today: u64,
     next_id: u64,
 }
@@ -220,14 +225,17 @@ impl Trader {
             prev_levels: BTreeMap::new(),
             positions: BTreeMap::new(),
             orders: BTreeMap::new(),
+            last_prices: BTreeMap::new(),
             cash,
             realized_pnl_today: 0.0,
+            realized_loss_today: 0.0,
             accepted_buys_today: 0,
             next_id: 1,
         })
     }
     pub fn start_day(&mut self, _day: i64) {
         self.realized_pnl_today = 0.0;
+        self.realized_loss_today = 0.0;
         self.accepted_buys_today = 0
     }
     pub fn cash(&self) -> f64 {
@@ -235,6 +243,9 @@ impl Trader {
     }
     pub fn realized_pnl_today(&self) -> f64 {
         self.realized_pnl_today
+    }
+    pub fn realized_loss_today(&self) -> f64 {
+        self.realized_loss_today
     }
     pub fn accepted_buys_today(&self) -> u64 {
         self.accepted_buys_today
@@ -326,7 +337,9 @@ impl Trader {
             }
             Side::Sell => {
                 let closed = q.min(pos.filled_qty.max(0) as u64);
-                self.realized_pnl_today += (p - pos.avg_entry) * closed as f64 - fees;
+                let realized = (p - pos.avg_entry) * closed as f64 - fees;
+                self.realized_pnl_today += realized;
+                self.realized_loss_today += (-realized).max(0.0);
                 pos.filled_qty = pos
                     .filled_qty
                     .saturating_sub(q.min(i64::MAX as u64) as i64)
@@ -369,6 +382,51 @@ impl Trader {
         if mode == Mode::Observe {
             return out;
         }
+        self.last_prices
+            .insert(f.symbol.clone(), (c.close, f.candle_ts));
+        let loss_breached = self.daily_loss_breached();
+        if loss_breached {
+            out.cancels.extend(
+                self.orders
+                    .values()
+                    .filter(|o| o.live() && o.req.side == Side::Buy && o.remaining() > 0)
+                    .map(|o| o.req.client_order_id.clone()),
+            );
+            let open: Vec<_> = self
+                .positions
+                .iter()
+                .filter(|(_, position)| position.filled_qty > 0)
+                .map(|(symbol, position)| (symbol.clone(), position.filled_qty as u64))
+                .collect();
+            for (symbol, qty) in open {
+                if !self.has_pending_exit(&symbol) {
+                    if let Some((price, decided_at)) = self.last_prices.get(&symbol).copied() {
+                        self.emit_at(
+                            &mut out,
+                            &symbol,
+                            Side::Sell,
+                            qty,
+                            OrderReason::DailyLossFlatten,
+                            price,
+                            decided_at,
+                        );
+                    }
+                }
+            }
+            // Entries still flow through the risk gate for an explicit block
+            // event. Rule exits and automatic exits must not compete with the
+            // portfolio flatten order.
+            for (id, is_entry) in fires {
+                if is_entry {
+                    out.events.push(TraderEvent::RiskBlocked {
+                        symbol: f.symbol.clone(),
+                        rule_id: id,
+                        limit: "MAX_DAILY_LOSS",
+                    });
+                }
+            }
+            return out;
+        }
         let mut full_exit = false;
         for (id, is_entry) in fires {
             let Some(rule) = self.program.rules().iter().find(|r| r.id == id) else {
@@ -406,7 +464,15 @@ impl Trader {
             if !is_entry && qty as i64 >= net {
                 full_exit = true
             }
-            self.emit(&mut out, &f.symbol, side, qty, OrderReason::Rule(id), c)
+            self.emit_at(
+                &mut out,
+                &f.symbol,
+                side,
+                qty,
+                OrderReason::Rule(id),
+                c.close,
+                f.candle_ts,
+            )
         }
         if !full_exit && !self.has_pending_exit(&f.symbol) {
             if let Some(pos) = self.positions.get(&f.symbol).filter(|p| p.filled_qty > 0) {
@@ -421,7 +487,7 @@ impl Trader {
                     .and_then(|v| v.spelling.parse::<f64>().ok())
                     .is_some_and(|x| c.close >= pos.avg_entry * (1.0 + x / 100.0));
                 if stop || take {
-                    self.emit(
+                    self.emit_at(
                         &mut out,
                         &f.symbol,
                         Side::Sell,
@@ -431,21 +497,23 @@ impl Trader {
                         } else {
                             OrderReason::TakeProfit
                         },
-                        c,
+                        c.close,
+                        f.candle_ts,
                     )
                 }
             }
         }
         out
     }
-    fn emit(
+    fn emit_at(
         &mut self,
         out: &mut FrameOutput,
         s: &str,
         side: Side,
         qty: u64,
         reason: OrderReason,
-        c: &Candle,
+        ref_price: f64,
+        decided_at: i64,
     ) {
         let req = OrderRequest {
             client_order_id: format!("trader-{}", self.next_id),
@@ -453,8 +521,8 @@ impl Trader {
             side,
             qty,
             reason,
-            ref_price: c.close,
-            decided_at: c.timestamp,
+            ref_price,
+            decided_at,
         };
         self.next_id += 1;
         self.orders.insert(
@@ -536,23 +604,24 @@ impl Trader {
         {
             return Some("MAX_ORDERS");
         }
-        if self
-            .program
-            .risk()
-            .max_daily_loss
-            .as_ref()
-            .is_some_and(|m| {
-                self.cfg.initial_cash > 0.0
-                    && (-self.realized_pnl_today).max(0.0) / self.cfg.initial_cash
-                        >= m.spelling.parse::<f64>().unwrap_or(0.0) / 100.0
-            })
-        {
+        if self.daily_loss_breached() {
             return Some("MAX_DAILY_LOSS");
         }
         if self.available_cash() + f64::EPSILON < q as f64 * p {
             return Some("CASH");
         }
         None
+    }
+    fn daily_loss_breached(&self) -> bool {
+        self.program
+            .risk()
+            .max_daily_loss
+            .as_ref()
+            .is_some_and(|limit| {
+                self.cfg.initial_cash > 0.0
+                    && self.realized_loss_today / self.cfg.initial_cash
+                        >= limit.spelling.parse::<f64>().unwrap_or(0.0) / 100.0
+            })
     }
     fn resolve_size(&self, a: &TradeAmount, p: f64, s: &str) -> Option<u64> {
         if !p.is_finite() || p <= 0.0 {
@@ -617,6 +686,16 @@ mod tests {
             entry: entry.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect(),
             exit: exit.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect(),
         }
+    }
+    fn named_frame(
+        symbol: &str,
+        ts: i64,
+        entry: &[(&str, bool)],
+        exit: &[(&str, bool)],
+    ) -> LevelFrame {
+        let mut f = frame(ts, entry, exit);
+        f.symbol = symbol.into();
+        f
     }
     fn trader(src: &str, cash: f64) -> Trader {
         Trader::new(
@@ -836,6 +915,7 @@ mod tests {
             fees: 0.0,
         });
         assert_eq!(t.realized_pnl_today(), -5.0);
+        assert_eq!(t.realized_loss_today(), 5.0);
         let blocked = t.on_frame(
             &frame(3, &[("rule_1", true)], &[("rule_2", false)]),
             &candle(3, 10.0),
@@ -850,6 +930,271 @@ mod tests {
         ));
         t.start_day(4);
         assert_eq!(t.realized_pnl_today(), 0.0);
+        assert_eq!(t.realized_loss_today(), 0.0);
+    }
+
+    #[test]
+    fn daily_loss_breach_cancels_entries_flattens_and_catches_late_fills() {
+        let mut t = trader(
+            "TRADE_IN ABC\nRISK MAX_DAILY_LOSS 1%\nWHEN close > 4\nBUY 10\nWHEN close > 4\nBUY 2\nWHEN close < 6\nSELL 1\n",
+            100.0,
+        );
+        let entries = t.on_frame(
+            &frame(
+                1,
+                &[("rule_1", true), ("rule_2", true)],
+                &[("rule_3", false)],
+            ),
+            &candle(1, 5.0),
+            Mode::Act,
+        );
+        assert_eq!(entries.orders.len(), 2);
+        t.on_order_event(OrderEvent::Acked {
+            id: entries.orders[0].client_order_id.clone(),
+        });
+        t.on_order_event(OrderEvent::Filled {
+            id: entries.orders[0].client_order_id.clone(),
+            qty: 10,
+            price: 5.0,
+            fees: 0.0,
+        });
+
+        let sell = t
+            .on_frame(
+                &frame(
+                    2,
+                    &[("rule_1", false), ("rule_2", false)],
+                    &[("rule_3", true)],
+                ),
+                &candle(2, 4.0),
+                Mode::Act,
+            )
+            .orders
+            .remove(0);
+        t.on_order_event(OrderEvent::Acked {
+            id: sell.client_order_id.clone(),
+        });
+        t.on_order_event(OrderEvent::Filled {
+            id: sell.client_order_id,
+            qty: 1,
+            price: 4.0,
+            fees: 0.0,
+        });
+        assert_eq!(t.realized_pnl_today(), -1.0);
+
+        let breach = t.on_frame(
+            &frame(
+                3,
+                &[("rule_1", true), ("rule_2", false)],
+                &[("rule_3", false)],
+            ),
+            &candle(3, 4.0),
+            Mode::Act,
+        );
+        assert_eq!(breach.cancels, vec!["trader-2"]);
+        assert_eq!(breach.orders.len(), 1);
+        assert_eq!(breach.orders[0].qty, 9);
+        assert_eq!(breach.orders[0].reason, OrderReason::DailyLossFlatten);
+        assert!(breach.events.iter().any(|e| matches!(
+            e,
+            TraderEvent::RiskBlocked {
+                limit: "MAX_DAILY_LOSS",
+                ..
+            }
+        )));
+
+        // A fill racing the cancellation is booked; the still-active breach
+        // causes another flatten after the first flatten completes.
+        t.on_order_event(OrderEvent::Acked {
+            id: "trader-2".into(),
+        });
+        t.on_order_event(OrderEvent::Filled {
+            id: "trader-2".into(),
+            qty: 2,
+            price: 4.0,
+            fees: 0.0,
+        });
+        t.on_order_event(OrderEvent::Acked {
+            id: breach.orders[0].client_order_id.clone(),
+        });
+        t.on_order_event(OrderEvent::Filled {
+            id: breach.orders[0].client_order_id.clone(),
+            qty: 9,
+            price: 4.0,
+            fees: 0.0,
+        });
+        let second_flatten = t.on_frame(
+            &frame(
+                4,
+                &[("rule_1", false), ("rule_2", false)],
+                &[("rule_3", false)],
+            ),
+            &candle(4, 4.0),
+            Mode::Act,
+        );
+        assert_eq!(
+            second_flatten.orders[0].reason,
+            OrderReason::DailyLossFlatten
+        );
+        assert_eq!(second_flatten.orders[0].qty, 2);
+
+        t.start_day(5);
+        let _ = t.on_frame(
+            &frame(
+                5,
+                &[("rule_1", false), ("rule_2", false)],
+                &[("rule_3", false)],
+            ),
+            &candle(5, 4.0),
+            Mode::Act,
+        );
+        let next_day = t.on_frame(
+            &frame(
+                6,
+                &[("rule_1", true), ("rule_2", false)],
+                &[("rule_3", false)],
+            ),
+            &candle(6, 5.0),
+            Mode::Act,
+        );
+        assert!(!next_day.orders.is_empty());
+    }
+
+    #[test]
+    fn daily_loss_flattens_other_portfolio_symbols_at_their_latest_close() {
+        let mut t = trader(
+            "TRADE_IN ABC,XYZ\nRISK MAX_DAILY_LOSS 1%\nWHEN close > 4\nBUY 1\nWHEN close < 10\nSELL 1\n",
+            100.0,
+        );
+        let abc_buy = t
+            .on_frame(
+                &named_frame("ABC", 1, &[("rule_1", true)], &[("rule_2", false)]),
+                &candle(1, 10.0),
+                Mode::Act,
+            )
+            .orders
+            .remove(0);
+        t.on_order_event(OrderEvent::Acked {
+            id: abc_buy.client_order_id.clone(),
+        });
+        t.on_order_event(OrderEvent::Filled {
+            id: abc_buy.client_order_id,
+            qty: 1,
+            price: 10.0,
+            fees: 0.0,
+        });
+        let xyz_buy = t
+            .on_frame(
+                &named_frame("XYZ", 2, &[("rule_1", true)], &[("rule_2", false)]),
+                &candle(2, 12.0),
+                Mode::Act,
+            )
+            .orders
+            .remove(0);
+        t.on_order_event(OrderEvent::Acked {
+            id: xyz_buy.client_order_id.clone(),
+        });
+        t.on_order_event(OrderEvent::Filled {
+            id: xyz_buy.client_order_id,
+            qty: 1,
+            price: 12.0,
+            fees: 0.0,
+        });
+        let abc_sell = t
+            .on_frame(
+                &named_frame("ABC", 3, &[("rule_1", false)], &[("rule_2", true)]),
+                &candle(3, 9.0),
+                Mode::Act,
+            )
+            .orders
+            .remove(0);
+        t.on_order_event(OrderEvent::Acked {
+            id: abc_sell.client_order_id.clone(),
+        });
+        t.on_order_event(OrderEvent::Filled {
+            id: abc_sell.client_order_id,
+            qty: 1,
+            price: 9.0,
+            fees: 0.0,
+        });
+
+        let breached = t.on_frame(
+            &named_frame("ABC", 4, &[("rule_1", false)], &[("rule_2", false)]),
+            &candle(4, 8.0),
+            Mode::Act,
+        );
+        assert_eq!(breached.orders.len(), 1);
+        assert_eq!(breached.orders[0].symbol, "XYZ");
+        assert_eq!(breached.orders[0].ref_price, 12.0);
+        assert_eq!(breached.orders[0].reason, OrderReason::DailyLossFlatten);
+    }
+
+    #[test]
+    fn threshold_remains_breached_after_later_profit_offsets_net_pnl() {
+        let mut t = trader(
+            "TRADE_IN ABC\nRISK MAX_DAILY_LOSS 5%\nWHEN close > 1\nBUY 10\nWHEN close < 1\nSELL 5\nWHEN close < 1\nSELL 5\n",
+            100.0,
+        );
+        let buy = t
+            .on_frame(
+                &frame(
+                    1,
+                    &[("rule_1", true)],
+                    &[("rule_2", false), ("rule_3", false)],
+                ),
+                &candle(1, 10.0),
+                Mode::Act,
+            )
+            .orders
+            .remove(0);
+        fill_buy(&mut t, &buy.client_order_id, 10, 10.0);
+        let exits = t.on_frame(
+            &frame(
+                2,
+                &[("rule_1", false)],
+                &[("rule_2", true), ("rule_3", true)],
+            ),
+            &candle(2, 9.0),
+            Mode::Act,
+        );
+        assert_eq!(exits.orders.len(), 2);
+        t.on_order_event(OrderEvent::Acked {
+            id: exits.orders[0].client_order_id.clone(),
+        });
+        t.on_order_event(OrderEvent::Filled {
+            id: exits.orders[0].client_order_id.clone(),
+            qty: 5,
+            price: 9.0,
+            fees: 0.0,
+        });
+        t.on_order_event(OrderEvent::Acked {
+            id: exits.orders[1].client_order_id.clone(),
+        });
+        t.on_order_event(OrderEvent::Filled {
+            id: exits.orders[1].client_order_id.clone(),
+            qty: 5,
+            price: 11.0,
+            fees: 0.0,
+        });
+        assert_eq!(t.realized_pnl_today(), 0.0);
+        assert_eq!(t.realized_loss_today(), 5.0);
+        let later = t.on_frame(
+            &frame(
+                3,
+                &[("rule_1", true)],
+                &[("rule_2", false), ("rule_3", false)],
+            ),
+            &candle(3, 10.0),
+            Mode::Act,
+        );
+        assert!(later.orders.is_empty());
+        assert!(later.events.iter().any(|event| matches!(
+            event,
+            TraderEvent::RiskBlocked {
+                limit: "MAX_DAILY_LOSS",
+                ..
+            }
+        )));
     }
 
     #[test]
