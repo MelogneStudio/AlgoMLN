@@ -746,10 +746,32 @@ fn parse_fixed_tz(s: &str) -> Option<FixedOffset> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// Broker fees are accrued and rounded in integer paise using ties-to-even.
 pub struct FeeModel {
     pub bps: f64,
     pub flat_per_order: f64,
     pub min_per_order: f64,
+}
+fn round_half_even_i128(numerator: i128, denominator: i128) -> i128 {
+    let q = numerator / denominator;
+    let r = numerator % denominator;
+    let twice = r.abs() * 2;
+    if twice > denominator.abs() || (twice == denominator.abs() && q % 2 != 0) {
+        q + numerator.signum() * denominator.signum()
+    } else {
+        q
+    }
+}
+fn round_half_even_f64(value: f64) -> f64 {
+    let floor = value.floor();
+    let fraction = value - floor;
+    if fraction < 0.5 {
+        floor
+    } else if fraction > 0.5 || (floor as i128).rem_euclid(2) != 0 {
+        floor + 1.0
+    } else {
+        floor
+    }
 }
 impl Default for FeeModel {
     fn default() -> Self {
@@ -765,6 +787,8 @@ pub struct SimBroker {
     pub symbols: Vec<Symbol>,
     pub latency: u64,
     pub slippage_bps: f64,
+    /// Minimum permitted fill-price increment in paise (NSE equity default: 5).
+    pub tick_size_paise: i64,
     pub partial_fills_pct: Option<f64>,
     pub fees: FeeModel,
     pending: BTreeMap<OrderId, PendingOrder>,
@@ -778,8 +802,8 @@ struct PendingOrder {
     remaining: u64,
     due: u64,
     acked: bool,
-    notional_filled: f64,
-    fees_charged: f64,
+    notional_filled_paise: i128,
+    fees_charged_paise: i64,
 }
 impl SimBroker {
     pub fn new(symbols: Vec<Symbol>) -> Self {
@@ -787,6 +811,7 @@ impl SimBroker {
             symbols,
             latency: 1,
             slippage_bps: 0.0,
+            tick_size_paise: 5,
             partial_fills_pct: None,
             fees: FeeModel::default(),
             pending: BTreeMap::new(),
@@ -825,23 +850,42 @@ impl SimBroker {
                 p.due = tick + 1;
                 continue;
             }
-            let price = if p.req.side == Side::Buy {
+            let raw_price = if p.req.side == Side::Buy {
                 c.open * (1.0 + self.slippage_bps / 10000.0)
             } else {
                 c.open * (1.0 - self.slippage_bps / 10000.0)
             };
-            p.notional_filled += qty as f64 * price;
-            let target_fee = if self.fees.bps == 0.0
+            let raw_price_paise = crate::trader::rupees_to_paise(raw_price);
+            let tick = self.tick_size_paise.max(1);
+            let quotient = raw_price_paise.div_euclid(tick);
+            let remainder = raw_price_paise.rem_euclid(tick);
+            let price_paise = match p.req.side {
+                Side::Buy if remainder != 0 => quotient.saturating_add(1).saturating_mul(tick),
+                _ => quotient.saturating_mul(tick),
+            };
+            let price = crate::trader::paise_to_rupees(price_paise);
+            p.notional_filled_paise += qty as i128 * price_paise as i128;
+            let target_fee_paise = if self.fees.bps == 0.0
                 && self.fees.flat_per_order == 0.0
                 && self.fees.min_per_order == 0.0
             {
-                0.0
+                0i64
             } else {
-                (p.notional_filled * self.fees.bps / 10000.0 + self.fees.flat_per_order)
-                    .max(self.fees.min_per_order)
+                // Convert the configured rate to integer hundredths of a bp
+                // once; all notional multiplication and tie decisions below
+                // are integer-only (denominator: 10,000 * 100).
+                let bps_hundredths = round_half_even_f64(self.fees.bps * 100.0) as i128;
+                let variable = round_half_even_i128(
+                    p.notional_filled_paise * bps_hundredths,
+                    10_000i128 * 100,
+                );
+                let flat = crate::trader::rupees_to_paise(self.fees.flat_per_order) as i128;
+                let minimum = crate::trader::rupees_to_paise(self.fees.min_per_order) as i128;
+                (variable + flat).max(minimum) as i64
             };
-            let fees = (target_fee - p.fees_charged).max(0.0);
-            p.fees_charged = target_fee;
+            let fees_paise = (target_fee_paise - p.fees_charged_paise).max(0);
+            p.fees_charged_paise = target_fee_paise;
+            let fees = crate::trader::paise_to_rupees(fees_paise);
             p.remaining -= qty;
             let done = p.remaining == 0;
             if done {
@@ -885,8 +929,8 @@ impl ExecutionPort for SimBroker {
                 remaining: r.qty,
                 due: tick + self.latency.max(1),
                 acked: false,
-                notional_filled: 0.0,
-                fees_charged: 0.0,
+                notional_filled_paise: 0,
+                fees_charged_paise: 0,
             },
         );
         self.seen_ids.insert(r.client_order_id.clone());
@@ -937,7 +981,9 @@ pub struct Fill {
     pub side: Side,
     pub qty: u64,
     pub price: f64,
+    pub price_paise: i64,
     pub fees: f64,
+    pub fees_paise: i64,
     pub reason: OrderReason,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -946,6 +992,9 @@ pub struct EquityPoint {
     pub cash: f64,
     pub positions_value: f64,
     pub equity: f64,
+    pub cash_paise: i64,
+    pub positions_value_paise: i64,
+    pub equity_paise: i64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OpenPosition {
@@ -954,6 +1003,9 @@ pub struct OpenPosition {
     pub avg_entry: f64,
     pub last_close: f64,
     pub unrealized: f64,
+    pub avg_entry_paise: i64,
+    pub last_close_paise: i64,
+    pub unrealized_paise: i64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Trade {
@@ -962,15 +1014,20 @@ pub struct Trade {
     pub exit_ts: i64,
     pub qty: u64,
     pub avg_entry: f64,
+    pub avg_entry_paise: i64,
     pub avg_exit: f64,
+    pub avg_exit_paise: i64,
     pub fees: f64,
+    pub fees_paise: i64,
     pub net_pnl: f64,
+    pub net_pnl_paise: i64,
     pub exit_reason: OrderReason,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolEquityPoint {
     pub ts: i64,
     pub equity: f64,
+    pub equity_paise: i64,
     pub position_qty: i64,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -999,12 +1056,12 @@ fn check_invariants(
     fills: &[Fill],
     ts: i64,
 ) -> Result<(), SimError> {
-    if trader.cash() < -1e-8 {
+    if trader.cash_paise() < 0 {
         return Err(SimError::Other(format!(
             "invariant: cash is negative at {ts}"
         )));
     }
-    if trader.pending_order_count() == 0 && trader.reserved_cash().abs() > 1e-8 {
+    if trader.pending_order_count() == 0 && trader.reserved_cash_paise() != 0 {
         return Err(SimError::Other(format!(
             "invariant: reserved cash remains without pending orders at {ts}"
         )));
@@ -1225,8 +1282,8 @@ fn run_internal(
             trader.start_day(d);
             *day = Some(d);
             if (config.debug_invariants || cfg!(test))
-                && (trader.realized_pnl_today() != 0.0
-                    || trader.realized_loss_today() != 0.0
+                && (trader.realized_pnl_today_paise() != 0
+                    || trader.realized_loss_today_paise() != 0
                     || trader.accepted_buys_today() != 0)
             {
                 return Err(SimError::Other(format!(
@@ -1305,17 +1362,29 @@ fn run_internal(
             }
         }
         let mut pos_value = 0.0;
+        let mut pos_value_paise = 0i128;
         for s in &symbols {
             if let (Some(p), Some(c)) = (trader.position(s), last.get(s)) {
-                pos_value += p.filled_qty as f64 * c.close;
+                let paise = crate::trader::rupees_to_paise(c.close);
+                pos_value_paise += p.filled_qty as i128 * paise as i128;
+                pos_value += crate::trader::paise_to_rupees(
+                    (p.filled_qty as i128 * paise as i128).clamp(i64::MIN as i128, i64::MAX as i128)
+                        as i64,
+                );
             }
         }
         let cash = trader.cash();
+        let cash_paise = trader.cash_paise();
+        let positions_value_paise =
+            pos_value_paise.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
         equity.push(EquityPoint {
             ts,
             cash,
             positions_value: pos_value,
             equity: cash + pos_value,
+            cash_paise,
+            positions_value_paise,
+            equity_paise: cash_paise.saturating_add(positions_value_paise),
         });
         let allocation = if symbols.is_empty() {
             0.0
@@ -1331,6 +1400,7 @@ fn run_internal(
                 .push(SymbolEquityPoint {
                     ts,
                     equity: allocation + pnl,
+                    equity_paise: crate::trader::rupees_to_paise(allocation + pnl),
                     position_qty: qty,
                 });
         }
@@ -1438,9 +1508,15 @@ fn run_internal(
             Some(OpenPosition {
                 symbol: s.clone(),
                 qty: p.filled_qty,
-                avg_entry: p.avg_entry,
+                avg_entry: crate::trader::paise_to_rupees(p.avg_entry_paise),
                 last_close: c.close,
-                unrealized: (c.close - p.avg_entry) * p.filled_qty as f64,
+                unrealized: (crate::trader::rupees_to_paise(c.close) - p.avg_entry_paise) as f64
+                    * p.filled_qty as f64
+                    / 100.0,
+                avg_entry_paise: p.avg_entry_paise,
+                last_close_paise: crate::trader::rupees_to_paise(c.close),
+                unrealized_paise: (crate::trader::rupees_to_paise(c.close) - p.avg_entry_paise)
+                    .saturating_mul(p.filled_qty),
             })
         })
         .collect();
@@ -1494,6 +1570,8 @@ fn to_fill(ts: i64, e: &OrderEvent, reqs: &HashMap<OrderId, OrderRequest>) -> Op
         _ => return None,
     };
     let r = reqs.get(id)?;
+    let price = crate::trader::paise_to_rupees(crate::trader::rupees_to_paise(price));
+    let fees = crate::trader::paise_to_rupees(crate::trader::rupees_to_paise(fees));
     Some(Fill {
         ts,
         symbol: r.symbol.clone(),
@@ -1501,7 +1579,9 @@ fn to_fill(ts: i64, e: &OrderEvent, reqs: &HashMap<OrderId, OrderRequest>) -> Op
         side: r.side,
         qty,
         price,
+        price_paise: crate::trader::rupees_to_paise(price),
         fees,
+        fees_paise: crate::trader::rupees_to_paise(fees),
         reason: r.reason.clone(),
     })
 }
@@ -1509,14 +1589,14 @@ fn derive_trades(fills: &[Fill]) -> Vec<Trade> {
     #[derive(Default)]
     struct Lot {
         qty: u64,
-        cost: f64,
-        entry_fees: f64,
+        cost_paise: i128,
+        entry_fees_paise: i128,
         entry_ts: i64,
         closed_qty: u64,
-        closed_entry_cost: f64,
-        closed_exit_value: f64,
-        closed_fees: f64,
-        closed_pnl: f64,
+        closed_entry_cost_paise: i128,
+        closed_exit_value_paise: i128,
+        closed_fees_paise: i128,
+        closed_pnl_paise: i128,
     }
     let mut lots = BTreeMap::<Symbol, Lot>::new();
     let mut trades = Vec::new();
@@ -1528,35 +1608,54 @@ fn derive_trades(fills: &[Fill]) -> Vec<Trade> {
                     lot.entry_ts = f.ts;
                 }
                 lot.qty += f.qty;
-                lot.cost += f.price * f.qty as f64;
-                lot.entry_fees += f.fees;
+                lot.cost_paise += f.price_paise as i128 * f.qty as i128;
+                lot.entry_fees_paise += f.fees_paise as i128;
             }
             Side::Sell => {
                 if lot.qty == 0 {
                     continue;
                 }
                 let q = f.qty.min(lot.qty);
-                let avg = lot.cost / lot.qty as f64;
-                let entry_fee = lot.entry_fees * q as f64 / lot.qty as f64;
-                let exit_fee = f.fees * q as f64 / f.qty as f64;
+                let entry_cost = round_half_even_i128(lot.cost_paise * q as i128, lot.qty as i128);
+                let entry_fee =
+                    round_half_even_i128(lot.entry_fees_paise * q as i128, lot.qty as i128);
+                let exit_fee =
+                    round_half_even_i128(f.fees_paise as i128 * q as i128, f.qty.max(1) as i128);
+                let exit_value = f.price_paise as i128 * q as i128;
                 lot.closed_qty += q;
-                lot.closed_entry_cost += avg * q as f64;
-                lot.closed_exit_value += f.price * q as f64;
-                lot.closed_fees += entry_fee + exit_fee;
-                lot.closed_pnl += (f.price - avg) * q as f64 - entry_fee - exit_fee;
+                lot.closed_entry_cost_paise += entry_cost;
+                lot.closed_exit_value_paise += exit_value;
+                lot.closed_fees_paise += entry_fee + exit_fee;
+                lot.closed_pnl_paise += exit_value - entry_cost - entry_fee - exit_fee;
                 lot.qty -= q;
-                lot.cost -= avg * q as f64;
-                lot.entry_fees -= entry_fee;
+                lot.cost_paise -= entry_cost;
+                lot.entry_fees_paise -= entry_fee;
                 if lot.qty == 0 && lot.closed_qty > 0 {
                     trades.push(Trade {
                         symbol: f.symbol.clone(),
                         entry_ts: lot.entry_ts,
                         exit_ts: f.ts,
                         qty: lot.closed_qty,
-                        avg_entry: lot.closed_entry_cost / lot.closed_qty as f64,
-                        avg_exit: lot.closed_exit_value / lot.closed_qty as f64,
-                        fees: lot.closed_fees,
-                        net_pnl: lot.closed_pnl,
+                        avg_entry: crate::trader::paise_to_rupees(round_half_even_i128(
+                            lot.closed_entry_cost_paise,
+                            lot.closed_qty as i128,
+                        ) as i64),
+                        avg_entry_paise: round_half_even_i128(
+                            lot.closed_entry_cost_paise,
+                            lot.closed_qty as i128,
+                        ) as i64,
+                        avg_exit: crate::trader::paise_to_rupees(round_half_even_i128(
+                            lot.closed_exit_value_paise,
+                            lot.closed_qty as i128,
+                        ) as i64),
+                        avg_exit_paise: round_half_even_i128(
+                            lot.closed_exit_value_paise,
+                            lot.closed_qty as i128,
+                        ) as i64,
+                        fees: crate::trader::paise_to_rupees(lot.closed_fees_paise as i64),
+                        fees_paise: lot.closed_fees_paise as i64,
+                        net_pnl: crate::trader::paise_to_rupees(lot.closed_pnl_paise as i64),
+                        net_pnl_paise: lot.closed_pnl_paise as i64,
                         exit_reason: f.reason.clone(),
                     });
                     *lot = Lot::default();
@@ -1647,6 +1746,36 @@ mod tests {
                 qty: 2,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn fee_rounding_is_half_even_in_integer_paise() {
+        assert_eq!(round_half_even_i128(1, 2), 0);
+        assert_eq!(round_half_even_i128(3, 2), 2);
+        assert_eq!(round_half_even_i128(5, 2), 2);
+        assert_eq!(round_half_even_i128(7, 2), 4);
+
+        let mut broker = SimBroker::new(vec!["ABC".into()]);
+        broker.fees.bps = 5000.0;
+        broker
+            .submit(&OrderRequest {
+                client_order_id: "half-even-fee".into(),
+                symbol: "ABC".into(),
+                side: Side::Buy,
+                qty: 3,
+                reason: OrderReason::Rule("r".into()),
+                ref_price: 0.01,
+                decided_at: 1,
+            })
+            .unwrap();
+        broker.on_candle_open(&BTreeMap::from([("ABC".into(), candle(2, 0.01, 0.01))]));
+        assert!(matches!(
+            broker.drain_events().as_slice(),
+            [
+                OrderEvent::Acked { .. },
+                OrderEvent::Filled { fees: 0.02, .. }
+            ]
         ));
     }
 
@@ -2087,7 +2216,16 @@ pub fn write_results(dir: impl Into<PathBuf>, result: &RunResult) -> Result<(), 
     csv_record(
         &mut f,
         [
-            "ts", "symbol", "order_id", "side", "qty", "price", "fees", "reason",
+            "ts",
+            "symbol",
+            "order_id",
+            "side",
+            "qty",
+            "price",
+            "price_paise",
+            "fees",
+            "fees_paise",
+            "reason",
         ]
         .map(str::to_owned)
         .to_vec(),
@@ -2102,7 +2240,9 @@ pub fn write_results(dir: impl Into<PathBuf>, result: &RunResult) -> Result<(), 
                 format!("{:?}", x.side),
                 x.qty.to_string(),
                 format!("{:.10}", x.price),
+                x.price_paise.to_string(),
                 format!("{:.10}", x.fees),
+                x.fees_paise.to_string(),
                 format!("{:?}", x.reason),
             ],
         )?;
@@ -2111,9 +2251,17 @@ pub fn write_results(dir: impl Into<PathBuf>, result: &RunResult) -> Result<(), 
     let mut e = csv::Writer::from_writer(File::create(dir.join("equity.csv"))?);
     csv_record(
         &mut e,
-        ["ts", "cash", "positions_value", "equity"]
-            .map(str::to_owned)
-            .to_vec(),
+        [
+            "ts",
+            "cash",
+            "cash_paise",
+            "positions_value",
+            "positions_value_paise",
+            "equity",
+            "equity_paise",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
     )?;
     for x in &result.equity {
         csv_record(
@@ -2121,8 +2269,11 @@ pub fn write_results(dir: impl Into<PathBuf>, result: &RunResult) -> Result<(), 
             vec![
                 x.ts.to_string(),
                 format!("{:.10}", x.cash),
+                x.cash_paise.to_string(),
                 format!("{:.10}", x.positions_value),
+                x.positions_value_paise.to_string(),
                 format!("{:.10}", x.equity),
+                x.equity_paise.to_string(),
             ],
         )?;
     }
@@ -2168,9 +2319,13 @@ pub fn write_results(dir: impl Into<PathBuf>, result: &RunResult) -> Result<(), 
             "exit_ts",
             "qty",
             "avg_entry",
+            "avg_entry_paise",
             "avg_exit",
+            "avg_exit_paise",
             "fees",
+            "fees_paise",
             "net_pnl",
+            "net_pnl_paise",
             "exit_reason",
         ]
         .map(str::to_owned)
@@ -2185,9 +2340,13 @@ pub fn write_results(dir: impl Into<PathBuf>, result: &RunResult) -> Result<(), 
                 tr.exit_ts.to_string(),
                 tr.qty.to_string(),
                 format!("{:.10}", tr.avg_entry),
+                tr.avg_entry_paise.to_string(),
                 format!("{:.10}", tr.avg_exit),
+                tr.avg_exit_paise.to_string(),
                 format!("{:.10}", tr.fees),
+                tr.fees_paise.to_string(),
                 format!("{:.10}", tr.net_pnl),
+                tr.net_pnl_paise.to_string(),
                 format!("{:?}", tr.exit_reason),
             ],
         )?;
@@ -2303,6 +2462,17 @@ fn build_metrics(result: &RunResult, start: f64, end: f64, portfolio_dd: f64) ->
     }
     if let Some(obj) = p.as_object_mut() {
         obj.insert("net_pnl".into(), serde_json::json!(end - start));
+        let start_paise = crate::trader::rupees_to_paise(start);
+        let end_paise = result
+            .equity
+            .last()
+            .map_or(start_paise, |point| point.equity_paise);
+        obj.insert(
+            "net_pnl_paise".into(),
+            serde_json::json!(end_paise - start_paise),
+        );
+        obj.insert("start_equity_paise".into(), serde_json::json!(start_paise));
+        obj.insert("end_equity_paise".into(), serde_json::json!(end_paise));
         obj.insert(
             "return_pct".into(),
             serde_json::json!(if start == 0.0 {

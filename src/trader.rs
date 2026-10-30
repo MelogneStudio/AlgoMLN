@@ -8,6 +8,59 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub type OrderId = String;
+/// Convert a rupee-denominated market value to integer paise using ties-to-even.
+pub fn rupees_to_paise(value: f64) -> i64 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let scaled = value * 100.0;
+    let floor = scaled.floor();
+    let fraction = scaled - floor;
+    let rounded = if fraction < 0.5 {
+        floor
+    } else if fraction > 0.5 || (floor as i128).rem_euclid(2) != 0 {
+        floor + 1.0
+    } else {
+        floor
+    };
+    rounded.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+}
+pub fn paise_to_rupees(value: i64) -> f64 {
+    value as f64 / 100.0
+}
+fn round_half_even_ratio(numerator: i128, denominator: i128) -> i128 {
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let twice = remainder.abs() * 2;
+    if twice > denominator.abs() || (twice == denominator.abs() && quotient % 2 != 0) {
+        quotient + numerator.signum() * denominator.signum()
+    } else {
+        quotient
+    }
+}
+fn decimal_scaled(value: &str, scale: i128) -> Option<i128> {
+    let negative = value.starts_with('-');
+    let unsigned = value.trim_start_matches(['-', '+']);
+    let mut parts = unsigned.split('.');
+    let whole: i128 = parts.next()?.parse().ok()?;
+    let fraction = parts.next().unwrap_or("");
+    if fraction.len() > 9 || !fraction.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let denominator = 10i128.checked_pow(fraction.len() as u32)?;
+    let fractional = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<i128>().ok()?
+    };
+    let scaled = whole
+        .checked_mul(scale)?
+        .checked_add(round_half_even_ratio(
+            fractional.checked_mul(scale)?,
+            denominator,
+        ))?;
+    Some(if negative { -scaled } else { scaled })
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Act,
@@ -170,7 +223,7 @@ pub struct FrameOutput {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Position {
     pub filled_qty: i64,
-    pub avg_entry: f64,
+    pub avg_entry_paise: i64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrderState {
@@ -208,9 +261,10 @@ pub struct Trader {
     positions: BTreeMap<Symbol, Position>,
     orders: BTreeMap<OrderId, Pending>,
     last_prices: BTreeMap<Symbol, (f64, i64)>,
-    cash: f64,
-    realized_pnl_today: f64,
-    realized_loss_today: f64,
+    cash_paise: i64,
+    initial_cash_paise: i64,
+    realized_pnl_today_paise: i64,
+    realized_loss_today_paise: i64,
     accepted_buys_today: u64,
     next_id: u64,
     daily_loss_reported: bool,
@@ -223,7 +277,7 @@ impl Trader {
         {
             return Err(TraderError::InitialCashRequired);
         }
-        let cash = cfg.initial_cash;
+        let cash_paise = rupees_to_paise(cfg.initial_cash);
         Ok(Self {
             program: program.clone(),
             cfg,
@@ -231,9 +285,10 @@ impl Trader {
             positions: BTreeMap::new(),
             orders: BTreeMap::new(),
             last_prices: BTreeMap::new(),
-            cash,
-            realized_pnl_today: 0.0,
-            realized_loss_today: 0.0,
+            cash_paise,
+            initial_cash_paise: cash_paise,
+            realized_pnl_today_paise: 0,
+            realized_loss_today_paise: 0,
             accepted_buys_today: 0,
             next_id: 1,
             daily_loss_reported: false,
@@ -241,20 +296,29 @@ impl Trader {
         })
     }
     pub fn start_day(&mut self, _day: i64) {
-        self.realized_pnl_today = 0.0;
-        self.realized_loss_today = 0.0;
+        self.realized_pnl_today_paise = 0;
+        self.realized_loss_today_paise = 0;
         self.accepted_buys_today = 0;
         self.daily_loss_reported = false;
         self.daily_loss_locked = false;
     }
     pub fn cash(&self) -> f64 {
-        self.cash
+        paise_to_rupees(self.cash_paise)
+    }
+    pub fn cash_paise(&self) -> i64 {
+        self.cash_paise
     }
     pub fn realized_pnl_today(&self) -> f64 {
-        self.realized_pnl_today
+        paise_to_rupees(self.realized_pnl_today_paise)
+    }
+    pub fn realized_pnl_today_paise(&self) -> i64 {
+        self.realized_pnl_today_paise
     }
     pub fn realized_loss_today(&self) -> f64 {
-        self.realized_loss_today
+        paise_to_rupees(self.realized_loss_today_paise)
+    }
+    pub fn realized_loss_today_paise(&self) -> i64 {
+        self.realized_loss_today_paise
     }
     pub fn accepted_buys_today(&self) -> u64 {
         self.accepted_buys_today
@@ -263,6 +327,9 @@ impl Trader {
         self.orders.values().filter(|o| o.live()).count()
     }
     pub fn reserved_cash(&self) -> f64 {
+        paise_to_rupees(self.reserved_cash_inner())
+    }
+    pub fn reserved_cash_paise(&self) -> i64 {
         self.reserved_cash_inner()
     }
     pub fn position(&self, s: &str) -> Option<&Position> {
@@ -306,12 +373,20 @@ impl Trader {
                     let q = qty.min(o.remaining());
                     if q > 0 {
                         o.filled += q;
-                        fill = Some((o.req.symbol.clone(), o.req.side, q, price, fees));
+                        let booked_price = paise_to_rupees(rupees_to_paise(price));
+                        let booked_fees = paise_to_rupees(rupees_to_paise(fees));
+                        fill = Some((
+                            o.req.symbol.clone(),
+                            o.req.side,
+                            q,
+                            booked_price,
+                            booked_fees,
+                        ));
                         events.push(TraderEvent::Fill {
                             id: id.clone(),
                             qty: q,
-                            price,
-                            fees,
+                            price: booked_price,
+                            fees: booked_fees,
                         })
                     }
                     if matches!(ev, OrderEvent::Filled { .. }) || o.remaining() == 0 {
@@ -332,37 +407,51 @@ impl Trader {
             }
         }
         if let Some((s, side, q, p, fees)) = fill {
-            self.apply_fill(&s, side, q, p, fees)
+            self.apply_fill(&s, side, q, rupees_to_paise(p), rupees_to_paise(fees))
         }
         if self.orders.get(&id).is_some_and(|o| !o.live()) {
             events.push(TraderEvent::OrderClosed { id })
         }
         events
     }
-    fn apply_fill(&mut self, s: &str, side: Side, q: u64, p: f64, fees: f64) {
+    fn apply_fill(&mut self, s: &str, side: Side, q: u64, p: i64, fees: i64) {
         let pos = self.positions.entry(s.to_owned()).or_default();
-        let qf = q as f64;
+        let q_i = q.min(i64::MAX as u64) as i64;
         match side {
             Side::Buy => {
-                let old = pos.filled_qty.max(0) as f64;
-                let total = old + qf;
-                pos.avg_entry = (old * pos.avg_entry + qf * p + fees) / total;
-                pos.filled_qty = pos.filled_qty.saturating_add(q.min(i64::MAX as u64) as i64);
-                self.cash -= qf * p + fees
+                let old = pos.filled_qty.max(0);
+                let total = old.saturating_add(q_i);
+                let old_cost = (old as i128) * (pos.avg_entry_paise as i128);
+                let fill_cost = (q_i as i128) * (p as i128) + fees as i128;
+                pos.avg_entry_paise =
+                    round_half_even_ratio(old_cost + fill_cost, total.max(1) as i128)
+                        .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+                pos.filled_qty = total;
+                self.cash_paise = self
+                    .cash_paise
+                    .saturating_sub(q_i.saturating_mul(p).saturating_add(fees));
             }
             Side::Sell => {
                 let closed = q.min(pos.filled_qty.max(0) as u64);
-                let realized = (p - pos.avg_entry) * closed as f64 - fees;
-                self.realized_pnl_today += realized;
-                self.realized_loss_today += (-realized).max(0.0);
+                let closed_i = closed.min(i64::MAX as u64) as i64;
+                let realized = (p.saturating_sub(pos.avg_entry_paise))
+                    .saturating_mul(closed_i)
+                    .saturating_sub(fees);
+                self.realized_pnl_today_paise =
+                    self.realized_pnl_today_paise.saturating_add(realized);
+                self.realized_loss_today_paise = self
+                    .realized_loss_today_paise
+                    .saturating_add(realized.saturating_neg().max(0));
                 pos.filled_qty = pos
                     .filled_qty
                     .saturating_sub(q.min(i64::MAX as u64) as i64)
                     .max(0);
                 if pos.filled_qty == 0 {
-                    pos.avg_entry = 0.0
+                    pos.avg_entry_paise = 0;
                 }
-                self.cash += qf * p - fees
+                self.cash_paise = self
+                    .cash_paise
+                    .saturating_add(q_i.saturating_mul(p).saturating_sub(fees));
             }
         }
     }
@@ -501,12 +590,18 @@ impl Trader {
                     .program
                     .stop_loss()
                     .and_then(|v| v.spelling.parse::<f64>().ok())
-                    .is_some_and(|x| c.close <= pos.avg_entry * (1.0 - x / 100.0));
+                    .is_some_and(|x| {
+                        rupees_to_paise(c.close)
+                            <= (pos.avg_entry_paise as f64 * (1.0 - x / 100.0)) as i64
+                    });
                 let take = self
                     .program
                     .take_profit()
                     .and_then(|v| v.spelling.parse::<f64>().ok())
-                    .is_some_and(|x| c.close >= pos.avg_entry * (1.0 + x / 100.0));
+                    .is_some_and(|x| {
+                        rupees_to_paise(c.close)
+                            >= (pos.avg_entry_paise as f64 * (1.0 + x / 100.0)) as i64
+                    });
                 if stop || take {
                     self.emit_at(
                         &mut out,
@@ -573,15 +668,20 @@ impl Trader {
             .sum::<i64>();
         (filled - reserved).max(0)
     }
-    fn reserved_cash_inner(&self) -> f64 {
+    fn reserved_cash_inner(&self) -> i64 {
         self.orders
             .values()
             .filter(|o| o.live() && o.req.side == Side::Buy)
-            .map(|o| o.remaining() as f64 * o.req.ref_price)
-            .sum()
+            .map(|o| {
+                (o.remaining().min(i64::MAX as u64) as i64)
+                    .saturating_mul(rupees_to_paise(o.req.ref_price))
+            })
+            .fold(0i64, i64::saturating_add)
     }
-    fn available_cash(&self) -> f64 {
-        (self.cash - self.reserved_cash()).max(0.0)
+    fn available_cash(&self) -> i64 {
+        self.cash_paise
+            .saturating_sub(self.reserved_cash_inner())
+            .max(0)
     }
     fn pending_new(&self) -> BTreeSet<Symbol> {
         self.orders
@@ -629,7 +729,7 @@ impl Trader {
         if self.daily_loss_breached() {
             return Some("MAX_DAILY_LOSS");
         }
-        if self.available_cash() + f64::EPSILON < q as f64 * p {
+        if (self.available_cash() as i128) < q as i128 * rupees_to_paise(p) as i128 {
             return Some("CASH");
         }
         None
@@ -640,9 +740,10 @@ impl Trader {
             .max_daily_loss
             .as_ref()
             .is_some_and(|limit| {
-                self.cfg.initial_cash > 0.0
-                    && self.realized_loss_today / self.cfg.initial_cash
-                        >= limit.spelling.parse::<f64>().unwrap_or(0.0) / 100.0
+                self.initial_cash_paise > 0
+                    && self.realized_loss_today_paise as i128 * 10_000
+                        >= decimal_scaled(&limit.spelling, 100).unwrap_or(0)
+                            * self.initial_cash_paise as i128
             })
     }
     fn resolve_size(&self, a: &TradeAmount, p: f64, s: &str) -> Option<u64> {
@@ -651,13 +752,27 @@ impl Trader {
         }
         let raw = match a {
             TradeAmount::Quantity(n) => *n,
-            TradeAmount::Worth(x) => (x.spelling.parse::<f64>().ok()? / p).floor() as u64,
+            TradeAmount::Worth(x) => {
+                let worth_paise = decimal_rupees_to_paise(&x.spelling)?;
+                let ref_paise = rupees_to_paise(p);
+                if ref_paise <= 0 {
+                    0
+                } else {
+                    (worth_paise.max(0) as i128 / ref_paise as i128) as u64
+                }
+            }
             TradeAmount::BuyCapitalPercentage(x) => {
-                (self.available_cash() * x.spelling.parse::<f64>().ok()? / 100.0 / p).floor() as u64
+                let pct_bp = decimal_scaled(&x.spelling, 100).unwrap_or(0);
+                let ref_paise = rupees_to_paise(p);
+                if ref_paise <= 0 {
+                    0
+                } else {
+                    ((self.available_cash() as i128 * pct_bp) / (ref_paise as i128 * 10_000)) as u64
+                }
             }
             TradeAmount::SellPositionPercentage(x) => {
-                ((self.net_position(s) as f64 * x.spelling.parse::<f64>().ok()? / 100.0).floor())
-                    as u64
+                ((self.net_position(s) as i128 * decimal_scaled(&x.spelling, 100).unwrap_or(0))
+                    / 10_000) as u64
             }
         };
         let r = self
@@ -670,6 +785,9 @@ impl Trader {
         let q = raw / lot * lot;
         (q >= r.min_qty).then_some(q)
     }
+}
+fn decimal_rupees_to_paise(value: &str) -> Option<i64> {
+    i64::try_from(decimal_scaled(value, 100)?).ok()
 }
 fn event_id(e: &OrderEvent) -> &str {
     match e {
@@ -843,6 +961,25 @@ mod tests {
             out.events[1],
             TraderEvent::RiskBlocked { limit: "CASH", .. }
         ));
+    }
+
+    #[test]
+    fn paise_ledger_and_percentage_sizing_use_integer_math() {
+        assert_eq!(decimal_rupees_to_paise("12.34"), Some(1234));
+        assert_eq!(decimal_scaled("12.34", 100), Some(1234));
+        let t = trader("TRADE_IN ABC\nWHEN close > 1\nBUY 50%\n", 100.0);
+        assert_eq!(t.cash_paise(), 10_000);
+        assert_eq!(
+            t.resolve_size(
+                &TradeAmount::BuyCapitalPercentage(
+                    crate::source::NumericLiteral::parse("33.33".into(), Default::default())
+                        .unwrap()
+                ),
+                3.0,
+                "ABC",
+            ),
+            Some(11)
+        );
     }
 
     #[test]

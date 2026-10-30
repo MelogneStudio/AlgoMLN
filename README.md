@@ -29,3 +29,9 @@ The output directory contains `fills.csv`, `trades.csv`, `equity.csv`,
 
 Run the single-symbol and three-symbol synthetic throughput and peak-allocation
 benchmarks with `cargo bench --bench sim_pipeline`.
+
+Simulation ledger money is stored in integer paise. Candle and broker prices
+remain rupee-denominated `f64` at the market-data boundary, then convert to
+paise for ledger accounting, sizing, and risk checks. Fees use round-half-to-even
+to the nearest paise; ties go to the even paise. Result artifacts include exact
+`*_paise` fields alongside readable rupee values.
