@@ -1,0 +1,5 @@
+TRADE_IN ABC
+WHEN close > 10
+BUY 1
+WHEN close < 9
+SELL ALL

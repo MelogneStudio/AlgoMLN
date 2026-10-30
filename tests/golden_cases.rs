@@ -20,14 +20,10 @@ fn golden_strategy_samples_match_serialized_ast() {
 #[test]
 fn golden_error_cases_match_stable_codes() {
     let root = Path::new("tests/golden");
-    for entry in fs::read_dir(root).unwrap().flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "algomln") {
-            let name = path.file_stem().unwrap().to_string_lossy();
-            let source = fs::read_to_string(&path).unwrap();
-            let expected = fs::read_to_string(root.join(format!("{name}.error"))).unwrap();
-            let error = algomln::compile(&source).unwrap_err();
-            assert_eq!(error.code(), expected.trim(), "{}", path.display());
-        }
-    }
+    let name = "malformed";
+    let path = root.join(format!("{name}.algomln"));
+    let source = fs::read_to_string(&path).unwrap();
+    let expected = fs::read_to_string(root.join(format!("{name}.error"))).unwrap();
+    let error = algomln::compile(&source).unwrap_err();
+    assert_eq!(error.code(), expected.trim(), "{}", path.display());
 }

@@ -1,5 +1,5 @@
-//! AlgoMLN strategy language frontend. This crate parses and validates strategy
-//! descriptions; it deliberately does not evaluate market data or execute trades.
+//! AlgoMLN strategy language frontend, streaming indicator engine, portfolio
+//! trader, and deterministic local historical simulation.
 
 pub mod ast;
 pub mod diagnostics;
@@ -7,6 +7,7 @@ pub mod engine;
 pub mod indicators;
 pub mod lexer;
 pub mod parser;
+pub mod sim;
 pub mod source;
 pub mod trader;
 pub mod validator;

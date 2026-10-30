@@ -4,6 +4,7 @@ use crate::{
     engine::{LevelFrame, Program, RuleId, Symbol},
     indicators::Candle,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub type OrderId = String;
@@ -12,19 +13,19 @@ pub enum Mode {
     Act,
     Observe,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
     Buy,
     Sell,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderReason {
     Rule(RuleId),
     StopLoss,
     TakeProfit,
     DailyLossFlatten,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OrderRequest {
     pub client_order_id: OrderId,
     pub symbol: Symbol,
@@ -65,6 +66,7 @@ pub enum OrderEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PortError {
     Message(String),
+    UnknownOrder(OrderId),
 }
 pub trait ExecutionPort {
     fn submit(&mut self, req: &OrderRequest) -> Result<(), PortError>;
@@ -131,7 +133,7 @@ impl Default for TraderConfig {
 pub enum TraderError {
     InitialCashRequired,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum TraderEvent {
     RuleSkipped {
         symbol: Symbol,
@@ -142,6 +144,7 @@ pub enum TraderEvent {
         rule_id: RuleId,
         limit: &'static str,
     },
+    DailyLossBreached,
     OrderEmitted(OrderRequest),
     Fill {
         id: OrderId,
@@ -210,6 +213,8 @@ pub struct Trader {
     realized_loss_today: f64,
     accepted_buys_today: u64,
     next_id: u64,
+    daily_loss_reported: bool,
+    daily_loss_locked: bool,
 }
 impl Trader {
     pub fn new(program: &Program, cfg: TraderConfig) -> Result<Self, TraderError> {
@@ -231,12 +236,16 @@ impl Trader {
             realized_loss_today: 0.0,
             accepted_buys_today: 0,
             next_id: 1,
+            daily_loss_reported: false,
+            daily_loss_locked: false,
         })
     }
     pub fn start_day(&mut self, _day: i64) {
         self.realized_pnl_today = 0.0;
         self.realized_loss_today = 0.0;
-        self.accepted_buys_today = 0
+        self.accepted_buys_today = 0;
+        self.daily_loss_reported = false;
+        self.daily_loss_locked = false;
     }
     pub fn cash(&self) -> f64 {
         self.cash
@@ -249,6 +258,12 @@ impl Trader {
     }
     pub fn accepted_buys_today(&self) -> u64 {
         self.accepted_buys_today
+    }
+    pub fn pending_order_count(&self) -> usize {
+        self.orders.values().filter(|o| o.live()).count()
+    }
+    pub fn reserved_cash(&self) -> f64 {
+        self.reserved_cash_inner()
     }
     pub fn position(&self, s: &str) -> Option<&Position> {
         self.positions.get(s)
@@ -386,6 +401,9 @@ impl Trader {
             .insert(f.symbol.clone(), (c.close, f.candle_ts));
         let loss_breached = self.daily_loss_breached();
         if loss_breached {
+            self.daily_loss_locked = true;
+            let report_daily_loss = !self.daily_loss_reported;
+            self.daily_loss_reported = true;
             out.cancels.extend(
                 self.orders
                     .values()
@@ -424,6 +442,9 @@ impl Trader {
                         limit: "MAX_DAILY_LOSS",
                     });
                 }
+            }
+            if report_daily_loss {
+                out.events.push(TraderEvent::DailyLossBreached);
             }
             return out;
         }
@@ -505,6 +526,7 @@ impl Trader {
         }
         out
     }
+    #[allow(clippy::too_many_arguments)]
     fn emit_at(
         &mut self,
         out: &mut FrameOutput,
@@ -551,7 +573,7 @@ impl Trader {
             .sum::<i64>();
         (filled - reserved).max(0)
     }
-    fn reserved_cash(&self) -> f64 {
+    fn reserved_cash_inner(&self) -> f64 {
         self.orders
             .values()
             .filter(|o| o.live() && o.req.side == Side::Buy)
@@ -570,7 +592,7 @@ impl Trader {
                     && self
                         .positions
                         .get(&o.req.symbol)
-                        .is_none_or(|p| p.filled_qty == 0)
+                        .map_or(true, |p| p.filled_qty == 0)
             })
             .map(|o| o.req.symbol.clone())
             .collect()

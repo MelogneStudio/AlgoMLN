@@ -41,6 +41,34 @@ impl Program {
     pub fn strategy(&self) -> &Strategy {
         &self.strategy
     }
+    /// Largest indicator lookback used by the strategy, suitable as the
+    /// default amount of history to feed in observe mode before a run.
+    pub fn warmup_bars(&self) -> usize {
+        fn expr(e: &NumericExpr, max: &mut usize) {
+            if let NumericExpr::Indicator(i) = e {
+                *max = (*max).max(i.period as usize);
+            }
+        }
+        fn condition(c: &Condition, max: &mut usize) {
+            match c {
+                Condition::Compare { left, right, .. } | Condition::Cross { left, right, .. } => {
+                    expr(left, max);
+                    expr(right, max);
+                }
+                Condition::And(a, b) | Condition::Or(a, b) => {
+                    condition(a, max);
+                    condition(b, max);
+                }
+                Condition::Not(a) => condition(a, max),
+                _ => {}
+            }
+        }
+        let mut max = 0;
+        for rule in &self.strategy.rules {
+            condition(&rule.condition, &mut max);
+        }
+        max
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct LevelFrame {
@@ -76,6 +104,9 @@ pub struct Engine {
     program: Program,
 }
 impl Engine {
+    pub fn warmup_bars(program: &Program) -> usize {
+        program.warmup_bars()
+    }
     pub fn new(program: &Program, symbol: Symbol) -> Result<Self, EngineError> {
         let mut provider = PrecomputedProvider::new();
         let mut handles = HashMap::new();
