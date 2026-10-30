@@ -34,4 +34,6 @@ Simulation ledger money is stored in integer paise. Candle and broker prices
 remain rupee-denominated `f64` at the market-data boundary, then convert to
 paise for ledger accounting, sizing, and risk checks. Fees use round-half-to-even
 to the nearest paise; ties go to the even paise. Result artifacts include exact
-`*_paise` fields alongside readable rupee values.
+`*_paise` fields alongside readable rupee values. The broker stores fee rates as
+integer hundredths of a basis point for fee multiplication and rounds simulated
+fills adversely to the configured tick size (5 paise by default).

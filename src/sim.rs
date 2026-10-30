@@ -855,14 +855,17 @@ impl SimBroker {
             } else {
                 c.open * (1.0 - self.slippage_bps / 10000.0)
             };
-            let raw_price_paise = crate::trader::rupees_to_paise(raw_price);
-            let tick = self.tick_size_paise.max(1);
-            let quotient = raw_price_paise.div_euclid(tick);
-            let remainder = raw_price_paise.rem_euclid(tick);
-            let price_paise = match p.req.side {
-                Side::Buy if remainder != 0 => quotient.saturating_add(1).saturating_mul(tick),
-                _ => quotient.saturating_mul(tick),
+            let tick_paise = self.tick_size_paise.max(1);
+            let tick_units = raw_price * 100.0 / tick_paise as f64;
+            let nearest = tick_units.round();
+            let units = if (tick_units - nearest).abs() <= 1e-10 {
+                nearest
+            } else if p.req.side == Side::Buy {
+                tick_units.ceil()
+            } else {
+                tick_units.floor()
             };
+            let price_paise = (units as i64).saturating_mul(tick_paise);
             let price = crate::trader::paise_to_rupees(price_paise);
             p.notional_filled_paise += qty as i128 * price_paise as i128;
             let target_fee_paise = if self.fees.bps == 0.0
@@ -1087,28 +1090,33 @@ fn check_invariants(
     }
     Ok(())
 }
-fn symbol_pnl(fills: &[Fill], symbol: &str, mark: f64) -> (f64, i64) {
+fn symbol_pnl(fills: &[Fill], symbol: &str, mark_paise: i64) -> (i64, i64) {
     let mut qty = 0u64;
-    let mut cost = 0.0;
-    let mut realized = 0.0;
+    let mut cash_flow_paise = 0i128;
     for f in fills.iter().filter(|f| f.symbol == symbol) {
         match f.side {
             Side::Buy => {
                 qty += f.qty;
-                cost += f.price * f.qty as f64 + f.fees
+                cash_flow_paise -= f.price_paise as i128 * f.qty as i128 + f.fees_paise as i128;
             }
             Side::Sell => {
                 let q = f.qty.min(qty);
                 if q > 0 {
-                    let avg = cost / qty as f64;
-                    realized += (f.price - avg) * q as f64 - f.fees * q as f64 / f.qty as f64;
-                    cost -= avg * q as f64;
                     qty -= q;
+                    cash_flow_paise += f.price_paise as i128 * q as i128
+                        - round_half_even_i128(
+                            f.fees_paise as i128 * q as i128,
+                            f.qty.max(1) as i128,
+                        );
                 }
             }
         }
     }
-    (realized + mark * qty as f64 - cost, qty as i64)
+    let pnl_paise = cash_flow_paise + mark_paise as i128 * qty as i128;
+    (
+        pnl_paise.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
+        qty as i64,
+    )
 }
 /// Stream a merged source through independent per-symbol engines, then process
 /// broker events before each close frame in deterministic symbol order.
@@ -1361,46 +1369,44 @@ fn run_internal(
                 }
             }
         }
-        let mut pos_value = 0.0;
         let mut pos_value_paise = 0i128;
         for s in &symbols {
             if let (Some(p), Some(c)) = (trader.position(s), last.get(s)) {
                 let paise = crate::trader::rupees_to_paise(c.close);
                 pos_value_paise += p.filled_qty as i128 * paise as i128;
-                pos_value += crate::trader::paise_to_rupees(
-                    (p.filled_qty as i128 * paise as i128).clamp(i64::MIN as i128, i64::MAX as i128)
-                        as i64,
-                );
             }
         }
-        let cash = trader.cash();
         let cash_paise = trader.cash_paise();
         let positions_value_paise =
             pos_value_paise.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        let equity_paise = cash_paise.saturating_add(positions_value_paise);
         equity.push(EquityPoint {
             ts,
-            cash,
-            positions_value: pos_value,
-            equity: cash + pos_value,
+            cash: crate::trader::paise_to_rupees(cash_paise),
+            positions_value: crate::trader::paise_to_rupees(positions_value_paise),
+            equity: crate::trader::paise_to_rupees(equity_paise),
             cash_paise,
             positions_value_paise,
-            equity_paise: cash_paise.saturating_add(positions_value_paise),
+            equity_paise,
         });
-        let allocation = if symbols.is_empty() {
-            0.0
-        } else {
-            config.initial_cash / symbols.len() as f64
-        };
-        for symbol in &symbols {
-            let mark = last.get(symbol).map_or(0.0, |c| c.close);
+        let initial_cash_paise = crate::trader::rupees_to_paise(config.initial_cash);
+        let allocation_base = initial_cash_paise / symbols.len().max(1) as i64;
+        let allocation_remainder = initial_cash_paise.rem_euclid(symbols.len().max(1) as i64);
+        for (symbol_index, symbol) in symbols.iter().enumerate() {
+            let mark = last
+                .get(symbol)
+                .map_or(0, |c| crate::trader::rupees_to_paise(c.close));
             let (pnl, qty) = symbol_pnl(fills, symbol, mark);
+            let allocation_paise =
+                allocation_base + i64::from((symbol_index as i64) < allocation_remainder);
+            let symbol_equity_paise = allocation_paise.saturating_add(pnl);
             symbol_equity
                 .entry(symbol.clone())
                 .or_default()
                 .push(SymbolEquityPoint {
                     ts,
-                    equity: allocation + pnl,
-                    equity_paise: crate::trader::rupees_to_paise(allocation + pnl),
+                    equity: crate::trader::paise_to_rupees(symbol_equity_paise),
+                    equity_paise: symbol_equity_paise,
                     position_qty: qty,
                 });
         }
@@ -1452,15 +1458,14 @@ fn run_internal(
     if config.debug_invariants || cfg!(test) {
         if let Some(last_point) = equity.last() {
             let mut qty = BTreeMap::<Symbol, u64>::new();
-            let mut cost = BTreeMap::<Symbol, f64>::new();
-            let mut realized = 0.0;
+            let mut cash_paise = crate::trader::rupees_to_paise(config.initial_cash) as i128;
             for fill in &fills {
                 let q = qty.entry(fill.symbol.clone()).or_default();
-                let c = cost.entry(fill.symbol.clone()).or_default();
                 match fill.side {
                     Side::Buy => {
                         *q += fill.qty;
-                        *c += fill.qty as f64 * fill.price + fill.fees
+                        cash_paise -=
+                            fill.price_paise as i128 * fill.qty as i128 + fill.fees_paise as i128;
                     }
                     Side::Sell => {
                         if fill.qty > *q {
@@ -1469,30 +1474,29 @@ fn run_internal(
                                 fill.symbol
                             )));
                         }
-                        if *q > 0 {
-                            let avg = *c / *q as f64;
-                            realized += (fill.price - avg) * fill.qty as f64 - fill.fees;
-                            *c -= avg * fill.qty as f64;
-                            *q -= fill.qty;
-                        }
+                        *q -= fill.qty;
+                        cash_paise +=
+                            fill.price_paise as i128 * fill.qty as i128 - fill.fees_paise as i128;
                     }
                 }
             }
-            let unrealized: f64 = symbols
+            let positions_value_paise: i128 = symbols
                 .iter()
                 .map(|s| {
                     let q = *qty.get(s).unwrap_or(&0);
-                    let c = *cost.get(s).unwrap_or(&0.0);
-                    let mark = last.get(s).map_or(0.0, |x| x.close);
-                    mark * q as f64 - c
+                    let mark = last
+                        .get(s)
+                        .map_or(0, |x| crate::trader::rupees_to_paise(x.close));
+                    mark as i128 * q as i128
                 })
                 .sum();
-            if (realized + unrealized - (last_point.equity - config.initial_cash)).abs()
-                > 1e-6 * last_point.equity.abs().max(1.0)
+            let recomputed_equity = cash_paise + positions_value_paise;
+            if cash_paise != last_point.cash_paise as i128
+                || positions_value_paise != last_point.positions_value_paise as i128
+                || recomputed_equity != last_point.equity_paise as i128
             {
                 return Err(SimError::Other(
-                    "invariant: fill P&L plus open unrealized does not reconcile to final equity"
-                        .into(),
+                    "invariant: paise cash and positions recomputed from fills do not exactly reconcile to final equity".into(),
                 ));
             }
         }
@@ -1505,18 +1509,18 @@ fn run_internal(
                 return None;
             }
             let c = last.get(s)?;
+            let last_close_paise = crate::trader::rupees_to_paise(c.close);
+            let unrealized_paise =
+                (last_close_paise - p.avg_entry_paise).saturating_mul(p.filled_qty);
             Some(OpenPosition {
                 symbol: s.clone(),
                 qty: p.filled_qty,
                 avg_entry: crate::trader::paise_to_rupees(p.avg_entry_paise),
-                last_close: c.close,
-                unrealized: (crate::trader::rupees_to_paise(c.close) - p.avg_entry_paise) as f64
-                    * p.filled_qty as f64
-                    / 100.0,
+                last_close: crate::trader::paise_to_rupees(last_close_paise),
+                unrealized: crate::trader::paise_to_rupees(unrealized_paise),
                 avg_entry_paise: p.avg_entry_paise,
-                last_close_paise: crate::trader::rupees_to_paise(c.close),
-                unrealized_paise: (crate::trader::rupees_to_paise(c.close) - p.avg_entry_paise)
-                    .saturating_mul(p.filled_qty),
+                last_close_paise,
+                unrealized_paise,
             })
         })
         .collect();
@@ -1756,8 +1760,32 @@ mod tests {
         assert_eq!(round_half_even_i128(5, 2), 2);
         assert_eq!(round_half_even_i128(7, 2), 4);
 
+        let mut even_broker = SimBroker::new(vec!["ABC".into()]);
+        even_broker.fees.bps = 5000.0; // 1 paisa notional -> exactly 0.5 paisa
+        even_broker.tick_size_paise = 1;
+        even_broker
+            .submit(&OrderRequest {
+                client_order_id: "even-half".into(),
+                symbol: "ABC".into(),
+                side: Side::Buy,
+                qty: 1,
+                reason: OrderReason::Rule("r".into()),
+                ref_price: 0.01,
+                decided_at: 1,
+            })
+            .unwrap();
+        even_broker.on_candle_open(&BTreeMap::from([("ABC".into(), candle(2, 0.01, 0.01))]));
+        assert!(matches!(
+            even_broker.drain_events().as_slice(),
+            [
+                OrderEvent::Acked { .. },
+                OrderEvent::Filled { fees: 0.0, .. }
+            ]
+        ));
+
         let mut broker = SimBroker::new(vec!["ABC".into()]);
         broker.fees.bps = 5000.0;
+        broker.tick_size_paise = 1;
         broker
             .submit(&OrderRequest {
                 client_order_id: "half-even-fee".into(),
@@ -1777,6 +1805,47 @@ mod tests {
                 OrderEvent::Filled { fees: 0.02, .. }
             ]
         ));
+    }
+
+    #[test]
+    fn simulated_slippage_rounds_adversely_to_tick() {
+        let mut buy = SimBroker::new(vec!["ABC".into()]);
+        buy.slippage_bps = 1.0;
+        buy.submit(&OrderRequest {
+            client_order_id: "buy-tick".into(),
+            symbol: "ABC".into(),
+            side: Side::Buy,
+            qty: 1,
+            reason: OrderReason::Rule("r".into()),
+            ref_price: 10.0,
+            decided_at: 1,
+        })
+        .unwrap();
+        buy.on_candle_open(&BTreeMap::from([("ABC".into(), candle(2, 10.01, 10.01))]));
+        let events = buy.drain_events();
+        let OrderEvent::Filled { price, .. } = events[1] else {
+            panic!("expected buy fill")
+        };
+        assert_eq!(crate::trader::rupees_to_paise(price), 1005);
+
+        let mut sell = SimBroker::new(vec!["ABC".into()]);
+        sell.slippage_bps = 1.0;
+        sell.submit(&OrderRequest {
+            client_order_id: "sell-tick".into(),
+            symbol: "ABC".into(),
+            side: Side::Sell,
+            qty: 1,
+            reason: OrderReason::Rule("r".into()),
+            ref_price: 10.0,
+            decided_at: 1,
+        })
+        .unwrap();
+        sell.on_candle_open(&BTreeMap::from([("ABC".into(), candle(2, 10.04, 10.04))]));
+        let events = sell.drain_events();
+        let OrderEvent::Filled { price, .. } = events[1] else {
+            panic!("expected sell fill")
+        };
+        assert_eq!(crate::trader::rupees_to_paise(price), 1000);
     }
 
     #[test]
@@ -2296,16 +2365,17 @@ pub fn write_results(dir: impl Into<PathBuf>, result: &RunResult) -> Result<(), 
         .and_then(serde_json::Value::as_f64)
         .or_else(|| result.equity.first().map(|x| x.equity))
         .unwrap_or(0.0);
-    let end = result.equity.last().map_or(start, |x| x.equity);
-    let mut peak = start;
+    let start_paise = crate::trader::rupees_to_paise(start);
+    let end_paise = result.equity.last().map_or(start_paise, |x| x.equity_paise);
+    let mut peak_paise = start_paise;
     let mut max_dd = 0.0f64;
     for p in &result.equity {
-        peak = peak.max(p.equity);
-        if peak > 0.0 {
-            max_dd = max_dd.max((peak - p.equity) / peak * 100.0);
+        peak_paise = peak_paise.max(p.equity_paise);
+        if peak_paise > 0 {
+            max_dd = max_dd.max((peak_paise - p.equity_paise) as f64 / peak_paise as f64 * 100.0);
         }
     }
-    let metrics = build_metrics(result, start, end, max_dd);
+    let metrics = build_metrics(result, start_paise, end_paise, max_dd);
     std::fs::write(
         dir.join("metrics.json"),
         serde_json::to_vec_pretty(&metrics).expect("serializable"),
@@ -2361,7 +2431,12 @@ fn csv_io_error(error: csv::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, error)
 }
 
-fn build_metrics(result: &RunResult, start: f64, end: f64, portfolio_dd: f64) -> serde_json::Value {
+fn build_metrics(
+    result: &RunResult,
+    start_paise: i64,
+    end_paise: i64,
+    portfolio_dd: f64,
+) -> serde_json::Value {
     let exposure = |series: &[SymbolEquityPoint]| {
         let total = series
             .last()
@@ -2379,23 +2454,25 @@ fn build_metrics(result: &RunResult, start: f64, end: f64, portfolio_dd: f64) ->
         }
     };
     let stats = |trades: Vec<&Trade>| {
-        let wins: Vec<_> = trades.iter().filter(|t| t.net_pnl > 0.0).collect();
-        let losses: Vec<_> = trades.iter().filter(|t| t.net_pnl < 0.0).collect();
-        let gross_win: f64 = wins.iter().map(|t| t.net_pnl).sum();
-        let gross_loss: f64 = losses.iter().map(|t| t.net_pnl.abs()).sum();
-        serde_json::json!({"trades":trades.len(),"win_rate_pct":if trades.is_empty(){0.0}else{wins.len() as f64/trades.len() as f64*100.0},"profit_factor":if gross_loss==0.0{serde_json::Value::Null}else if gross_win==0.0{serde_json::json!(0.0)}else{serde_json::json!(gross_win/gross_loss)},"avg_win":if wins.is_empty(){0.0}else{gross_win/wins.len() as f64},"avg_loss":if losses.is_empty(){0.0}else{gross_loss/losses.len() as f64}})
+        let wins: Vec<_> = trades.iter().filter(|t| t.net_pnl_paise > 0).collect();
+        let losses: Vec<_> = trades.iter().filter(|t| t.net_pnl_paise < 0).collect();
+        let gross_win: i128 = wins.iter().map(|t| t.net_pnl_paise as i128).sum();
+        let gross_loss: i128 = losses.iter().map(|t| -(t.net_pnl_paise as i128)).sum();
+        serde_json::json!({"trades":trades.len(),"win_rate_pct":if trades.is_empty(){0.0}else{wins.len() as f64/trades.len() as f64*100.0},"profit_factor":if gross_loss==0{serde_json::Value::Null}else if gross_win==0{serde_json::json!(0.0)}else{serde_json::json!(gross_win as f64/gross_loss as f64)},"avg_win":if wins.is_empty(){0.0}else{crate::trader::paise_to_rupees(round_half_even_i128(gross_win, wins.len() as i128) as i64)},"avg_loss":if losses.is_empty(){0.0}else{crate::trader::paise_to_rupees(round_half_even_i128(gross_loss, losses.len() as i128) as i64)}})
     };
     let mut symbol_metrics = serde_json::Map::new();
-    let n = result.symbol_equity.len().max(1) as f64;
-    let allocation = start / n;
-    for (symbol, series) in &result.symbol_equity {
-        let final_eq = series.last().map_or(allocation, |p| p.equity);
-        let mut peak = allocation;
+    let n = result.symbol_equity.len().max(1) as i64;
+    let allocation_base = start_paise / n;
+    let allocation_remainder = start_paise.rem_euclid(n);
+    for (index, (symbol, series)) in result.symbol_equity.iter().enumerate() {
+        let allocation_paise = allocation_base + i64::from((index as i64) < allocation_remainder);
+        let final_eq_paise = series.last().map_or(allocation_paise, |p| p.equity_paise);
+        let mut peak_paise = allocation_paise;
         let mut dd = 0.0f64;
         for p in series {
-            peak = peak.max(p.equity);
-            if peak > 0.0 {
-                dd = dd.max((peak - p.equity) / peak * 100.0)
+            peak_paise = peak_paise.max(p.equity_paise);
+            if peak_paise > 0 {
+                dd = dd.max((peak_paise - p.equity_paise) as f64 / peak_paise as f64 * 100.0)
             }
         }
         let ts: Vec<_> = result
@@ -2405,13 +2482,18 @@ fn build_metrics(result: &RunResult, start: f64, end: f64, portfolio_dd: f64) ->
             .collect();
         let mut item = stats(ts);
         if let Some(obj) = item.as_object_mut() {
-            obj.insert("net_pnl".into(), serde_json::json!(final_eq - allocation));
+            let net_pnl_paise = final_eq_paise - allocation_paise;
+            obj.insert(
+                "net_pnl".into(),
+                serde_json::json!(crate::trader::paise_to_rupees(net_pnl_paise)),
+            );
+            obj.insert("net_pnl_paise".into(), serde_json::json!(net_pnl_paise));
             obj.insert(
                 "return_pct".into(),
-                serde_json::json!(if allocation == 0.0 {
+                serde_json::json!(if allocation_paise == 0 {
                     0.0
                 } else {
-                    (final_eq - allocation) / allocation * 100.0
+                    net_pnl_paise as f64 / allocation_paise as f64 * 100.0
                 }),
             );
             obj.insert("max_drawdown_pct".into(), serde_json::json!(dd));
@@ -2461,24 +2543,20 @@ fn build_metrics(result: &RunResult, start: f64, end: f64, portfolio_dd: f64) ->
         }
     }
     if let Some(obj) = p.as_object_mut() {
-        obj.insert("net_pnl".into(), serde_json::json!(end - start));
-        let start_paise = crate::trader::rupees_to_paise(start);
-        let end_paise = result
-            .equity
-            .last()
-            .map_or(start_paise, |point| point.equity_paise);
+        let net_pnl_paise = end_paise - start_paise;
         obj.insert(
-            "net_pnl_paise".into(),
-            serde_json::json!(end_paise - start_paise),
+            "net_pnl".into(),
+            serde_json::json!(crate::trader::paise_to_rupees(net_pnl_paise)),
         );
+        obj.insert("net_pnl_paise".into(), serde_json::json!(net_pnl_paise));
         obj.insert("start_equity_paise".into(), serde_json::json!(start_paise));
         obj.insert("end_equity_paise".into(), serde_json::json!(end_paise));
         obj.insert(
             "return_pct".into(),
-            serde_json::json!(if start == 0.0 {
+            serde_json::json!(if start_paise == 0 {
                 0.0
             } else {
-                (end - start) / start * 100.0
+                net_pnl_paise as f64 / start_paise as f64 * 100.0
             }),
         );
         obj.insert("max_drawdown_pct".into(), serde_json::json!(portfolio_dd));
