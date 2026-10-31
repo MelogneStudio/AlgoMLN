@@ -153,6 +153,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                     max_retries: 3,
                     margin_seconds: 30,
                     reference_symbol_id: Some(reference_id.to_owned()),
+                    budget_cap: algomln_data::DEFAULT_BUDGET_CAP,
                 }
                 .update(
                     reference_id,
@@ -173,6 +174,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 max_retries: 3,
                 margin_seconds: 30,
                 reference_symbol_id: reference_id.clone(),
+                budget_cap: algomln_data::DEFAULT_BUDGET_CAP,
             }
             .update(
                 &id,

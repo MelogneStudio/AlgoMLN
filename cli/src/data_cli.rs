@@ -83,6 +83,7 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     max_retries: 3,
                     margin_seconds: 30,
                     reference_symbol_id: reference_id,
+                    budget_cap: algomln_data::DEFAULT_BUDGET_CAP,
                 };
                 did_work |= updater.update(&id, tf, &instrument, from, to)?;
             }

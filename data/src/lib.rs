@@ -34,6 +34,8 @@ pub enum DataError {
     Invalid(String),
     #[error("uncovered range for {0}; run `algomln data update` first")]
     Uncovered(String),
+    #[error("daily request budget reached ({used}/{cap})")]
+    BudgetExhausted { used: u64, cap: u64 },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tf {
@@ -150,7 +152,7 @@ impl Catalog {
             fs::create_dir_all(p)?;
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS instruments(security_id TEXT PRIMARY KEY,symbol TEXT NOT NULL UNIQUE,segment TEXT NOT NULL,lot_size INTEGER NOT NULL,tick_size_paise INTEGER NOT NULL,refreshed_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS series(id INTEGER PRIMARY KEY,security_id TEXT NOT NULL,tf TEXT NOT NULL,first_ts INTEGER,last_ts INTEGER,rows INTEGER NOT NULL DEFAULT 0,needs_refresh INTEGER NOT NULL DEFAULT 0,UNIQUE(security_id,tf)); CREATE TABLE IF NOT EXISTS partitions(series_id INTEGER NOT NULL,path TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,rows INTEGER NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(series_id,path)); CREATE TABLE IF NOT EXISTS coverage(series_id INTEGER NOT NULL,start_ts INTEGER NOT NULL,end_ts INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('data','confirmed_empty'))); CREATE TABLE IF NOT EXISTS sessions(series_id INTEGER NOT NULL,date TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,bars INTEGER NOT NULL,PRIMARY KEY(series_id,date)); CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY,series_id INTEGER,kind TEXT NOT NULL,ts INTEGER,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started INTEGER NOT NULL,finished INTEGER,requests INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY,requests INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS trading_calendar(date TEXT PRIMARY KEY,is_trading INTEGER NOT NULL,source TEXT NOT NULL);")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS instruments(security_id TEXT PRIMARY KEY,symbol TEXT NOT NULL UNIQUE,segment TEXT NOT NULL,lot_size INTEGER NOT NULL,tick_size_paise INTEGER NOT NULL,refreshed_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS series(id INTEGER PRIMARY KEY,security_id TEXT NOT NULL,tf TEXT NOT NULL,first_ts INTEGER,last_ts INTEGER,rows INTEGER NOT NULL DEFAULT 0,needs_refresh INTEGER NOT NULL DEFAULT 0,UNIQUE(security_id,tf)); CREATE TABLE IF NOT EXISTS partitions(series_id INTEGER NOT NULL,path TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,rows INTEGER NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(series_id,path)); CREATE TABLE IF NOT EXISTS coverage(series_id INTEGER NOT NULL,start_ts INTEGER NOT NULL,end_ts INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('data','confirmed_empty'))); CREATE TABLE IF NOT EXISTS sessions(series_id INTEGER NOT NULL,date TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,bars INTEGER NOT NULL,PRIMARY KEY(series_id,date)); CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY,series_id INTEGER,kind TEXT NOT NULL,ts INTEGER,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started INTEGER NOT NULL,finished INTEGER,requests INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY,requests INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS trading_calendar(date TEXT PRIMARY KEY,is_trading INTEGER NOT NULL,source TEXT NOT NULL); CREATE TABLE IF NOT EXISTS failures(security_id INTEGER,tf TEXT,from_date TEXT,to_date TEXT,error_code TEXT,attempts INTEGER,next_retry TEXT,PRIMARY KEY(security_id,tf,from_date,to_date));")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version > 1 {
             return Err(DataError::Invalid(format!(
@@ -492,6 +494,72 @@ impl Catalog {
     pub fn budget_add(&self, date: &str, n: u64) -> Result<(), DataError> {
         self.conn.execute("INSERT INTO budget VALUES(?1,?2) ON CONFLICT(day) DO UPDATE SET requests=requests+excluded.requests",params![date,n])?;
         Ok(())
+    }
+    /// Record (or re-record) a failed request range. `attempts` is incremented
+    /// on conflict and `next_retry` advanced so the range is retried on a later
+    /// run rather than in a tight loop.
+    pub fn record_failure(
+        &self,
+        id: &str,
+        tf: Tf,
+        from: NaiveDate,
+        to: NaiveDate,
+        error_code: &str,
+        next_retry: NaiveDate,
+    ) -> Result<(), DataError> {
+        self.conn.execute(
+            "INSERT INTO failures(security_id,tf,from_date,to_date,error_code,attempts,next_retry) VALUES(?1,?2,?3,?4,?5,1,?6) ON CONFLICT(security_id,tf,from_date,to_date) DO UPDATE SET error_code=excluded.error_code,attempts=attempts+1,next_retry=excluded.next_retry",
+            params![id, tf.as_str(), from.to_string(), to.to_string(), error_code, next_retry.to_string()],
+        )?;
+        Ok(())
+    }
+    /// Clear a recorded failure once its range has been successfully fetched.
+    pub fn clear_failure(
+        &self,
+        id: &str,
+        tf: Tf,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<(), DataError> {
+        self.conn.execute(
+            "DELETE FROM failures WHERE security_id=?1 AND tf=?2 AND from_date=?3 AND to_date=?4",
+            params![id, tf.as_str(), from.to_string(), to.to_string()],
+        )?;
+        Ok(())
+    }
+    /// Failures whose `next_retry` is on or before `today`, ready to be retried.
+    pub fn due_failures(
+        &self,
+        today: NaiveDate,
+    ) -> Result<Vec<(String, Tf, NaiveDate, NaiveDate)>, DataError> {
+        let mut q = self.conn.prepare(
+            "SELECT security_id,tf,from_date,to_date FROM failures WHERE next_retry<=?1 ORDER BY security_id,tf,from_date",
+        )?;
+        let rows = q
+            .query_map([today.to_string()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, tf, from, to) in rows {
+            let tf = Tf::parse(&tf).ok_or_else(|| DataError::Invalid("bad tf in failures".into()))?;
+            let from = NaiveDate::parse_from_str(&from, "%Y-%m-%d")
+                .map_err(|e| DataError::Invalid(e.to_string()))?;
+            let to = NaiveDate::parse_from_str(&to, "%Y-%m-%d")
+                .map_err(|e| DataError::Invalid(e.to_string()))?;
+            out.push((id, tf, from, to));
+        }
+        Ok(out)
+    }
+    pub fn failure_count(&self) -> Result<u64, DataError> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM failures", [], |r| r.get(0))?)
     }
     pub fn runs_start(&self) -> Result<i64, DataError> {
         self.conn.execute(
@@ -1022,8 +1090,22 @@ pub struct Updater {
     pub max_retries: u32,
     pub margin_seconds: i64,
     pub reference_symbol_id: Option<String>,
+    /// Soft cap on requests per IST day. When `budget_used >= budget_cap` the
+    /// updater stops with `DataError::BudgetExhausted`. Defaults to 90,000.
+    pub budget_cap: u64,
 }
+pub const DEFAULT_BUDGET_CAP: u64 = 90_000;
 impl Updater {
+    fn budget_guard(&self, today: &str) -> Result<(), DataError> {
+        let used = self.catalog.budget_used(today)?;
+        if used >= self.budget_cap {
+            return Err(DataError::BudgetExhausted {
+                used,
+                cap: self.budget_cap,
+            });
+        }
+        Ok(())
+    }
     pub fn update(
         &mut self,
         security_id: &str,
@@ -1033,11 +1115,7 @@ impl Updater {
         to: NaiveDate,
     ) -> Result<bool, DataError> {
         let today = chrono::Utc::now().date_naive().to_string();
-        if self.catalog.budget_used(&today)? >= 90_000 {
-            return Err(DataError::Invalid(
-                "daily request soft budget (90,000) exhausted".into(),
-            ));
-        }
+        self.budget_guard(&today)?;
         let run = self.catalog.runs_start()?;
         let mut requests = 0;
         let result = (|| {
@@ -1058,11 +1136,7 @@ impl Updater {
                     continue;
                 }
                 for (request_from, request_to) in pending {
-                    if self.catalog.budget_used(&today)? >= 90_000 {
-                        return Err(DataError::Invalid(
-                            "daily request soft budget (90,000) exhausted".into(),
-                        ));
-                    }
+                    self.budget_guard(&today)?;
                     eprintln!(
                         "request {} {} {}..={}",
                         security_id,
@@ -1095,11 +1169,7 @@ impl Updater {
                             for (fallback_from, fallback_to) in
                                 chunk_dates_limited(request_from, request_to, 1825)
                             {
-                                if self.catalog.budget_used(&today)? >= 90_000 {
-                                    return Err(DataError::Invalid(
-                                        "daily request soft budget (90,000) exhausted".into(),
-                                    ));
-                                }
+                                self.budget_guard(&today)?;
                                 let part = self.client.daily(
                                     security_id,
                                     instrument,
@@ -1198,11 +1268,7 @@ impl Updater {
                             [sid],
                         )?;
                         for (full_from, full_to) in chunks.clone() {
-                            if self.catalog.budget_used(&today)? >= 90_000 {
-                                return Err(DataError::Invalid(
-                                    "daily request soft budget (90,000) exhausted".into(),
-                                ));
-                            }
+                            self.budget_guard(&today)?;
                             let full = if tf == Tf::D1 {
                                 self.client
                                     .daily(security_id, instrument, full_from, full_to)?
@@ -1310,11 +1376,7 @@ impl Updater {
                             }
                             let mut recovered = false;
                             for _ in 0..self.max_retries {
-                                if self.catalog.budget_used(&today)? >= 90_000 {
-                                    return Err(DataError::Invalid(
-                                        "daily request soft budget (90,000) exhausted".into(),
-                                    ));
-                                }
+                                self.budget_guard(&today)?;
                                 let retry = if tf == Tf::D1 {
                                     self.client.daily(security_id, instrument, day, day)?
                                 } else {
@@ -1736,6 +1798,7 @@ mod tests {
             max_retries: 0,
             margin_seconds: 30,
             reference_symbol_id: None,
+            budget_cap: DEFAULT_BUDGET_CAP,
         };
         update.update("1", Tf::M1, "EQUITY", from, to).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 21);
@@ -1749,6 +1812,7 @@ mod tests {
             max_retries: 0,
             margin_seconds: 30,
             reference_symbol_id: None,
+            budget_cap: DEFAULT_BUDGET_CAP,
         };
         daily.update("1", Tf::D1, "EQUITY", from, to).unwrap();
         assert_eq!(calls_d.load(Ordering::SeqCst), 1);
@@ -1791,6 +1855,7 @@ mod tests {
             max_retries: 0,
             margin_seconds: 0,
             reference_symbol_id: None,
+            budget_cap: DEFAULT_BUDGET_CAP,
         };
         updater.update("1", Tf::M1, "EQUITY", from, to).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -1826,6 +1891,7 @@ mod tests {
             max_retries: 0,
             margin_seconds: 0,
             reference_symbol_id: None,
+            budget_cap: DEFAULT_BUDGET_CAP,
         };
         updater
             .update("2", Tf::M1, "EQUITY", gap_from, gap_to)
@@ -1877,6 +1943,7 @@ mod tests {
             max_retries: 0,
             margin_seconds: 0,
             reference_symbol_id: Some("7".into()),
+            budget_cap: DEFAULT_BUDGET_CAP,
         };
         assert!(updater.update("7", Tf::M1, "EQUITY", from, to).unwrap());
         let after_first = fake.calls.load(Ordering::SeqCst);
@@ -1971,6 +2038,7 @@ mod tests {
             max_retries: 0,
             margin_seconds: 0,
             reference_symbol_id: None,
+            budget_cap: DEFAULT_BUDGET_CAP,
         };
         updater.update("5", Tf::D1, "EQUITY", d, d).unwrap();
         assert_eq!(
