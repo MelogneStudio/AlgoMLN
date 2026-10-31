@@ -25,11 +25,14 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match sub.as_str() {
         "status" => {
             println!("catalog: {}", db.display());
-            for (symbol, tf, rows) in cat.coverage_details()? {
-                println!("{symbol} {tf}: {rows} bars")
-            }
-            for c in cat.coverage()? {
-                println!("  {}..{} {}", c.start_ts, c.end_ts, c.kind);
+            for series in cat.status_rows()? {
+                println!(
+                    "{} {}: {} bars",
+                    series.symbol, series.timeframe, series.bars
+                );
+                for range in series.coverage {
+                    println!("  {}..{} {}", range.from, range.to, range.kind);
+                }
             }
             for (kind, detail) in cat.quality_rows()? {
                 println!("quality {kind}: {detail}");
@@ -61,6 +64,7 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 .transpose()?
                 .unwrap_or(to - chrono::Days::new(365 * 5));
             let (client, base) = client()?;
+            let mut did_work = false;
             for symbol in symbols.split(',').map(str::trim).filter(|x| !x.is_empty()) {
                 let (id, _) = cat.resolve(symbol)?;
                 let instrument = cat.instrument(&id)?;
@@ -80,9 +84,13 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     margin_seconds: 30,
                     reference_symbol_id: reference_id,
                 };
-                updater.update(&id, tf, &instrument, from, to)?;
+                did_work |= updater.update(&id, tf, &instrument, from, to)?;
             }
-            println!("updated {} for {}", tf.as_str(), symbols)
+            if did_work {
+                println!("updated {} for {}", tf.as_str(), symbols)
+            } else {
+                println!("already up to date: {} {}", symbols, tf.as_str())
+            }
         }
         "import" => {
             let symbol = opts

@@ -127,6 +127,19 @@ pub struct Coverage {
     pub end_ts: i64,
     pub kind: String,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoverageRange {
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    pub kind: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeriesStatus {
+    pub symbol: String,
+    pub timeframe: String,
+    pub bars: u64,
+    pub coverage: Vec<CoverageRange>,
+}
 
 pub struct Catalog {
     conn: Connection,
@@ -138,6 +151,12 @@ impl Catalog {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS instruments(security_id TEXT PRIMARY KEY,symbol TEXT NOT NULL UNIQUE,segment TEXT NOT NULL,lot_size INTEGER NOT NULL,tick_size_paise INTEGER NOT NULL,refreshed_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS series(id INTEGER PRIMARY KEY,security_id TEXT NOT NULL,tf TEXT NOT NULL,first_ts INTEGER,last_ts INTEGER,rows INTEGER NOT NULL DEFAULT 0,needs_refresh INTEGER NOT NULL DEFAULT 0,UNIQUE(security_id,tf)); CREATE TABLE IF NOT EXISTS partitions(series_id INTEGER NOT NULL,path TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,rows INTEGER NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(series_id,path)); CREATE TABLE IF NOT EXISTS coverage(series_id INTEGER NOT NULL,start_ts INTEGER NOT NULL,end_ts INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('data','confirmed_empty'))); CREATE TABLE IF NOT EXISTS sessions(series_id INTEGER NOT NULL,date TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,bars INTEGER NOT NULL,PRIMARY KEY(series_id,date)); CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY,series_id INTEGER,kind TEXT NOT NULL,ts INTEGER,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started INTEGER NOT NULL,finished INTEGER,requests INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY,requests INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS trading_calendar(date TEXT PRIMARY KEY,is_trading INTEGER NOT NULL,source TEXT NOT NULL);")?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > 1 {
+            return Err(DataError::Invalid(format!(
+                "catalog schema version {version} is newer than supported version 1"
+            )));
+        }
         let has_instrument: bool = {
             let mut q = conn.prepare("PRAGMA table_info(instruments)")?;
             let names = q
@@ -151,6 +170,7 @@ impl Catalog {
                 [],
             )?;
         }
+        conn.execute_batch("PRAGMA user_version=1;")?;
         Ok(Self { conn })
     }
     pub fn refresh_instruments(&mut self, rows: &[Scrip], at: i64) -> Result<(), DataError> {
@@ -375,6 +395,85 @@ impl Catalog {
         let mut q=self.conn.prepare("SELECT i.symbol,s.tf,COALESCE(SUM(p.rows),0) FROM series s JOIN instruments i ON i.security_id=s.security_id LEFT JOIN partitions p ON p.series_id=s.id GROUP BY s.id ORDER BY i.symbol,s.tf")?;
         let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+    pub fn status_rows(&self) -> Result<Vec<SeriesStatus>, DataError> {
+        let mut q = self.conn.prepare("SELECT s.id,i.symbol,s.tf,COALESCE((SELECT SUM(p.rows) FROM partitions p WHERE p.series_id=s.id),0) FROM series s JOIN instruments i ON i.security_id=s.security_id ORDER BY i.symbol,s.tf")?;
+        let series = q
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, u64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut out = Vec::with_capacity(series.len());
+        for (id, symbol, timeframe, bars) in series {
+            let mut stmt = self.conn.prepare(
+                "SELECT start_ts,end_ts,kind FROM coverage WHERE series_id=?1 ORDER BY start_ts",
+            )?;
+            let rows = stmt
+                .query_map([id], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut coverage = Vec::<CoverageRange>::new();
+            for (a, b, kind) in rows {
+                let from = DateTime::<Utc>::from_timestamp(a, 0)
+                    .unwrap_or(DateTime::UNIX_EPOCH)
+                    .with_timezone(&Kolkata)
+                    .date_naive();
+                let to = DateTime::<Utc>::from_timestamp(b, 0)
+                    .unwrap_or(DateTime::UNIX_EPOCH)
+                    .with_timezone(&Kolkata)
+                    .date_naive();
+                let joins_previous = if let Some(last) = coverage.last() {
+                    from <= last.to + chrono::Days::new(1)
+                        || self.only_nontrading_gap(last.to, from)?
+                } else {
+                    false
+                };
+                if joins_previous {
+                    if let Some(last) = coverage.last_mut() {
+                        last.to = last.to.max(to);
+                        if last.kind != kind {
+                            last.kind = "covered".into();
+                        }
+                        continue;
+                    }
+                }
+                coverage.push(CoverageRange { from, to, kind });
+            }
+            out.push(SeriesStatus {
+                symbol,
+                timeframe,
+                bars,
+                coverage,
+            });
+        }
+        Ok(out)
+    }
+    fn only_nontrading_gap(&self, before: NaiveDate, after: NaiveDate) -> Result<bool, DataError> {
+        let mut day = before + chrono::Days::new(1);
+        while day < after {
+            if day.weekday().number_from_monday() <= 5 {
+                let is_open: bool = self.conn.query_row(
+                    "SELECT COALESCE((SELECT is_trading=1 FROM trading_calendar WHERE date=?1),1)",
+                    [day.to_string()],
+                    |r| r.get(0),
+                )?;
+                if is_open {
+                    return Ok(false);
+                }
+            }
+            day = day + chrono::Days::new(1);
+        }
+        Ok(true)
     }
     pub fn quality_rows(&self) -> Result<Vec<(String, String)>, DataError> {
         let mut q = self
@@ -695,24 +794,10 @@ pub fn missing_date_ranges(
     to: NaiveDate,
 ) -> Result<Vec<(NaiveDate, NaiveDate)>, DataError> {
     let missing = cat.missing_dates(id, tf, from, to)?;
-    let mut out = Vec::new();
-    let mut start: Option<NaiveDate> = None;
-    let mut prev: Option<NaiveDate> = None;
-    for d in missing {
-        if let Some(p) = prev {
-            if (d - p).num_days() > 1 {
-                out.push((start.expect("range start"), p));
-                start = Some(d);
-            }
-        } else {
-            start = Some(d);
-        }
-        prev = Some(d);
-    }
-    if let (Some(a), Some(b)) = (start, prev) {
-        out.push((a, b));
-    }
-    Ok(out)
+    Ok(match (missing.first(), missing.last()) {
+        (Some(a), Some(b)) => vec![(*a, *b)],
+        _ => Vec::new(),
+    })
 }
 fn local_midnight(d: NaiveDate) -> i64 {
     d.and_hms_opt(0, 0, 0)
@@ -946,7 +1031,7 @@ impl Updater {
         instrument: &str,
         from: NaiveDate,
         to: NaiveDate,
-    ) -> Result<(), DataError> {
+    ) -> Result<bool, DataError> {
         let today = chrono::Utc::now().date_naive().to_string();
         if self.catalog.budget_used(&today)? >= 90_000 {
             return Err(DataError::Invalid(
@@ -957,11 +1042,15 @@ impl Updater {
         let mut requests = 0;
         let result = (|| {
             self.store.reconcile(&mut self.catalog)?;
-            let chunks = if tf == Tf::D1 {
-                eprintln!("daily history range limit is undocumented; using configurable 5-year fallback chunks");
-                chunk_dates_limited(from, to, 1825)
+            let gaps = missing_date_ranges(&self.catalog, security_id, tf, from, to)?;
+            let chunks = if let (Some((first, _)), Some((_, last))) = (gaps.first(), gaps.last()) {
+                if tf == Tf::D1 {
+                    vec![(*first, *last)]
+                } else {
+                    chunk_dates(*first, *last)
+                }
             } else {
-                chunk_dates(from, to)
+                Vec::new()
             };
             for (a, b) in chunks.iter().copied() {
                 let pending = missing_date_ranges(&self.catalog, security_id, tf, a, b)?;
@@ -975,15 +1064,15 @@ impl Updater {
                         ));
                     }
                     eprintln!(
-                        "downloading {} {} {}..={}",
+                        "request {} {} {}..={}",
                         security_id,
                         tf.as_str(),
                         request_from,
                         request_to
                     );
-                    let candles = if tf == Tf::D1 {
+                    let fetch = if tf == Tf::D1 {
                         self.client
-                            .daily(security_id, instrument, request_from, request_to)?
+                            .daily(security_id, instrument, request_from, request_to)
                     } else {
                         self.client.intraday(
                             security_id,
@@ -991,16 +1080,40 @@ impl Updater {
                             instrument_interval(tf),
                             request_from,
                             request_to,
-                        )?
+                        )
                     };
                     requests += 1;
                     self.catalog.budget_add(&today, 1)?;
-                    eprintln!(
-                        "received {} bars for {} {}",
-                        candles.len(),
-                        security_id,
-                        tf.as_str()
-                    );
+                    let candles = match fetch {
+                        Ok(rows) => rows,
+                        Err(error)
+                            if tf == Tf::D1
+                                && (request_to - request_from).num_days() + 1 > 1825 =>
+                        {
+                            eprintln!("daily request failed for {request_from}..={request_to}; retrying in 5-year fallback chunks: {error}");
+                            let mut rows = Vec::new();
+                            for (fallback_from, fallback_to) in
+                                chunk_dates_limited(request_from, request_to, 1825)
+                            {
+                                if self.catalog.budget_used(&today)? >= 90_000 {
+                                    return Err(DataError::Invalid(
+                                        "daily request soft budget (90,000) exhausted".into(),
+                                    ));
+                                }
+                                let part = self.client.daily(
+                                    security_id,
+                                    instrument,
+                                    fallback_from,
+                                    fallback_to,
+                                );
+                                requests += 1;
+                                self.catalog.budget_add(&today, 1)?;
+                                rows.extend(part?);
+                            }
+                            rows
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let bars: Vec<Bar> = candles;
                     if bars.is_empty() {
                         let from_ts = local_midnight(a);
@@ -1266,7 +1379,9 @@ impl Updater {
             requests,
             if result.is_ok() { "complete" } else { "failed" },
         )?;
-        result
+        let changed = requests > 0;
+        result?;
+        Ok(changed)
     }
 }
 
@@ -1502,6 +1617,32 @@ mod tests {
         calls: Arc<AtomicUsize>,
         empty_first: bool,
     }
+    struct CountingHistory {
+        calls: Arc<AtomicUsize>,
+    }
+    impl HistoryApi for CountingHistory {
+        fn intraday(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<Bar>, DataError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        fn daily(
+            &self,
+            _: &str,
+            _: &str,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<Bar>, DataError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
     impl HistoryApi for FakeHistory {
         fn intraday(
             &self,
@@ -1563,6 +1704,136 @@ mod tests {
         );
     }
     #[test]
+    fn planner_uses_89_calendar_day_chunks_and_one_daily_request() {
+        let root = temp("planner-count");
+        let db = root.join("catalog.sqlite");
+        let mut cat = Catalog::open(&db).unwrap();
+        cat.refresh_instruments(
+            &[Scrip {
+                security_id: "1".into(),
+                symbol: "ABC".into(),
+                lot_size: 1,
+                tick_size_paise: 5,
+                instrument: "EQUITY".into(),
+            }],
+            0,
+        )
+        .unwrap();
+        let from = NaiveDate::from_ymd_opt(2021, 10, 31).unwrap();
+        let to = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        assert_eq!(chunk_dates(from, to).len(), 21);
+        assert_eq!(
+            missing_date_ranges(&cat, "1", Tf::M1, from, to).unwrap(),
+            vec![(from + chrono::Days::new(1), to - chrono::Days::new(1))]
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut update = Updater {
+            client: Box::new(CountingHistory {
+                calls: calls.clone(),
+            }),
+            catalog: Catalog::open(&db).unwrap(),
+            store: Store::new(&root),
+            max_retries: 0,
+            margin_seconds: 30,
+            reference_symbol_id: None,
+        };
+        update.update("1", Tf::M1, "EQUITY", from, to).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 21);
+        let calls_d = Arc::new(AtomicUsize::new(0));
+        let mut daily = Updater {
+            client: Box::new(CountingHistory {
+                calls: calls_d.clone(),
+            }),
+            catalog: Catalog::open(&db).unwrap(),
+            store: Store::new(&root),
+            max_retries: 0,
+            margin_seconds: 30,
+            reference_symbol_id: None,
+        };
+        daily.update("1", Tf::D1, "EQUITY", from, to).unwrap();
+        assert_eq!(calls_d.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn planner_merges_middle_gaps_over_covered_week_and_weekend() {
+        let root = temp("planner-gaps");
+        let mut cat = Catalog::open(root.join("catalog.sqlite")).unwrap();
+        cat.refresh_instruments(
+            &[Scrip {
+                security_id: "1".into(),
+                symbol: "ABC".into(),
+                lot_size: 1,
+                tick_size_paise: 5,
+                instrument: "EQUITY".into(),
+            }],
+            0,
+        )
+        .unwrap();
+        let from = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let to = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        for n in 0..=(to - from).num_days() {
+            let day = from + chrono::Days::new(n as u64);
+            if day.weekday().number_from_monday() <= 5 && day != from && day != to {
+                cat.mark_session_empty("1", Tf::M1, day).unwrap();
+            }
+        }
+        assert_eq!(
+            missing_date_ranges(&cat, "1", Tf::M1, from, to).unwrap(),
+            vec![(from, to)]
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut updater = Updater {
+            client: Box::new(CountingHistory {
+                calls: calls.clone(),
+            }),
+            catalog: Catalog::open(root.join("catalog.sqlite")).unwrap(),
+            store: Store::new(&root),
+            max_retries: 0,
+            margin_seconds: 0,
+            reference_symbol_id: None,
+        };
+        updater.update("1", Tf::M1, "EQUITY", from, to).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let middle = from + chrono::Days::new(1);
+        let gap_from = from;
+        let gap_to = to;
+        let mut second = Catalog::open(root.join("other.sqlite")).unwrap();
+        second
+            .refresh_instruments(
+                &[Scrip {
+                    security_id: "2".into(),
+                    symbol: "DEF".into(),
+                    lot_size: 1,
+                    tick_size_paise: 5,
+                    instrument: "EQUITY".into(),
+                }],
+                0,
+            )
+            .unwrap();
+        for n in 0..=(gap_to - gap_from).num_days() {
+            let day = gap_from + chrono::Days::new(n as u64);
+            if day.weekday().number_from_monday() <= 5 && day != middle {
+                second.mark_session_empty("2", Tf::M1, day).unwrap();
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut updater = Updater {
+            client: Box::new(CountingHistory {
+                calls: calls.clone(),
+            }),
+            catalog: second,
+            store: Store::new(root.join("other-store")),
+            max_retries: 0,
+            margin_seconds: 0,
+            reference_symbol_id: None,
+        };
+        updater
+            .update("2", Tf::M1, "EQUITY", gap_from, gap_to)
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn overlap_classifies_split_ratio_and_revision() {
         let a = vec![bar(60, 100.0), bar(120, 200.0)];
         let split = vec![bar(60, 50.0), bar(120, 100.0)];
@@ -1581,7 +1852,7 @@ mod tests {
         let to = from + chrono::Days::new(1);
         let fake = Arc::new(FakeHistory {
             calls: Arc::new(AtomicUsize::new(0)),
-            empty_first: true,
+            empty_first: false,
         });
         let mut cat = Catalog::open(&db).unwrap();
         cat.refresh_instruments(
@@ -1607,7 +1878,7 @@ mod tests {
             margin_seconds: 0,
             reference_symbol_id: Some("7".into()),
         };
-        updater.update("7", Tf::M1, "EQUITY", from, to).unwrap();
+        assert!(updater.update("7", Tf::M1, "EQUITY", from, to).unwrap());
         let after_first = fake.calls.load(Ordering::SeqCst);
         assert!(after_first >= 1);
         let covered = updater
@@ -1615,7 +1886,12 @@ mod tests {
             .covered_dates("7", Tf::M1, from, to)
             .unwrap();
         assert_eq!(covered.len(), 2);
-        updater.update("7", Tf::M1, "EQUITY", from, to).unwrap();
+        let status = updater.catalog.status_rows().unwrap();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].symbol, "ABC");
+        assert_eq!(status[0].bars, 1);
+        assert_eq!(status[0].coverage.len(), 1);
+        assert!(!updater.update("7", Tf::M1, "EQUITY", from, to).unwrap());
         assert_eq!(fake.calls.load(Ordering::SeqCst), after_first);
         let _ = fs::remove_dir_all(root);
     }
@@ -1837,6 +2113,81 @@ mod tests {
         assert_eq!(
             cat.coverage_details().unwrap(),
             vec![("RELIANCE".into(), "1m".into(), 2)]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn open_migrates_legacy_catalog_without_verify_and_sets_user_version() {
+        let root = temp("migration");
+        fs::create_dir_all(&root).unwrap();
+        let db = root.join("catalog.sqlite");
+        let legacy = Connection::open(&db).unwrap();
+        legacy.execute_batch("CREATE TABLE instruments(security_id TEXT PRIMARY KEY,symbol TEXT NOT NULL UNIQUE,segment TEXT NOT NULL,lot_size INTEGER NOT NULL,tick_size_paise INTEGER NOT NULL,refreshed_at INTEGER NOT NULL); INSERT INTO instruments VALUES('1','ABC','NSE_EQ',1,5,0);").unwrap();
+        drop(legacy);
+        let cat = Catalog::open(&db).unwrap();
+        assert_eq!(cat.instrument("1").unwrap(), "EQUITY");
+        let version: i64 = cat
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        assert_eq!(cat.status_rows().unwrap().len(), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn status_ranges_coalesce_touching_ist_dates_per_series() {
+        let root = temp("status-ranges");
+        let mut cat = Catalog::open(root.join("catalog.sqlite")).unwrap();
+        cat.refresh_instruments(
+            &[Scrip {
+                security_id: "1".into(),
+                symbol: "ABC".into(),
+                lot_size: 1,
+                tick_size_paise: 5,
+                instrument: "EQUITY".into(),
+            }],
+            0,
+        )
+        .unwrap();
+        let a = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let dates = [
+            a,
+            a + chrono::Days::new(1),
+            a + chrono::Days::new(2),
+            a + chrono::Days::new(3),
+            a + chrono::Days::new(4),
+            a + chrono::Days::new(7),
+            a + chrono::Days::new(9),
+            a + chrono::Days::new(11),
+        ];
+        for d in dates {
+            cat.record_coverage(
+                "1",
+                Tf::M1,
+                local_midnight(d),
+                local_midnight(d + chrono::Days::new(1)) - 1,
+                "data",
+            )
+            .unwrap();
+        }
+        cat.record_calendar(a + chrono::Days::new(8), false, "holiday")
+            .unwrap();
+        let rows = cat.status_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].coverage,
+            vec![
+                CoverageRange {
+                    from: a,
+                    to: a + chrono::Days::new(9),
+                    kind: "data".into()
+                },
+                CoverageRange {
+                    from: a + chrono::Days::new(11),
+                    to: a + chrono::Days::new(11),
+                    kind: "data".into()
+                }
+            ]
         );
         let _ = fs::remove_dir_all(root);
     }

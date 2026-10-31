@@ -316,7 +316,6 @@ impl DhanClient {
         let next = to
             .succ_opt()
             .ok_or_else(|| ApiError::Malformed("daily end date overflow".into()))?;
-        eprintln!("Dhan daily history requested for {from}..={to}; using exclusive toDate {next}");
         let body = DailyRequest {
             security_id,
             exchange_segment: "NSE_EQ",

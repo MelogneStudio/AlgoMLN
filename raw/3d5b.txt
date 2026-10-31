@@ -1,0 +1,141 @@
+# AlgoMLN 3d, Step 5b: Bulk Download with Persisted Request Budget
+
+Status: draft
+Crate: `algomln-data`
+Depends on: update planner (step 1, done), catalog and `data status` (step 2, done), Dhan downloader (milestone 1, done)
+
+## 1. Goal
+
+Download the full NSE equity universe (2365 symbols) for 1d and 1m from Dhan into the local catalog. The download must be resumable and must never exceed the daily request budget. A stopped run must leave complete symbols behind, not many half-filled ones.
+
+Out of scope: derivatives, BSE, the `data import` of old Python Parquet, CatalogSource, and multi-day scheduling.
+
+## 2. Command
+
+```
+algomln data bulk --universe nse-eq --tf 1d,1m --from <YYYY-MM-DD> [--to <YYYY-MM-DD>] [--symbols <file>] [--budget <n>] [--dry-run]
+```
+
+- `--universe nse-eq`: the scrip master filter (NSE, EQ, ES, EQUITY).
+- `--tf`: comma-separated. When both are given, 1d runs first for all symbols, then 1m.
+- `--symbols <file>`: priority list, one trading symbol per line, processed first (e.g. NIFTY 50). Remaining symbols follow in security-id order.
+- `--to`: defaults to the last **completed** session. Today's session is excluded until the daily-close settle time is verified (see section 10).
+- `--budget`: soft cap on requests per IST day. Default 90,000.
+- `--dry-run`: prints the planned request count per tf, the estimated time at 4 req/s, and whether it fits in today's remaining budget. No requests are sent.
+
+## 3. Cost model
+
+| Series | Requests per symbol | Total (2365 symbols) | Time at 4 req/s |
+|---|---|---|---|
+| 1d | 1 (5-year fallback chunks only after a data error) | about 2.4k | about 10 min |
+| 1m, 5 years | about 21 (89-day chunks) | about 50k | about 3.5 h |
+
+The planner must produce these counts. Any large deviation means the planner is splitting requests and must be fixed before the run proceeds. `--dry-run` prints this comparison.
+
+## 4. Ordering
+
+- Process **symbol by symbol**: finish all requests for one symbol and tf, commit, then move to the next.
+- 1d for all symbols first (cheap, gives every symbol a baseline), then 1m.
+- Interrupting at any point leaves N complete symbols and zero partial ones, apart from at most the in-flight symbol.
+
+## 5. Request budget (persisted)
+
+Catalog SQLite table:
+
+```sql
+CREATE TABLE request_budget (
+  day   TEXT PRIMARY KEY,   -- IST date, YYYY-MM-DD
+  count INTEGER NOT NULL
+);
+```
+
+Rules:
+- Increment **before** sending, in its own transaction (WAL). Failed requests count, since Dhan counts attempts.
+- The day key is the IST calendar date. Dhan's reset boundary is unverified, so assume IST midnight. Requests made earlier today (smoke tests) already count.
+- When `count >= budget`: finish in-flight requests, persist, print `daily budget reached (<count>/<budget>); rerun tomorrow, progress is saved`, and exit with a non-zero code.
+- Dhan's hard limit is 100,000 per day. The 90,000 default leaves headroom for manual `data update` calls.
+
+## 6. Scheduler
+
+One scheduler owns all timing.
+- Request **starts** are at least 250 ms apart (4 req/s, under Dhan's 5/s limit).
+- A small semaphore (default 4) bounds in-flight requests. The semaphore never overrides the 250 ms spacing.
+- The planner hands the scheduler a list of `Request { security_id, tf, from, to }`. The scheduler knows nothing about coverage, and the planner knows nothing about timing.
+
+Error handling:
+
+| Condition | Behaviour |
+|---|---|
+| DH-904 (rate limit) | Pause the whole scheduler with exponential backoff (start 2 s, cap 60 s), reset on success. Counts against the budget. |
+| Network error or 5xx | Retry up to 3 times with backoff, then record in `failures` and continue. |
+| Auth error | Abort the run immediately with a clear message. |
+| Empty response | Log as `no_data`. **Never** record the range as covered, because it could be a holiday or a pre-listing range. Continue. |
+| Data error on a 1d request | Fall back to 5-year chunks for that symbol only. |
+
+Failures table:
+
+```sql
+CREATE TABLE failures (
+  security_id INTEGER, tf TEXT, from_date TEXT, to_date TEXT,
+  error_code TEXT, attempts INTEGER, next_retry TEXT,
+  PRIMARY KEY (security_id, tf, from_date, to_date)
+);
+```
+
+Failed ranges are retried on the next run, not in a tight loop.
+
+## 7. Resume
+
+No separate job-state file. The planner derives work from catalog coverage, so rerunning `data bulk` with the same arguments plans only what is missing. `--dry-run` after an interrupted run shows exactly what remains.
+
+Ctrl-C: stop issuing new requests, let in-flight requests finish, persist budget and catalog, exit cleanly.
+
+## 8. Write path (crash safety)
+
+Per symbol, tf and year:
+1. Write Parquet to a temp file in the same directory.
+2. fsync, then atomically rename to the final name.
+3. Update catalog coverage in a transaction.
+
+A crash between steps 2 and 3 must be recoverable. The next `data update` or `data verify` detects an on-disk Parquet that the catalog does not cover and either adopts it (after validating bar counts and timestamps) or redoes the download. It must never double-count bars.
+
+Timestamps follow the existing convention: bars labelled at their IST session time, and 1d labelled at 09:15 IST of the session date (raw + 33300 s).
+
+## 9. Progress output
+
+One updating line:
+
+```
+1m  842/2365 symbols | requests 17,904/90,000 today | 3.9 req/s | ETA 2h 41m | failures 3
+```
+
+On finish, print a summary: symbols completed, requests used, bars added, failures, `no_data` ranges, and the catalog fingerprint.
+
+## 10. Open items (do not block implementation)
+
+- **Daily close settle time.** The 16:00 IST cutoff is a placeholder. Verify on a trading day at about 10:30, 15:20, 15:45 and 16:05 whether the in-progress candle is returned. Until then, exclude today's session.
+- **DH-907 on holidays.** Not yet checked. This decides whether a holiday response is an error or an empty success.
+- **Reset boundary of the 100k/day limit.** Assumed IST midnight.
+- **Volume on split days.** Unchecked.
+- **375-bar stocks.** Some symbols may have 375 bars per session instead of 360. The downloader must not assume 360.
+
+## 11. Acceptance tests (mock Dhan server)
+
+1. Total requests for N symbols equal the planner's estimate (about 21 per 5-year 1m series).
+2. Request start times are never closer than 250 ms, measured from the mock's receive timestamps.
+3. The run stops exactly at the soft cap, the budget survives a process restart, and a rerun continues without re-requesting finished ranges.
+4. Kill the process mid-run, then resume. There are no duplicate requests for completed ranges, and the final catalog fingerprint is identical to an uninterrupted run.
+5. Kill between the Parquet rename and the catalog update, then run `data verify` or `update`. The file is adopted or redone, with no duplicate bars.
+6. Injected DH-904 triggers backoff, and the run still completes.
+7. An empty response is logged as `no_data` and is not recorded as coverage.
+8. Auth failure aborts immediately.
+9. A symbol with 375-bar sessions downloads and verifies correctly.
+10. `--dry-run` sends zero requests and prints the correct plan.
+11. Priority `--symbols` are completed before the rest.
+
+## 12. After this
+
+1. Live check: run `data bulk` for 10 symbols against real Dhan and compare the actual request count with the estimate.
+2. 100-symbol 1m throughput and memory benchmark (fix the bench fixture to register coverage through the real catalog API).
+3. Market-hours check on a trading day (section 10).
+4. Full-universe run, then the testing week.
