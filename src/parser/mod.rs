@@ -28,18 +28,14 @@ impl<'a> Parser<'a> {
     }
     fn nesting(&self) -> usize {
         let mut depth = 0usize;
-        let mut max = 0usize;
         for t in self.t[..self.i.min(self.t.len())].iter() {
             match t.kind {
-                TokenKind::LParen => {
-                    depth += 1;
-                    max = max.max(depth)
-                }
+                TokenKind::LParen => depth += 1,
                 TokenKind::RParen => depth = depth.saturating_sub(1),
                 _ => {}
             }
         }
-        max
+        depth
     }
     fn check_depth(&self) -> Result<(), FrontendError> {
         if self.nesting() > 128 {
