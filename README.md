@@ -37,3 +37,11 @@ to the nearest paise; ties go to the even paise. Result artifacts include exact
 `*_paise` fields alongside readable rupee values. The broker stores fee rates as
 integer hundredths of a basis point for fee multiplication and rounds simulated
 fills adversely to the configured tick size (5 paise by default).
+
+## Dhan NSE equities data layer
+
+The `data` catalog stores native Dhan timeframes independently. It does not resample bars. Intraday history is split/bonus adjusted by Dhan. Daily bars use the exchange official close from the closing auction; their high/low/close can differ from the intraday series. Simulation equity is marked using the last candle close of the selected run timeframe.
+
+Use `algomln data update --master <scrip-master.csv> --symbols RELIANCE,TCS --tf 1m --from YYYY-MM-DD --to YYYY-MM-DD` to update NSE cash equities. Set `DHAN_ACCESS_TOKEN` in the environment. `algomln data status` shows persisted coverage and `algomln data verify` reconciles catalog entries with Parquet files. `algomln run` uses the catalog by default; network access occurs only with `--update`.
+
+The Dhan data API documents 5 requests/second and 100,000 requests/day. AlgoMLN spaces starts at 250 ms and applies a 90,000 request soft daily cap; after DH-904 it halves the request rate.

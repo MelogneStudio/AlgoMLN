@@ -180,6 +180,15 @@ pub trait CandleSource: Send + Sync {
     fn stats(&self) -> SourceStats {
         SourceStats::default()
     }
+    fn instrument_rules(
+        &self,
+        _symbols: &[Symbol],
+    ) -> BTreeMap<Symbol, crate::trader::InstrumentRule> {
+        BTreeMap::new()
+    }
+    fn tick_sizes_paise(&self, _symbols: &[Symbol]) -> BTreeMap<Symbol, i64> {
+        BTreeMap::new()
+    }
 }
 fn limit_to_warmup_window(mut input: CandleStream, from: Option<i64>, bars: usize) -> CandleStream {
     let Some(from) = from else { return input };
@@ -789,6 +798,7 @@ pub struct SimBroker {
     pub slippage_bps: f64,
     /// Minimum permitted fill-price increment in paise (NSE equity default: 5).
     pub tick_size_paise: i64,
+    pub tick_sizes_paise: BTreeMap<Symbol, i64>,
     pub partial_fills_pct: Option<f64>,
     pub fees: FeeModel,
     pending: BTreeMap<OrderId, PendingOrder>,
@@ -812,6 +822,7 @@ impl SimBroker {
             latency: 1,
             slippage_bps: 0.0,
             tick_size_paise: 5,
+            tick_sizes_paise: BTreeMap::new(),
             partial_fills_pct: None,
             fees: FeeModel::default(),
             pending: BTreeMap::new(),
@@ -855,7 +866,12 @@ impl SimBroker {
             } else {
                 c.open * (1.0 - self.slippage_bps / 10000.0)
             };
-            let tick_paise = self.tick_size_paise.max(1);
+            let tick_paise = self
+                .tick_sizes_paise
+                .get(&p.req.symbol)
+                .copied()
+                .unwrap_or(self.tick_size_paise)
+                .max(1);
             let tick_units = raw_price * 100.0 / tick_paise as f64;
             let nearest = tick_units.round();
             let units = if (tick_units - nearest).abs() <= 1e-10 {
@@ -1251,13 +1267,14 @@ fn run_internal(
         program,
         TraderConfig {
             initial_cash: config.initial_cash,
-            instrument_rules: BTreeMap::new(),
+            instrument_rules: source.instrument_rules(&symbols),
         },
     )
     .map_err(|e| SimError::Other(format!("trader init: {e:?}")))?;
     let mut broker = SimBroker::new(symbols.clone());
     broker.latency = config.latency;
     broker.slippage_bps = config.slippage_bps;
+    broker.tick_sizes_paise = source.tick_sizes_paise(&symbols);
     broker.fees = config.fee_model.clone();
     broker.partial_fills_pct = config.partial_fills_pct;
     let mut fills = Vec::new();

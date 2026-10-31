@@ -1,0 +1,13 @@
+[package]
+name = "algomln-cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+algomln = { path = ".." }
+algomln-data = { path = "../data" }
+dhan-api = { path = "../dhan-api" }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "=0.10.4"
+csv = "1.4"

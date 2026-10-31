@@ -34,4 +34,5 @@ harness = false
 path = "src/lib.rs"
 
 [workspace]
+members = ["dhan-api", "data", "cli"]
 exclude = ["fuzz"]
