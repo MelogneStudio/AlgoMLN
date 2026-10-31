@@ -309,7 +309,18 @@ impl GapCursor {
             };
             if may_fill {
                 if let Some(prev) = self.previous {
-                    if ist_day(prev.timestamp) == ist_day(c.timestamp) && self.step < 86400 {
+                    // Gap filling is intraday-only and confined to a single trading
+                    // session. Daily (and coarser) series are never filled: a gap
+                    // between two daily bars spans non-trading days (weekends,
+                    // holidays), and the sim carries no trading calendar to tell a
+                    // holiday apart from genuinely missing data, so a flat fill there
+                    // would fabricate bars and corrupt the backtest. Overnight /
+                    // cross-session gaps are skipped for the same reason (markets are
+                    // closed, so no bars are "missing") — hence prev and c must share
+                    // an IST day and only in-session timestamps are counted/filled.
+                    let intraday = self.step < 86_400;
+                    let same_session = ist_day(prev.timestamp) == ist_day(c.timestamp);
+                    if intraday && same_session {
                         let mut ts = prev.timestamp.saturating_add(self.step);
                         let mut count = 0;
                         while ts < c.timestamp && in_ist_session(ts) {
@@ -1106,33 +1117,16 @@ fn check_invariants(
     }
     Ok(())
 }
-fn symbol_pnl(fills: &[Fill], symbol: &str, mark_paise: i64) -> (i64, i64) {
-    let mut qty = 0u64;
-    let mut cash_flow_paise = 0i128;
-    for f in fills.iter().filter(|f| f.symbol == symbol) {
-        match f.side {
-            Side::Buy => {
-                qty += f.qty;
-                cash_flow_paise -= f.price_paise as i128 * f.qty as i128 + f.fees_paise as i128;
-            }
-            Side::Sell => {
-                let q = f.qty.min(qty);
-                if q > 0 {
-                    qty -= q;
-                    cash_flow_paise += f.price_paise as i128 * q as i128
-                        - round_half_even_i128(
-                            f.fees_paise as i128 * q as i128,
-                            f.qty.max(1) as i128,
-                        );
-                }
-            }
-        }
-    }
-    let pnl_paise = cash_flow_paise + mark_paise as i128 * qty as i128;
-    (
-        pnl_paise.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
-        qty as i64,
-    )
+/// Running per-symbol P&L state, folded forward one fill at a time by the sim
+/// frame loop. `cash_flow_paise` is the net cash effect of this symbol's fills
+/// (buys negative incl. fees, sells positive net of prorated fees) and `qty` is
+/// the open quantity; a symbol's P&L at any mark is `cash_flow_paise + mark*qty`.
+/// Replaces the former `symbol_pnl` replay, which re-scanned all fills per symbol
+/// per frame (quadratic over a long run).
+#[derive(Clone, Copy, Debug, Default)]
+struct SymbolPnlAccum {
+    qty: u64,
+    cash_flow_paise: i128,
 }
 /// Stream a merged source through independent per-symbol engines, then process
 /// broker events before each close frame in deterministic symbol order.
@@ -1288,6 +1282,10 @@ fn run_internal(
     let mut current_ts = None;
     let mut candles = BTreeMap::<Symbol, Candle>::new();
     let mut observed = BTreeMap::<Symbol, usize>::new();
+    // Incremental per-symbol P&L, folded forward as fills arrive instead of
+    // replaying the whole fills vector per symbol per frame (was O(frames x fills)).
+    let mut symbol_pnl_state = BTreeMap::<Symbol, SymbolPnlAccum>::new();
+    let mut processed_fills = 0usize;
     let mut process = |ts: i64,
                        candles: &BTreeMap<Symbol, Candle>,
                        trader: &mut Trader,
@@ -1300,7 +1298,9 @@ fn run_internal(
                        equity: &mut Vec<EquityPoint>,
                        symbol_equity: &mut BTreeMap<Symbol, Vec<SymbolEquityPoint>>,
                        day: &mut Option<i64>,
-                       observed: &mut BTreeMap<Symbol, usize>|
+                       observed: &mut BTreeMap<Symbol, usize>,
+                       symbol_pnl_state: &mut BTreeMap<Symbol, SymbolPnlAccum>,
+                       processed_fills: &mut usize|
      -> Result<(), SimError> {
         let d = ist_day(ts);
         if *day != Some(d) {
@@ -1406,6 +1406,31 @@ fn run_internal(
             positions_value_paise,
             equity_paise,
         });
+        // Fold the fills added since the last frame into the per-symbol P&L
+        // accumulators once, then read each symbol's running total below. This
+        // replaces the previous full replay of `fills` per symbol per frame.
+        for f in &fills[*processed_fills..] {
+            let acc = symbol_pnl_state.entry(f.symbol.clone()).or_default();
+            match f.side {
+                Side::Buy => {
+                    acc.qty += f.qty;
+                    acc.cash_flow_paise -=
+                        f.price_paise as i128 * f.qty as i128 + f.fees_paise as i128;
+                }
+                Side::Sell => {
+                    let q = f.qty.min(acc.qty);
+                    if q > 0 {
+                        acc.qty -= q;
+                        acc.cash_flow_paise += f.price_paise as i128 * q as i128
+                            - round_half_even_i128(
+                                f.fees_paise as i128 * q as i128,
+                                f.qty.max(1) as i128,
+                            );
+                    }
+                }
+            }
+        }
+        *processed_fills = fills.len();
         let initial_cash_paise = crate::trader::rupees_to_paise(config.initial_cash);
         let allocation_base = initial_cash_paise / symbols.len().max(1) as i64;
         let allocation_remainder = initial_cash_paise.rem_euclid(symbols.len().max(1) as i64);
@@ -1413,7 +1438,19 @@ fn run_internal(
             let mark = last
                 .get(symbol)
                 .map_or(0, |c| crate::trader::rupees_to_paise(c.close));
-            let (pnl, qty) = symbol_pnl(fills, symbol, mark);
+            // Running P&L against the current mark: identical to the old
+            // `symbol_pnl` replay, but O(1) per symbol per frame.
+            let (pnl, qty) = symbol_pnl_state.get(symbol).map_or((0i64, 0i64), |acc| {
+                let pnl_paise = acc.cash_flow_paise + mark as i128 * acc.qty as i128;
+                (
+                    pnl_paise.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
+                    acc.qty as i64,
+                )
+            });
+            // `allocation_base` is a static even split of initial cash used only as
+            // the per-symbol baseline; the series tracks relative P&L and does not
+            // attribute pooled or reserved cash per symbol, so it need not reconcile
+            // exactly to portfolio equity while cash is reserved for pending orders.
             let allocation_paise =
                 allocation_base + i64::from((symbol_index as i64) < allocation_remainder);
             let symbol_equity_paise = allocation_paise.saturating_add(pnl);
@@ -1449,6 +1486,8 @@ fn run_internal(
                 &mut symbol_equity,
                 &mut day,
                 &mut observed,
+                &mut symbol_pnl_state,
+                &mut processed_fills,
             )?;
             candles.clear();
         }
@@ -1476,6 +1515,8 @@ fn run_internal(
             &mut symbol_equity,
             &mut day,
             &mut observed,
+            &mut symbol_pnl_state,
+            &mut processed_fills,
         )?;
     }
     if config.debug_invariants || cfg!(test) {
@@ -2199,6 +2240,40 @@ mod tests {
         assert_eq!(got[1].close, 10.0);
         assert_eq!(got[1].volume, 0.0);
         assert_eq!(src.stats().missing_candles["ABC"], 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn daily_series_is_never_gap_filled() {
+        let base = std::env::temp_dir().join(format!("algomln-d1gap-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&base);
+        let tz = FixedOffset::east_opt(19800).unwrap();
+        let ts_at = |y, m, d| {
+            let day = chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap();
+            tz.from_local_datetime(&day.and_hms_opt(9, 15, 0).unwrap())
+                .single()
+                .unwrap()
+                .timestamp()
+        };
+        // Two daily bars three calendar days apart (a weekend gap between them).
+        let t1 = ts_at(2024, 5, 3); // Fri
+        let t2 = ts_at(2024, 5, 6); // Mon
+        std::fs::write(
+            base.join("ABC.csv"),
+            format!("ts,open,high,low,close,volume\n{t1},10,10,10,10,1\n{t2},12,12,12,12,1\n"),
+        )
+        .unwrap();
+        let mut src = FileSource::new(&base);
+        src.gap_policy = GapPolicy::FillFlatInSession;
+        let stream = src
+            .open(&["ABC".into()], Timeframe::D1, DateRange::default())
+            .unwrap();
+        let got: Vec<_> = stream.map(Result::unwrap).map(|(_, c)| c).collect();
+        // Daily gaps are non-trading days and must never be filled or counted.
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].timestamp, t1);
+        assert_eq!(got[1].timestamp, t2);
+        assert!(src.stats().missing_candles.get("ABC").is_none());
         std::fs::remove_dir_all(base).unwrap();
     }
 
