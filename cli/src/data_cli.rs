@@ -194,6 +194,21 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 ) as Box<dyn algomln_data::HistoryApi>
             };
             let stop = Arc::new(AtomicBool::new(false));
+            // Ctrl-C flips the shared stop flag (spec 7). The downloader checks
+            // it between symbols, lets the in-flight request finish, and persists
+            // budget + catalog before returning. The handler only sets the flag,
+            // so repeated Ctrl-C is idempotent (no forced mid-write abort).
+            {
+                let stop = stop.clone();
+                if let Err(e) = ctrlc::set_handler(move || {
+                    eprintln!(
+                        "\ninterrupt received; finishing the in-flight request and saving progress..."
+                    );
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                }) {
+                    eprintln!("warning: could not install Ctrl-C handler: {e}");
+                }
+            }
             let bulk = BulkDownloader {
                 make_client,
                 catalog_path: db,
@@ -234,6 +249,9 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             );
             let fp = cat.catalog_fingerprint()?;
             println!("catalog fingerprint: {fp}");
+            if report.interrupted {
+                println!("interrupted; progress is saved, rerun to continue");
+            }
             if report.budget_reached {
                 let used = cat.budget_used(&Utc::now().date_naive().to_string())?;
                 return Err(format!(

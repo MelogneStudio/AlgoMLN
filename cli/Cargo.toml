@@ -11,3 +11,4 @@ dhan-api = { path = "../dhan-api" }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "=0.10.4"
 csv = "1.4"
+ctrlc = "3"
