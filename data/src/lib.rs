@@ -372,7 +372,7 @@ impl Catalog {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
     pub fn coverage_details(&self) -> Result<Vec<(String, String, u64)>, DataError> {
-        let mut q=self.conn.prepare("SELECT i.symbol,s.tf,COALESCE(SUM(p.rows),0) FROM series s JOIN instruments i USING(security_id) LEFT JOIN partitions p USING(series_id) GROUP BY s.id ORDER BY i.symbol,s.tf")?;
+        let mut q=self.conn.prepare("SELECT i.symbol,s.tf,COALESCE(SUM(p.rows),0) FROM series s JOIN instruments i ON i.security_id=s.security_id LEFT JOIN partitions p ON p.series_id=s.id GROUP BY s.id ORDER BY i.symbol,s.tf")?;
         let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -1800,6 +1800,44 @@ mod tests {
         store.reconcile(&mut cat).unwrap();
         assert_eq!(cat.quality("reconcile_orphan_file").unwrap(), 1);
         assert!(parts[0].path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn coverage_details_joins_series_to_partition_rows() {
+        let root = temp("coverage-details");
+        let db = root.join("catalog.sqlite");
+        let store = Store::new(&root);
+        let ts = NaiveDate::from_ymd_opt(2026, 10, 28)
+            .unwrap()
+            .and_hms_opt(9, 15, 0)
+            .unwrap()
+            .and_local_timezone(Kolkata)
+            .single()
+            .unwrap()
+            .timestamp();
+        let parts = store
+            .write_partitions("2885", Tf::M1, &[bar(ts, 100.0), bar(ts + 60, 101.0)])
+            .unwrap();
+        let mut cat = Catalog::open(db).unwrap();
+        cat.refresh_instruments(
+            &[Scrip {
+                security_id: "2885".into(),
+                symbol: "RELIANCE".into(),
+                lot_size: 1,
+                tick_size_paise: 10,
+                instrument: "EQUITY".into(),
+            }],
+            0,
+        )
+        .unwrap();
+        let sid = cat.series_for_import("2885", Tf::M1).unwrap();
+        for p in &parts {
+            cat.record_partition(sid, &store, p).unwrap();
+        }
+        assert_eq!(
+            cat.coverage_details().unwrap(),
+            vec![("RELIANCE".into(), "1m".into(), 2)]
+        );
         let _ = fs::remove_dir_all(root);
     }
     #[test]
