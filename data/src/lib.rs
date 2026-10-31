@@ -37,6 +37,37 @@ pub enum DataError {
     #[error("daily request budget reached ({used}/{cap})")]
     BudgetExhausted { used: u64, cap: u64 },
 }
+impl DataError {
+    /// True when the run must abort immediately (bad credentials). Everything
+    /// else that reaches the bulk layer is recorded as a failure and skipped.
+    pub fn is_auth(&self) -> bool {
+        matches!(self, DataError::Api(ApiError::Auth(_)))
+    }
+    /// True when the daily request budget has been reached.
+    pub fn is_budget(&self) -> bool {
+        matches!(self, DataError::BudgetExhausted { .. })
+    }
+    /// A short, stable code suitable for the `failures.error_code` column.
+    pub fn code(&self) -> String {
+        match self {
+            DataError::Api(ApiError::Auth(_)) => "auth".into(),
+            DataError::Api(ApiError::RateLimit { code, .. }) => code.clone(),
+            DataError::Api(ApiError::DataApi { code, .. }) => code.clone(),
+            DataError::Api(ApiError::BadRequest { code, .. }) => code.clone(),
+            DataError::Api(ApiError::SevereRateLimit(_)) => "DH-805".into(),
+            DataError::Api(ApiError::DataUnavailable(_)) => "DH-907".into(),
+            DataError::Api(ApiError::Access(_)) => "access".into(),
+            DataError::Api(ApiError::Server(_)) => "server".into(),
+            DataError::Api(ApiError::Transport(_)) => "transport".into(),
+            DataError::Api(ApiError::Malformed(_)) => "malformed".into(),
+            DataError::BudgetExhausted { .. } => "budget".into(),
+            DataError::Io(_) => "io".into(),
+            DataError::Db(_) => "db".into(),
+            DataError::Invalid(_) => "invalid".into(),
+            DataError::Uncovered(_) => "uncovered".into(),
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tf {
     M1,
@@ -560,6 +591,41 @@ impl Catalog {
         Ok(self
             .conn
             .query_row("SELECT count(*) FROM failures", [], |r| r.get(0))?)
+    }
+    /// A stable fingerprint of the whole catalog's materialised data: every
+    /// partition path and checksum, ordered. Two runs that produce identical
+    /// coverage produce identical fingerprints (used by `data bulk` summaries
+    /// and acceptance tests 3 and 4).
+    pub fn catalog_fingerprint(&self) -> Result<String, DataError> {
+        let mut q = self
+            .conn
+            .prepare("SELECT path,checksum FROM partitions ORDER BY series_id,path")?;
+        let rows = q
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut h = Sha256::new();
+        for (path, sum) in rows {
+            h.update(path.as_bytes());
+            h.update(b":");
+            h.update(sum.as_bytes());
+            h.update(b";");
+        }
+        Ok(format!("sha256:{:x}", h.finalize()))
+    }
+    /// All catalogued instruments as `(security_id, symbol, instrument)`, ordered
+    /// by numeric security id. Used by `data bulk` to walk the universe.
+    pub fn instruments_in_order(&self) -> Result<Vec<(String, String, String)>, DataError> {
+        let mut q = self.conn.prepare(
+            "SELECT security_id,symbol,instrument FROM instruments ORDER BY CAST(security_id AS INTEGER),security_id",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
     pub fn runs_start(&self) -> Result<i64, DataError> {
         self.conn.execute(
@@ -1447,6 +1513,310 @@ impl Updater {
     }
 }
 
+/// Number of Dhan requests the planner will issue for `id`/`tf` over
+/// `from..=to`, given current catalog coverage. Mirrors the chunking in
+/// [`Updater::update`]: a daily series is a single request (5-year fallback
+/// chunks only happen after a data error), an intraday series is one request
+/// per 89-calendar-day chunk over the merged missing range. Returns zero when
+/// the range is already covered, which is what makes `--dry-run` after an
+/// interrupted run report only the remaining work (spec 7).
+pub fn plan_requests(
+    cat: &Catalog,
+    id: &str,
+    tf: Tf,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<usize, DataError> {
+    let gaps = missing_date_ranges(cat, id, tf, from, to)?;
+    Ok(match (gaps.first(), gaps.last()) {
+        (Some((first, _)), Some((_, last))) => {
+            if tf == Tf::D1 {
+                1
+            } else {
+                chunk_dates(*first, *last).len()
+            }
+        }
+        _ => 0,
+    })
+}
+
+/// Configuration for a `data bulk` run.
+#[derive(Clone, Debug)]
+pub struct BulkConfig {
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    /// Timeframes to download, in processing order. When both are present the
+    /// caller orders 1d before 1m (spec 4).
+    pub tfs: Vec<Tf>,
+    pub budget_cap: u64,
+    /// Priority trading symbols, processed first in the given order (spec 4).
+    pub priority_symbols: Vec<String>,
+    pub margin_seconds: i64,
+    pub max_retries: u32,
+    pub reference_symbol_id: Option<String>,
+    /// Number of calendar days to wait before retrying a recorded failure.
+    pub failure_backoff_days: u64,
+}
+impl BulkConfig {
+    pub fn new(from: NaiveDate, to: NaiveDate, tfs: Vec<Tf>) -> Self {
+        Self {
+            from,
+            to,
+            tfs,
+            budget_cap: DEFAULT_BUDGET_CAP,
+            priority_symbols: Vec::new(),
+            margin_seconds: 30,
+            max_retries: 3,
+            reference_symbol_id: None,
+            failure_backoff_days: 1,
+        }
+    }
+}
+
+/// Outcome of a bulk run (or dry run).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BulkReport {
+    pub symbols_completed: usize,
+    pub symbols_total: usize,
+    pub requests_used: u64,
+    pub failures: u64,
+    /// Planned request count per timeframe, populated on `--dry-run`.
+    pub planned: Vec<(String, usize)>,
+    /// True when the run stopped because the daily budget was reached.
+    pub budget_reached: bool,
+    /// True when the run stopped because of a Ctrl-C style interrupt.
+    pub interrupted: bool,
+}
+
+/// Drives a full-universe download, reusing [`Updater`] per symbol/tf so request
+/// chunking, retries, 5-year fallback, overlap handling and crash-safe writes
+/// all come from the shared planner. The downloader owns only ordering, the
+/// persisted budget hard-stop, resume and progress.
+pub struct BulkDownloader<F: Fn() -> Box<dyn HistoryApi>> {
+    /// Factory that yields a fresh client per symbol so the shared rate limiter
+    /// (250 ms spacing, DH-904 backoff) is reused without aliasing one updater.
+    pub make_client: F,
+    pub catalog_path: PathBuf,
+    pub store_root: PathBuf,
+    pub config: BulkConfig,
+    /// Set from a Ctrl-C handler. Checked between symbols; the in-flight symbol
+    /// is allowed to finish (spec 7).
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
+}
+impl<F: Fn() -> Box<dyn HistoryApi>> BulkDownloader<F> {
+    fn today(&self) -> String {
+        chrono::Utc::now().date_naive().to_string()
+    }
+    /// Resolve the processing order: priority symbols first (in file order),
+    /// then every other instrument in security-id order, de-duplicated.
+    fn order(&self, cat: &Catalog) -> Result<Vec<(String, String, String)>, DataError> {
+        let all = cat.instruments_in_order()?;
+        let by_id: HashMap<String, (String, String)> = all
+            .iter()
+            .map(|(id, sym, inst)| (id.clone(), (sym.clone(), inst.clone())))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for sym in &self.config.priority_symbols {
+            let (id, _) = cat.resolve(sym)?;
+            if seen.insert(id.clone()) {
+                if let Some((symbol, inst)) = by_id.get(&id) {
+                    out.push((id.clone(), symbol.clone(), inst.clone()));
+                }
+            }
+        }
+        for (id, sym, inst) in all {
+            if seen.insert(id.clone()) {
+                out.push((id, sym, inst));
+            }
+        }
+        Ok(out)
+    }
+    /// Compute the planned request count per timeframe without sending anything.
+    pub fn dry_run(&self) -> Result<BulkReport, DataError> {
+        let cat = Catalog::open(&self.catalog_path)?;
+        let order = self.order(&cat)?;
+        let mut report = BulkReport {
+            symbols_total: order.len(),
+            ..Default::default()
+        };
+        for tf in &self.config.tfs {
+            let mut total = 0usize;
+            for (id, _, _) in &order {
+                total += plan_requests(&cat, id, *tf, self.config.from, self.config.to)?;
+            }
+            report.planned.push((tf.as_str().to_string(), total));
+        }
+        Ok(report)
+    }
+    /// Run the download. Processes 1d for every symbol first, then 1m (per the
+    /// order in `config.tfs`), committing after each symbol so an interrupt
+    /// leaves whole symbols behind. Returns the final report.
+    pub fn run<P: FnMut(&Progress)>(&self, mut progress: P) -> Result<BulkReport, DataError> {
+        use std::sync::atomic::Ordering;
+        let order = {
+            let cat = Catalog::open(&self.catalog_path)?;
+            self.order(&cat)?
+        };
+        let start = std::time::Instant::now();
+        let today = self.today();
+        let mut report = BulkReport {
+            symbols_total: order.len(),
+            ..Default::default()
+        };
+        {
+            let cat = Catalog::open(&self.catalog_path)?;
+            report.failures = cat.failure_count()?;
+        }
+        'tfs: for tf in &self.config.tfs {
+            let mut done = 0usize;
+            for (id, symbol, instrument) in &order {
+                if self.stop.load(Ordering::SeqCst) {
+                    report.interrupted = true;
+                    break 'tfs;
+                }
+                let budget_used = {
+                    let cat = Catalog::open(&self.catalog_path)?;
+                    cat.budget_used(&today)?
+                };
+                if budget_used >= self.config.budget_cap {
+                    report.budget_reached = true;
+                    break 'tfs;
+                }
+                let mut updater = Updater {
+                    client: (self.make_client)(),
+                    catalog: Catalog::open(&self.catalog_path)?,
+                    store: Store::new(&self.store_root),
+                    max_retries: self.config.max_retries,
+                    margin_seconds: self.config.margin_seconds,
+                    reference_symbol_id: self.config.reference_symbol_id.clone(),
+                    budget_cap: self.config.budget_cap,
+                };
+                let before = updater.catalog.budget_used(&today)?;
+                let outcome = updater.update(id, *tf, instrument, self.config.from, self.config.to);
+                let after = updater.catalog.budget_used(&today)?;
+                report.requests_used += after.saturating_sub(before);
+                match outcome {
+                    Ok(_) => {
+                        done += 1;
+                        report.symbols_completed += 1;
+                        let cat = Catalog::open(&self.catalog_path)?;
+                        cat.clear_failure(id, *tf, self.config.from, self.config.to)?;
+                    }
+                    Err(e) if e.is_budget() => {
+                        report.budget_reached = true;
+                        break 'tfs;
+                    }
+                    Err(e) if e.is_auth() => {
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        let cat = Catalog::open(&self.catalog_path)?;
+                        let next_retry = chrono::Utc::now().date_naive()
+                            + chrono::Days::new(self.config.failure_backoff_days);
+                        cat.record_failure(
+                            id,
+                            *tf,
+                            self.config.from,
+                            self.config.to,
+                            &e.code(),
+                            next_retry,
+                        )?;
+                        report.failures = cat.failure_count()?;
+                        eprintln!(
+                            "failure {symbol} {} {}..={}: {e}",
+                            tf.as_str(),
+                            self.config.from,
+                            self.config.to
+                        );
+                    }
+                }
+                let elapsed = start.elapsed().as_secs_f64().max(1e-3);
+                let rate = report.requests_used as f64 / elapsed;
+                progress(&Progress {
+                    tf: tf.as_str(),
+                    done,
+                    total: order.len(),
+                    requests: report.requests_used,
+                    budget_cap: self.config.budget_cap,
+                    budget_used: after,
+                    rate,
+                    failures: report.failures,
+                });
+            }
+        }
+        Ok(report)
+    }
+}
+
+/// A snapshot handed to the progress callback once per symbol.
+#[derive(Clone, Debug)]
+pub struct Progress<'a> {
+    pub tf: &'a str,
+    pub done: usize,
+    pub total: usize,
+    pub requests: u64,
+    pub budget_cap: u64,
+    pub budget_used: u64,
+    pub rate: f64,
+    pub failures: u64,
+}
+impl Progress<'_> {
+    /// The single updating status line from spec 9, e.g.
+    /// `1m  842/2365 symbols | requests 17,904/90,000 today | 3.9 req/s | ETA 2h 41m | failures 3`.
+    pub fn line(&self) -> String {
+        let remaining = self.total.saturating_sub(self.done);
+        let eta = if self.rate > 0.0 {
+            // Rough: assume the remaining symbols issue a similar number of
+            // requests per symbol as issued so far.
+            let per_symbol = if self.done > 0 {
+                self.requests as f64 / self.done as f64
+            } else {
+                0.0
+            };
+            let secs = (remaining as f64 * per_symbol / self.rate) as i64;
+            format_eta(secs)
+        } else {
+            "--".into()
+        };
+        format!(
+            "{tf}  {done}/{total} symbols | requests {req}/{cap} today | {rate:.1} req/s | ETA {eta} | failures {fail}",
+            tf = self.tf,
+            done = self.done,
+            total = self.total,
+            req = group_thousands(self.budget_used),
+            cap = group_thousands(self.budget_cap),
+            rate = self.rate,
+            eta = eta,
+            fail = self.failures,
+        )
+    }
+}
+fn format_eta(secs: i64) -> String {
+    if secs <= 0 {
+        return "0m".into();
+    }
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m")
+    }
+}
+fn group_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::new();
+    for (i, c) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*c as char);
+    }
+    out
+}
+
 pub struct CatalogSource {
     pub store: Store,
     pub catalog_path: PathBuf,
@@ -2328,5 +2698,183 @@ mod tests {
             .unwrap();
         assert!(p[0].path.to_string_lossy().contains("2026-01"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn scrip(id: &str, sym: &str) -> Scrip {
+        Scrip {
+            security_id: id.into(),
+            symbol: sym.into(),
+            lot_size: 1,
+            tick_size_paise: 5,
+            instrument: "EQUITY".into(),
+        }
+    }
+    #[test]
+    fn plan_requests_counts_89_day_chunks_and_single_daily() {
+        let root = temp("plan-count");
+        let mut cat = Catalog::open(root.join("catalog.sqlite")).unwrap();
+        cat.refresh_instruments(&[scrip("1", "ABC")], 0).unwrap();
+        let from = NaiveDate::from_ymd_opt(2021, 10, 31).unwrap();
+        let to = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        assert_eq!(plan_requests(&cat, "1", Tf::M1, from, to).unwrap(), 21);
+        assert_eq!(plan_requests(&cat, "1", Tf::D1, from, to).unwrap(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn dry_run_reports_per_tf_plan_and_sends_zero_requests() {
+        let root = temp("bulk-dry");
+        let db = root.join("catalog.sqlite");
+        let mut cat = Catalog::open(&db).unwrap();
+        cat.refresh_instruments(&[scrip("10", "AAA"), scrip("2", "BBB")], 0)
+            .unwrap();
+        drop(cat);
+        let from = NaiveDate::from_ymd_opt(2021, 10, 31).unwrap();
+        let to = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let bulk = BulkDownloader {
+            make_client: move || Box::new(CountingHistory { calls: c.clone() }) as Box<dyn HistoryApi>,
+            catalog_path: db.clone(),
+            store_root: root.clone(),
+            config: BulkConfig::new(from, to, vec![Tf::D1, Tf::M1]),
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let report = bulk.dry_run().unwrap();
+        assert_eq!(report.symbols_total, 2);
+        assert_eq!(
+            report.planned,
+            vec![("1d".to_string(), 2), ("1m".to_string(), 42)]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn bulk_orders_priority_symbols_first_then_security_id() {
+        let root = temp("bulk-order");
+        let db = root.join("catalog.sqlite");
+        let mut cat = Catalog::open(&db).unwrap();
+        cat.refresh_instruments(
+            &[scrip("10", "AAA"), scrip("2", "BBB"), scrip("30", "CCC")],
+            0,
+        )
+        .unwrap();
+        drop(cat);
+        let from = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let to = from + chrono::Days::new(1);
+        let mut cfg = BulkConfig::new(from, to, vec![Tf::M1]);
+        cfg.priority_symbols = vec!["CCC".into()];
+        let bulk = BulkDownloader {
+            make_client: || Box::new(CountingHistory {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }) as Box<dyn HistoryApi>,
+            catalog_path: db.clone(),
+            store_root: root.clone(),
+            config: cfg,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let cat = Catalog::open(&db).unwrap();
+        let order = bulk.order(&cat).unwrap();
+        let symbols: Vec<_> = order.iter().map(|(_, s, _)| s.clone()).collect();
+        // CCC (priority) first, then by numeric security id: 2=BBB, 10=AAA.
+        assert_eq!(symbols, vec!["CCC", "BBB", "AAA"]);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn bulk_stops_at_soft_cap_and_budget_survives_restart() {
+        let root = temp("bulk-budget");
+        let db = root.join("catalog.sqlite");
+        let mut cat = Catalog::open(&db).unwrap();
+        cat.refresh_instruments(&[scrip("1", "AAA"), scrip("2", "BBB")], 0)
+            .unwrap();
+        // Pre-seed today's budget so the cap is reached after the first symbol.
+        let today = chrono::Utc::now().date_naive().to_string();
+        cat.budget_add(&today, 1).unwrap();
+        drop(cat);
+        let from = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let to = from + chrono::Days::new(1);
+        let mut cfg = BulkConfig::new(from, to, vec![Tf::D1]);
+        cfg.budget_cap = 2; // room for exactly one more request
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let bulk = BulkDownloader {
+            make_client: move || Box::new(FakeHistory {
+                calls: c.clone(),
+                empty_first: false,
+            }) as Box<dyn HistoryApi>,
+            catalog_path: db.clone(),
+            store_root: root.clone(),
+            config: cfg,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let report = bulk.run(|_| {}).unwrap();
+        assert!(report.budget_reached);
+        // One request got through (budget 1 -> 2 == cap), the second symbol is skipped.
+        let cat = Catalog::open(&db).unwrap();
+        assert_eq!(cat.budget_used(&today).unwrap(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn bulk_resume_does_not_re_request_completed_ranges() {
+        let root = temp("bulk-resume");
+        let db = root.join("catalog.sqlite");
+        let mut cat = Catalog::open(&db).unwrap();
+        cat.refresh_instruments(&[scrip("7", "AAA")], 0).unwrap();
+        drop(cat);
+        let from = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let to = from + chrono::Days::new(1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let make = {
+            let calls = calls.clone();
+            move || {
+                Box::new(FakeHistory {
+                    calls: calls.clone(),
+                    empty_first: false,
+                }) as Box<dyn HistoryApi>
+            }
+        };
+        let mut cfg = BulkConfig::new(from, to, vec![Tf::M1]);
+        cfg.reference_symbol_id = Some("7".into());
+        let bulk = BulkDownloader {
+            make_client: make,
+            catalog_path: db.clone(),
+            store_root: root.clone(),
+            config: cfg,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let first = bulk.run(|_| {}).unwrap();
+        assert_eq!(first.symbols_completed, 1);
+        let after_first = calls.load(Ordering::SeqCst);
+        assert!(after_first >= 1);
+        // Rerun: planner derives work from coverage, so nothing new is requested.
+        let second = bulk.run(|_| {}).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), after_first);
+        assert_eq!(second.requests_used, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn progress_line_matches_spec_shape() {
+        let p = Progress {
+            tf: "1m",
+            done: 842,
+            total: 2365,
+            requests: 17_904,
+            budget_cap: 90_000,
+            budget_used: 17_904,
+            rate: 3.9,
+            failures: 3,
+        };
+        let line = p.line();
+        assert!(line.starts_with("1m  842/2365 symbols | requests 17,904/90,000 today |"));
+        assert!(line.contains("3.9 req/s"));
+        assert!(line.ends_with("failures 3"));
+    }
+    #[test]
+    fn thousands_grouping_and_eta_formatting() {
+        assert_eq!(group_thousands(90_000), "90,000");
+        assert_eq!(group_thousands(17_904), "17,904");
+        assert_eq!(group_thousands(5), "5");
+        assert_eq!(format_eta(2 * 3600 + 41 * 60), "2h 41m");
+        assert_eq!(format_eta(600), "10m");
+        assert_eq!(format_eta(0), "0m");
     }
 }
