@@ -589,18 +589,24 @@ impl Trader {
                 let stop = self
                     .program
                     .stop_loss()
-                    .and_then(|v| v.spelling.parse::<f64>().ok())
-                    .is_some_and(|x| {
+                    .and_then(|v| decimal_scaled(&v.spelling, 100))
+                    .is_some_and(|bp| {
                         rupees_to_paise(c.close)
-                            <= (pos.avg_entry_paise as f64 * (1.0 - x / 100.0)) as i64
+                            <= round_half_even_ratio(
+                                pos.avg_entry_paise as i128 * (10_000 - bp),
+                                10_000,
+                            ) as i64
                     });
                 let take = self
                     .program
                     .take_profit()
-                    .and_then(|v| v.spelling.parse::<f64>().ok())
-                    .is_some_and(|x| {
+                    .and_then(|v| decimal_scaled(&v.spelling, 100))
+                    .is_some_and(|bp| {
                         rupees_to_paise(c.close)
-                            >= (pos.avg_entry_paise as f64 * (1.0 + x / 100.0)) as i64
+                            >= round_half_even_ratio(
+                                pos.avg_entry_paise as i128 * (10_000 + bp),
+                                10_000,
+                            ) as i64
                     });
                 if stop || take {
                     self.emit_at(
@@ -767,12 +773,14 @@ impl Trader {
                 if ref_paise <= 0 {
                     0
                 } else {
-                    ((self.available_cash() as i128 * pct_bp) / (ref_paise as i128 * 10_000)) as u64
+                    (((self.available_cash() as i128 * pct_bp) / (ref_paise as i128 * 10_000))
+                        .max(0)) as u64
                 }
             }
             TradeAmount::SellPositionPercentage(x) => {
-                ((self.net_position(s) as i128 * decimal_scaled(&x.spelling, 100).unwrap_or(0))
-                    / 10_000) as u64
+                (((self.net_position(s) as i128 * decimal_scaled(&x.spelling, 100).unwrap_or(0))
+                    / 10_000)
+                    .max(0)) as u64
             }
         };
         let r = self
