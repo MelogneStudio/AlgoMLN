@@ -148,13 +148,21 @@ fn bench(c: &mut Criterion) {
     let count = symbols.len() * dates.len() * 360;
     let mut group = c.benchmark_group("catalog_source_loader_only");
     group.throughput(Throughput::Elements(count as u64));
+    // One iteration loads ~46M candles (~2 GiB), so the default 100 samples would
+    // take hours. Hold the sample count at criterion's floor with a short warm-up.
+    group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_secs(1));
     group.bench_function("100_symbols_5y_1m", |b| {
         b.iter(|| {
-            let before = PEAK.load(Ordering::Relaxed);
+            // PEAK is a monotonic high-water mark already pinned by prepare()'s
+            // ~2 GiB dataset; rebase it to the current live bytes so the reported
+            // delta reflects this iteration's loader allocation, not setup.
+            let base = LIVE.load(Ordering::Relaxed);
+            PEAK.store(base, Ordering::Relaxed);
             let stream = source.open(&syms, Timeframe::M1, range).unwrap();
             let n = stream.map(Result::unwrap).count();
             black_box(n);
-            let peak = PEAK.load(Ordering::Relaxed).saturating_sub(before);
+            let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
             eprintln!(
                 "catalog source peak allocation delta: {:.1} MiB",
                 peak as f64 / 1024.0 / 1024.0
