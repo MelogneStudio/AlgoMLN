@@ -183,7 +183,7 @@ impl Catalog {
             fs::create_dir_all(p)?;
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS instruments(security_id TEXT PRIMARY KEY,symbol TEXT NOT NULL UNIQUE,segment TEXT NOT NULL,lot_size INTEGER NOT NULL,tick_size_paise INTEGER NOT NULL,refreshed_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS series(id INTEGER PRIMARY KEY,security_id TEXT NOT NULL,tf TEXT NOT NULL,first_ts INTEGER,last_ts INTEGER,rows INTEGER NOT NULL DEFAULT 0,needs_refresh INTEGER NOT NULL DEFAULT 0,UNIQUE(security_id,tf)); CREATE TABLE IF NOT EXISTS partitions(series_id INTEGER NOT NULL,path TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,rows INTEGER NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(series_id,path)); CREATE TABLE IF NOT EXISTS coverage(series_id INTEGER NOT NULL,start_ts INTEGER NOT NULL,end_ts INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('data','confirmed_empty'))); CREATE TABLE IF NOT EXISTS sessions(series_id INTEGER NOT NULL,date TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,bars INTEGER NOT NULL,PRIMARY KEY(series_id,date)); CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY,series_id INTEGER,kind TEXT NOT NULL,ts INTEGER,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started INTEGER NOT NULL,finished INTEGER,requests INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY,requests INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS trading_calendar(date TEXT PRIMARY KEY,is_trading INTEGER NOT NULL,source TEXT NOT NULL); CREATE TABLE IF NOT EXISTS failures(security_id INTEGER,tf TEXT,from_date TEXT,to_date TEXT,error_code TEXT,attempts INTEGER,next_retry TEXT,PRIMARY KEY(security_id,tf,from_date,to_date));")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000; CREATE TABLE IF NOT EXISTS instruments(security_id TEXT PRIMARY KEY,symbol TEXT NOT NULL UNIQUE,segment TEXT NOT NULL,lot_size INTEGER NOT NULL,tick_size_paise INTEGER NOT NULL,refreshed_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS series(id INTEGER PRIMARY KEY,security_id TEXT NOT NULL,tf TEXT NOT NULL,first_ts INTEGER,last_ts INTEGER,rows INTEGER NOT NULL DEFAULT 0,needs_refresh INTEGER NOT NULL DEFAULT 0,UNIQUE(security_id,tf)); CREATE TABLE IF NOT EXISTS partitions(series_id INTEGER NOT NULL,path TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,rows INTEGER NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(series_id,path)); CREATE TABLE IF NOT EXISTS coverage(series_id INTEGER NOT NULL,start_ts INTEGER NOT NULL,end_ts INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('data','confirmed_empty'))); CREATE TABLE IF NOT EXISTS sessions(series_id INTEGER NOT NULL,date TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,bars INTEGER NOT NULL,PRIMARY KEY(series_id,date)); CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY,series_id INTEGER,kind TEXT NOT NULL,ts INTEGER,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started INTEGER NOT NULL,finished INTEGER,requests INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY,requests INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS trading_calendar(date TEXT PRIMARY KEY,is_trading INTEGER NOT NULL,source TEXT NOT NULL); CREATE TABLE IF NOT EXISTS failures(security_id INTEGER,tf TEXT,from_date TEXT,to_date TEXT,error_code TEXT,attempts INTEGER,next_retry TEXT,PRIMARY KEY(security_id,tf,from_date,to_date));")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version > 1 {
             return Err(DataError::Invalid(format!(
@@ -797,7 +797,12 @@ impl Store {
                 }
             }
         }
-        let tx = cat.conn.transaction()?;
+        // IMMEDIATE so the read-before-write (SELECT partitions, then DELETE/UPDATE)
+        // takes the write lock up front: under a concurrent bulk run this avoids a
+        // stale-snapshot SQLITE_BUSY between workers; serially it is unchanged.
+        let tx = cat
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut q = tx.prepare("SELECT p.series_id,p.path,p.checksum FROM partitions p")?;
         let entries = q
             .query_map([], |r| {
@@ -1386,7 +1391,10 @@ impl Updater {
                     }
                     let partitions = self.store.write_partitions(security_id, tf, &saved)?;
                     let sid = self.catalog.series(security_id, tf)?;
-                    let tx = self.catalog.conn.transaction()?;
+                    let tx = self
+                        .catalog
+                        .conn
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                     for part in &partitions {
                         let rel = part
                             .path
@@ -1556,6 +1564,12 @@ pub struct BulkConfig {
     pub reference_symbol_id: Option<String>,
     /// Number of calendar days to wait before retrying a recorded failure.
     pub failure_backoff_days: u64,
+    /// Maximum number of symbols fetched in parallel within a timeframe (spec 6).
+    /// `1` keeps the fully serial path; higher values fan out across symbols while
+    /// the shared `Limiter` still spaces request *starts* >=250 ms apart. The
+    /// library default is serial; the CLI opts into 4. Exact budget/auth
+    /// accounting is a serial-only guarantee (see [`BulkDownloader::run`]).
+    pub concurrency: usize,
 }
 impl BulkConfig {
     pub fn new(from: NaiveDate, to: NaiveDate, tfs: Vec<Tf>) -> Self {
@@ -1569,6 +1583,7 @@ impl BulkConfig {
             max_retries: 3,
             reference_symbol_id: None,
             failure_backoff_days: 1,
+            concurrency: 1,
         }
     }
 }
@@ -1603,7 +1618,7 @@ pub struct BulkDownloader<F: Fn() -> Box<dyn HistoryApi>> {
     /// is allowed to finish (spec 7).
     pub stop: Arc<std::sync::atomic::AtomicBool>,
 }
-impl<F: Fn() -> Box<dyn HistoryApi>> BulkDownloader<F> {
+impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
     fn today(&self) -> String {
         chrono::Utc::now().date_naive().to_string()
     }
@@ -1652,7 +1667,27 @@ impl<F: Fn() -> Box<dyn HistoryApi>> BulkDownloader<F> {
     /// Run the download. Processes 1d for every symbol first, then 1m (per the
     /// order in `config.tfs`), committing after each symbol so an interrupt
     /// leaves whole symbols behind. Returns the final report.
-    pub fn run<P: FnMut(&Progress)>(&self, mut progress: P) -> Result<BulkReport, DataError> {
+    ///
+    /// Dispatches to the serial path (`config.concurrency <= 1`) or the
+    /// across-symbols concurrent path (`> 1`). The serial path's exact budget and
+    /// immediate-auth-abort behaviour is a serial-only guarantee; see
+    /// [`run_concurrent`](Self::run_concurrent) for the relaxed concurrent
+    /// semantics.
+    pub fn run<P: FnMut(&Progress) + Send>(
+        &self,
+        progress: P,
+    ) -> Result<BulkReport, DataError> {
+        if self.config.concurrency > 1 {
+            self.run_concurrent(progress)
+        } else {
+            self.run_serial(progress)
+        }
+    }
+
+    /// Fully serial download: one symbol at a time, one SQLite connection in
+    /// flight. This is the reference implementation; the concurrent path must
+    /// produce the same catalog for the same inputs.
+    fn run_serial<P: FnMut(&Progress)>(&self, mut progress: P) -> Result<BulkReport, DataError> {
         use std::sync::atomic::Ordering;
         let order = {
             let cat = Catalog::open(&self.catalog_path)?;
@@ -1746,6 +1781,201 @@ impl<F: Fn() -> Box<dyn HistoryApi>> BulkDownloader<F> {
             }
         }
         Ok(report)
+    }
+
+    /// Across-symbols concurrent download (`config.concurrency > 1`). Within each
+    /// timeframe a bounded pool of worker threads (pool size = `concurrency`) each
+    /// drives one symbol's [`Updater::update`] to completion on its own SQLite
+    /// connection. The pool size is spec 6's in-flight cap; the shared `Limiter`
+    /// inside the cloned clients still spaces request *starts* >=250 ms apart
+    /// globally, so concurrency only overlaps responses on the wire, never the
+    /// 250 ms start spacing.
+    ///
+    /// Each symbol is a distinct series touched by a single worker, so the overlap
+    /// read-modify-write never races; cross-worker safety on the shared `budget`,
+    /// `runs` and `trading_calendar` rows comes from WAL + `busy_timeout` and the
+    /// IMMEDIATE write transactions. Timeframes are still a barrier (all symbols
+    /// for 1d finish before 1m) and each symbol commits whole, so Ctrl-C and
+    /// budget stops leave whole symbols behind exactly as the serial path does.
+    ///
+    /// Relaxed vs. serial: the daily budget is a soft cap here — up to
+    /// `concurrency - 1` requests may be issued past it before every worker
+    /// observes the stop — and an auth failure aborts only after the in-flight
+    /// symbols finish. Callers needing exact accounting use `concurrency = 1`.
+    fn run_concurrent<P: FnMut(&Progress) + Send>(
+        &self,
+        progress: P,
+    ) -> Result<BulkReport, DataError> {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        let order = {
+            let cat = Catalog::open(&self.catalog_path)?;
+            self.order(&cat)?
+        };
+        let total = order.len();
+        let start = std::time::Instant::now();
+        let today = self.today();
+        let mut initial = BulkReport {
+            symbols_total: total,
+            ..Default::default()
+        };
+        {
+            let cat = Catalog::open(&self.catalog_path)?;
+            initial.failures = cat.failure_count()?;
+        }
+        let report = Mutex::new(initial);
+        let progress = Mutex::new(progress);
+        // The first error that the serial path would `?`-propagate (catalog open
+        // failure or auth): stored, then returned after the pool drains.
+        let fatal: Mutex<Option<DataError>> = Mutex::new(None);
+        // Set when any worker hits the budget or a fatal error so the others stop
+        // picking up new symbols (in-flight symbols still finish).
+        let stop_all = AtomicBool::new(false);
+
+        'tfs: for tf in &self.config.tfs {
+            let next = AtomicUsize::new(0);
+            let done = AtomicUsize::new(0);
+            let workers = self.config.concurrency.max(1).min(total.max(1));
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    scope.spawn(|| {
+                        while !self.stop.load(Ordering::SeqCst)
+                            && !stop_all.load(Ordering::SeqCst)
+                        {
+                            let i = next.fetch_add(1, Ordering::SeqCst);
+                            if i >= total {
+                                break;
+                            }
+                            let (id, symbol, instrument) = &order[i];
+                            // Budget gate before taking on a new symbol (mirrors the
+                            // serial per-symbol check).
+                            match Catalog::open(&self.catalog_path)
+                                .and_then(|c| c.budget_used(&today))
+                            {
+                                Ok(used) if used >= self.config.budget_cap => {
+                                    report.lock().unwrap().budget_reached = true;
+                                    stop_all.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    *fatal.lock().unwrap() = Some(e);
+                                    stop_all.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
+                            let mut updater = match Catalog::open(&self.catalog_path) {
+                                Ok(catalog) => Updater {
+                                    client: (self.make_client)(),
+                                    catalog,
+                                    store: Store::new(&self.store_root),
+                                    max_retries: self.config.max_retries,
+                                    margin_seconds: self.config.margin_seconds,
+                                    reference_symbol_id: self.config.reference_symbol_id.clone(),
+                                    budget_cap: self.config.budget_cap,
+                                },
+                                Err(e) => {
+                                    *fatal.lock().unwrap() = Some(e);
+                                    stop_all.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                            };
+                            let before = updater.catalog.budget_used(&today).unwrap_or(0);
+                            let outcome = updater.update(
+                                id,
+                                *tf,
+                                instrument,
+                                self.config.from,
+                                self.config.to,
+                            );
+                            let after = updater
+                                .catalog
+                                .budget_used(&today)
+                                .unwrap_or(before)
+                                .max(before);
+                            report.lock().unwrap().requests_used += after.saturating_sub(before);
+                            match outcome {
+                                Ok(_) => {
+                                    report.lock().unwrap().symbols_completed += 1;
+                                    if let Ok(cat) = Catalog::open(&self.catalog_path) {
+                                        let _ = cat.clear_failure(
+                                            id,
+                                            *tf,
+                                            self.config.from,
+                                            self.config.to,
+                                        );
+                                    }
+                                }
+                                Err(e) if e.is_budget() => {
+                                    report.lock().unwrap().budget_reached = true;
+                                    stop_all.store(true, Ordering::SeqCst);
+                                }
+                                Err(e) if e.is_auth() => {
+                                    *fatal.lock().unwrap() = Some(e);
+                                    stop_all.store(true, Ordering::SeqCst);
+                                }
+                                Err(e) => {
+                                    if let Ok(cat) = Catalog::open(&self.catalog_path) {
+                                        let next_retry = chrono::Utc::now().date_naive()
+                                            + chrono::Days::new(self.config.failure_backoff_days);
+                                        let _ = cat.record_failure(
+                                            id,
+                                            *tf,
+                                            self.config.from,
+                                            self.config.to,
+                                            &e.code(),
+                                            next_retry,
+                                        );
+                                        if let Ok(fc) = cat.failure_count() {
+                                            report.lock().unwrap().failures = fc;
+                                        }
+                                    }
+                                    eprintln!(
+                                        "failure {symbol} {} {}..={}: {e}",
+                                        tf.as_str(),
+                                        self.config.from,
+                                        self.config.to
+                                    );
+                                }
+                            }
+                            let d = done.fetch_add(1, Ordering::SeqCst) + 1;
+                            let (requests_used, failures) = {
+                                let r = report.lock().unwrap();
+                                (r.requests_used, r.failures)
+                            };
+                            let elapsed = start.elapsed().as_secs_f64().max(1e-3);
+                            let rate = requests_used as f64 / elapsed;
+                            let snapshot = Progress {
+                                tf: tf.as_str(),
+                                done: d,
+                                total,
+                                requests: requests_used,
+                                budget_cap: self.config.budget_cap,
+                                budget_used: after,
+                                rate,
+                                failures,
+                            };
+                            let mut p = progress.lock().unwrap();
+                            (*p)(&snapshot);
+                        }
+                    });
+                }
+            });
+            if self.stop.load(Ordering::SeqCst) {
+                report.lock().unwrap().interrupted = true;
+                break 'tfs;
+            }
+            if fatal.lock().unwrap().is_some() {
+                break 'tfs;
+            }
+            if report.lock().unwrap().budget_reached {
+                break 'tfs;
+            }
+        }
+        if let Some(e) = fatal.lock().unwrap().take() {
+            return Err(e);
+        }
+        Ok(report.into_inner().unwrap())
     }
 }
 
@@ -3207,6 +3437,68 @@ mod acceptance {
             status[0].bars, 375,
             "all 375 session bars must be stored; downloader must not cap at 360"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Spec 6 + 11.2: with `concurrency > 1` the shared limiter must still keep
+    /// request *starts* >=250 ms apart. Three symbols are fetched concurrently
+    /// through one `DhanClient` limiter (cloned per worker); the mock records the
+    /// arrival of each request and all gaps must clear the spacing floor. Also
+    /// proves the concurrent write path commits every symbol without racing on the
+    /// shared catalog (WAL + busy_timeout + IMMEDIATE writes).
+    #[test]
+    fn concurrent_run_keeps_250ms_spacing_and_commits_all_symbols() {
+        let root = temp("concurrent-spacing");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "AAA");
+        seed_instrument(&db, "2", "BBB");
+        seed_instrument(&db, "3", "CCC");
+        let day = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        // One intraday request per symbol (single-day range => single chunk).
+        let responses = (0..3)
+            .map(|_| (200u16, intraday_body(open_ist(day), 1)))
+            .collect::<Vec<_>>();
+        let (base, server) = mock_server(responses);
+        // Every worker's client shares the one limiter, so starts are spaced
+        // globally rather than per client.
+        let client = DhanClient::with_base(Arc::new(TestToken), &base).unwrap();
+        let base_for_factory = base.clone();
+        let make_client = move || {
+            Box::new(
+                client
+                    .clone_with_base(&base_for_factory)
+                    .expect("clone shares the limiter"),
+            ) as Box<dyn HistoryApi>
+        };
+        let mut cfg = BulkConfig::new(day, day, vec![Tf::M1]);
+        cfg.concurrency = 3;
+        cfg.margin_seconds = 0;
+        let bulk = BulkDownloader {
+            make_client,
+            catalog_path: db.clone(),
+            store_root: root.clone(),
+            config: cfg,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let report = bulk.run(|_| {}).unwrap();
+        assert_eq!(report.symbols_completed, 3, "every symbol must commit");
+        let outcome = server.join().unwrap();
+        assert_eq!(outcome.served, 3, "exactly one request per symbol");
+        let mut times = outcome.received_at;
+        times.sort();
+        for pair in times.windows(2) {
+            let gap = pair[1].duration_since(pair[0]);
+            assert!(
+                gap >= std::time::Duration::from_millis(200),
+                "requests only {gap:?} apart; the shared limiter must keep ~250 ms \
+                 spacing even with concurrency"
+            );
+        }
+        // All three series are present with their single bar committed.
+        let cat = Catalog::open(&db).unwrap();
+        let status = cat.status_rows().unwrap();
+        assert_eq!(status.len(), 3);
+        assert!(status.iter().all(|s| s.bars == 1));
         let _ = fs::remove_dir_all(root);
     }
 }

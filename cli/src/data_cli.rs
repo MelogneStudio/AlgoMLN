@@ -179,10 +179,22 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .map(|x| x.0)
                 .ok();
+            // Up to N symbols fetched in parallel (spec 6). Defaults to 4 to
+            // overlap request latency; the shared limiter still spaces request
+            // starts >=250 ms apart. `--concurrency 1` forces the serial path
+            // (exact budget/auth accounting).
+            let concurrency = opts
+                .get("--concurrency")
+                .map(|x| x.parse::<usize>())
+                .transpose()
+                .map_err(|e| format!("invalid --concurrency: {e}"))?
+                .unwrap_or(4)
+                .max(1);
             let mut config = BulkConfig::new(from, to, tfs);
             config.budget_cap = budget_cap;
             config.priority_symbols = priority_symbols;
             config.reference_symbol_id = reference_symbol_id;
+            config.concurrency = concurrency;
             let db = db.clone();
             let root = root.clone();
             let (client, base) = client()?;
