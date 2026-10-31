@@ -267,7 +267,6 @@ pub struct Trader {
     accepted_buys_today: u64,
     next_id: u64,
     daily_loss_reported: bool,
-    daily_loss_locked: bool,
 }
 impl Trader {
     pub fn new(program: &Program, cfg: TraderConfig) -> Result<Self, TraderError> {
@@ -291,7 +290,6 @@ impl Trader {
             accepted_buys_today: 0,
             next_id: 1,
             daily_loss_reported: false,
-            daily_loss_locked: false,
         })
     }
     pub fn start_day(&mut self, _day: i64) {
@@ -299,7 +297,6 @@ impl Trader {
         self.realized_loss_today_paise = 0;
         self.accepted_buys_today = 0;
         self.daily_loss_reported = false;
-        self.daily_loss_locked = false;
     }
     pub fn cash(&self) -> f64 {
         paise_to_rupees(self.cash_paise)
@@ -369,7 +366,8 @@ impl Trader {
                     if !price.is_finite() || price <= 0.0 || !fees.is_finite() || fees < 0.0 {
                         return events;
                     }
-                    let q = qty.min(o.remaining());
+                    let remaining_before = o.remaining();
+                    let q = qty.min(remaining_before);
                     if q > 0 {
                         o.filled += q;
                         let booked_price = paise_to_rupees(rupees_to_paise(price));
@@ -389,6 +387,21 @@ impl Trader {
                         })
                     }
                     if matches!(ev, OrderEvent::Filled { .. }) || o.remaining() == 0 {
+                        // A terminal `Filled` closes the order; any still-unfilled
+                        // remainder is dropped here and its reserved cash is released
+                        // via `live() == false`. The bundled SimBroker/ScriptedPort
+                        // always report the terminal fill as exactly the outstanding
+                        // quantity, so a `Filled` with `qty < remaining` means a broker
+                        // adapter is closing the order early or reporting cumulative
+                        // (not incremental) fills — guard it so a future real adapter
+                        // must handle the remainder explicitly instead of silently
+                        // under-booking against `req.qty`.
+                        debug_assert!(
+                            !matches!(ev, OrderEvent::Filled { .. }) || qty >= remaining_before,
+                            "terminal Filled booked {q} of {remaining_before} remaining for {}; \
+                             a broker adapter must report incremental fills or handle early close",
+                            o.req.client_order_id
+                        );
                         o.state = OrderState::Filled
                     } else {
                         o.state = OrderState::PartialFill
@@ -489,7 +502,6 @@ impl Trader {
             .insert(f.symbol.clone(), (c.close, f.candle_ts));
         let loss_breached = self.daily_loss_breached();
         if loss_breached {
-            self.daily_loss_locked = true;
             let report_daily_loss = !self.daily_loss_reported;
             self.daily_loss_reported = true;
             out.cancels.extend(

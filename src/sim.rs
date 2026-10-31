@@ -1594,14 +1594,9 @@ fn run_internal(
         ph = ph.wrapping_mul(0x100000001b3);
     }
     let source_stats = source.stats();
-    let commit = option_env!("GIT_COMMIT").map(str::to_owned).or_else(|| {
-        std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-    });
+    // Baked at build time by build.rs (reproducibility only); never spawns a
+    // process per run. Absent in non-git/sandboxed builds, recorded as null.
+    let commit = option_env!("GIT_COMMIT").map(str::to_owned);
     let manifest = serde_json::json!({"program_hash":format!("fnv1a64:{ph:016x}"),"source_fingerprint":fp,"symbols":symbols,"timeframe":config.timeframe,"range":config.range,"config":config,"tool_version":env!("CARGO_PKG_VERSION"),"git_commit":commit,"source_stats":source_stats});
     if std::env::var_os("ALGOMLN_BENCHMARK").is_none() {
         eprintln!("source fingerprint: {}", fp.0);

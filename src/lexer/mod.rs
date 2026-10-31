@@ -229,6 +229,20 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                             start_col,
                         ));
                     }
+                    // Range-check at lex time so an out-of-range literal like
+                    // `25:99` is rejected here rather than silently tokenising and
+                    // only being caught (if at all) much later. HH must be 00..=23
+                    // and MM 00..=59; the digit count is already guaranteed above.
+                    let hour: u32 = source[start..start + 2].parse().unwrap_or(99);
+                    let minute: u32 = source[minute_start..i].parse().unwrap_or(99);
+                    if hour > 23 || minute > 59 {
+                        return Err(err(
+                            "LEX_TIME",
+                            "time must be within 00:00..=23:59",
+                            line,
+                            start_col,
+                        ));
+                    }
                     TokenKind::Time(source[start..i].to_owned())
                 } else {
                     if source[i..].starts_with('.') {
@@ -374,6 +388,12 @@ mod tests {
         assert!(lex("\rTRADE_IN A").is_err());
         assert!(lex("09:30").is_ok());
         assert!(lex("9:30").is_err());
+        // Out-of-range hours/minutes are rejected at lex time.
+        assert!(lex("25:99").is_err());
+        assert!(lex("24:00").is_err());
+        assert!(lex("12:60").is_err());
+        assert!(lex("23:59").is_ok());
+        assert!(lex("00:00").is_ok());
     }
 
     #[test]
