@@ -15,7 +15,9 @@ impl Vwap {
 }
 impl Indicator for Vwap {
     fn update(&mut self, c: &Candle) -> Option<f64> {
-        let day = c.timestamp.div_euclid(86_400_000);
+        // Timestamps are epoch seconds; +19800 shifts to IST so the accumulator
+        // resets at IST midnight, matching the session convention used elsewhere.
+        let day = (c.timestamp + 19_800).div_euclid(86_400);
         if self.day != Some(day) {
             self.day = Some(day);
             self.pv = 0.;

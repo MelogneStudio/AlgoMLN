@@ -16,8 +16,13 @@ impl Candle {
         {
             return Err("all price and volume fields must be finite");
         }
-        if self.low > self.high || self.low > self.open || self.close > self.high {
-            return Err("expected low <= high, low <= open, and close <= high");
+        if self.low > self.high
+            || self.low > self.open
+            || self.low > self.close
+            || self.open > self.high
+            || self.close > self.high
+        {
+            return Err("expected low <= {open, close} <= high");
         }
         if self.volume < 0.0 {
             return Err("volume must be non-negative");

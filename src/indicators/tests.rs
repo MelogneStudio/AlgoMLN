@@ -18,8 +18,9 @@ fn candles() -> &'static [Candle] {
                 let low = number();
                 let close = number();
                 // The source has five rounding discrepancies of less than 0.001 where
-                // close falls just outside the quoted low/high bounds.
-                let high = high.max(close);
+                // close falls just outside the quoted low/high bounds. Clamp to the
+                // low <= {open, close} <= high invariant that `is_valid` enforces.
+                let high = high.max(open).max(close);
                 let low = low.min(open).min(close);
                 Candle {
                     timestamp: i as i64 * 60_000,
@@ -145,7 +146,7 @@ fn sample(timestamp: i64, close: f64, volume: f64) -> Candle {
 }
 
 #[test]
-fn volume_indicators_use_prior_window_and_reset_at_utc_day_boundary() {
+fn volume_indicators_use_prior_window_and_reset_at_ist_day_boundary() {
     let mut provider = IncrementalProvider::new();
     let rel = provider
         .register(IndicatorSpec::new(IndicatorType::RelVol, 2, None).unwrap())
@@ -153,14 +154,16 @@ fn volume_indicators_use_prior_window_and_reset_at_utc_day_boundary() {
     let vwap = provider
         .register(IndicatorSpec::new(IndicatorType::Vwap, 20, None).unwrap())
         .unwrap();
-    let day = 86_400_000;
-    provider.advance(&sample(day - 120_000, 10.0, 2.0)).unwrap();
+    // Epoch seconds; 66_600 is an IST midnight ((66_600 + 19_800) % 86_400 == 0),
+    // so the first two bars fall in the prior IST day and the third resets VWAP.
+    let boundary = 66_600;
+    provider.advance(&sample(boundary - 120, 10.0, 2.0)).unwrap();
     assert_eq!(provider.get(rel), None);
     assert_eq!(provider.get(vwap), Some(10.0));
-    provider.advance(&sample(day - 60_000, 12.0, 4.0)).unwrap();
+    provider.advance(&sample(boundary - 60, 12.0, 4.0)).unwrap();
     assert_eq!(provider.get(rel), None);
     assert_eq!(provider.get(vwap), Some((10.0 * 2.0 + 12.0 * 4.0) / 6.0));
-    provider.advance(&sample(day, 20.0, 9.0)).unwrap();
+    provider.advance(&sample(boundary, 20.0, 9.0)).unwrap();
     assert_eq!(provider.get(rel), Some(3.0));
     assert_eq!(provider.get(vwap), Some(20.0));
 }
