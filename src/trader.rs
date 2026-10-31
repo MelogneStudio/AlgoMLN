@@ -9,21 +9,20 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub type OrderId = String;
 /// Convert a rupee-denominated market value to integer paise using ties-to-even.
+///
+/// Routes through the same integer half-even path as `decimal_scaled` so that a
+/// price carried as `f64` (candle close, config cash) rounds identically to the
+/// decimal literals from the DSL. The `f64` is rendered to a fixed 9-fraction-digit
+/// decimal string (enough to capture sub-paise without the `value * 100.0`
+/// representation drift that made the old float path tie unstably), then rounded to
+/// paise in `i128`.
 pub fn rupees_to_paise(value: f64) -> i64 {
     if !value.is_finite() {
         return 0;
     }
-    let scaled = value * 100.0;
-    let floor = scaled.floor();
-    let fraction = scaled - floor;
-    let rounded = if fraction < 0.5 {
-        floor
-    } else if fraction > 0.5 || (floor as i128).rem_euclid(2) != 0 {
-        floor + 1.0
-    } else {
-        floor
-    };
-    rounded.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+    let scaled = decimal_scaled(&format!("{value:.9}"), 100)
+        .unwrap_or_else(|| (value * 100.0).clamp(i64::MIN as f64, i64::MAX as f64) as i128);
+    scaled.clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
 pub fn paise_to_rupees(value: i64) -> f64 {
     value as f64 / 100.0
@@ -969,6 +968,32 @@ mod tests {
             out.events[1],
             TraderEvent::RiskBlocked { limit: "CASH", .. }
         ));
+    }
+
+    #[test]
+    fn rupees_to_paise_matches_integer_path_on_ties_and_negatives() {
+        // Non-finite guards to zero.
+        assert_eq!(rupees_to_paise(f64::NAN), 0);
+        assert_eq!(rupees_to_paise(f64::INFINITY), 0);
+        // Plain conversions.
+        assert_eq!(rupees_to_paise(12.34), 1234);
+        assert_eq!(rupees_to_paise(-12.34), -1234);
+        // Exact half-paise ties round to even, symmetrically across zero.
+        assert_eq!(rupees_to_paise(0.005), 0); // 0.5 paise -> 0 (even)
+        assert_eq!(rupees_to_paise(0.015), 2); // 1.5 paise -> 2 (even)
+        assert_eq!(rupees_to_paise(0.025), 2); // 2.5 paise -> 2 (even)
+        assert_eq!(rupees_to_paise(-0.005), 0);
+        assert_eq!(rupees_to_paise(-0.015), -2);
+        assert_eq!(rupees_to_paise(-0.025), -2);
+        // The float path agrees with the shared decimal path for the same value.
+        for v in ["100.005", "100.015", "-100.005", "0.125", "-0.125", "7.00"] {
+            let f: f64 = v.parse().unwrap();
+            assert_eq!(
+                i128::from(rupees_to_paise(f)),
+                decimal_scaled(v, 100).unwrap(),
+                "mismatch for {v}",
+            );
+        }
     }
 
     #[test]
