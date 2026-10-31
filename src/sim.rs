@@ -1453,6 +1453,12 @@ fn run_internal(
             candles.clear();
         }
         current_ts = Some(c.timestamp);
+        if candles.contains_key(&s) {
+            return Err(SimError::Other(format!(
+                "duplicate candle for symbol {s:?} at timestamp {}",
+                c.timestamp
+            )));
+        }
         candles.insert(s, c);
     }
     if let Some(ts) = current_ts {
