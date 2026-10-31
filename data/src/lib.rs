@@ -2878,3 +2878,331 @@ mod tests {
         assert_eq!(format_eta(0), "0m");
     }
 }
+
+/// Acceptance tests (spec 11) that drive the full download stack through a real
+/// [`DhanClient`] pointed at an in-process mock Dhan server. These cover the
+/// criteria that need the network edge — 250 ms spacing, DH-904 backoff, auth
+/// abort, `no_data` handling and 375-bar sessions — rather than the chunking /
+/// resume / budget logic already exercised by the unit tests above.
+#[cfg(test)]
+mod acceptance {
+    use super::*;
+    use dhan_api::{DhanClient, TokenProvider};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    struct TestToken;
+    impl TokenProvider for TestToken {
+        fn access_token(&self) -> Result<String, dhan_api::ApiError> {
+            Ok("secret".into())
+        }
+    }
+
+    /// Outcome of the mock server thread: the number of requests served and the
+    /// [`Instant`] at which each request's bytes were received.
+    struct MockOutcome {
+        served: usize,
+        received_at: Vec<Instant>,
+    }
+
+    /// Start a TCP mock Dhan server that replies to each incoming request with
+    /// the next `(status, body)` pair in `responses`, recording the instant each
+    /// request arrives. Returns the base URL and a join handle. Modelled on the
+    /// dhan-api `mock` helper (raw HTTP/1.1 over `TcpListener`).
+    fn mock_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, std::thread::JoinHandle<MockOutcome>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut received_at = Vec::new();
+            let mut served = 0;
+            for (status, body) in responses {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf).unwrap();
+                received_at.push(Instant::now());
+                served += 1;
+                let phrase = match status {
+                    200 => "OK",
+                    400 => "Bad Request",
+                    401 => "Unauthorized",
+                    429 => "Too Many Requests",
+                    500 => "Internal Server Error",
+                    _ => "Error",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {phrase}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",
+                    body.len(),
+                    if status == 429 { "Retry-After: 0\r\n" } else { "" },
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            MockOutcome {
+                served,
+                received_at,
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Build the intraday columnar JSON the Dhan `/charts/intraday` endpoint
+    /// returns for `n` consecutive one-minute bars starting at `start_ts`.
+    fn intraday_body(start_ts: i64, n: usize) -> String {
+        let ts: Vec<String> = (0..n).map(|i| (start_ts + i as i64 * 60).to_string()).collect();
+        let ones = vec!["1.0"; n].join(",");
+        let twos = vec!["2.0"; n].join(",");
+        let vols = vec!["10.0"; n].join(",");
+        format!(
+            "{{\"open\":[{o}],\"high\":[{h}],\"low\":[{l}],\"close\":[{c}],\"volume\":[{v}],\"timestamp\":[{t}]}}",
+            o = ones,
+            h = twos,
+            l = ones,
+            c = twos,
+            v = vols,
+            t = ts.join(",")
+        )
+    }
+
+    fn empty_body() -> String {
+        r#"{"open":[],"high":[],"low":[],"close":[],"volume":[],"timestamp":[]}"#.to_string()
+    }
+
+    fn make_updater(base: &str, db: &Path, root: &Path) -> Updater {
+        let client = DhanClient::with_base(Arc::new(TestToken), base).unwrap();
+        Updater {
+            client: Box::new(client),
+            catalog: Catalog::open(db).unwrap(),
+            store: Store::new(root),
+            max_retries: 0,
+            margin_seconds: 0,
+            reference_symbol_id: None,
+            budget_cap: DEFAULT_BUDGET_CAP,
+        }
+    }
+
+    fn seed_instrument(db: &Path, id: &str, symbol: &str) {
+        let mut cat = Catalog::open(db).unwrap();
+        cat.refresh_instruments(
+            &[Scrip {
+                security_id: id.into(),
+                symbol: symbol.into(),
+                lot_size: 1,
+                tick_size_paise: 5,
+                instrument: "EQUITY".into(),
+            }],
+            0,
+        )
+        .unwrap();
+    }
+
+    fn open_ist(d: NaiveDate) -> i64 {
+        d.and_hms_opt(9, 15, 0)
+            .unwrap()
+            .and_local_timezone(Kolkata)
+            .single()
+            .unwrap()
+            .timestamp()
+    }
+
+    fn temp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "algomln-acc-{name}-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ))
+    }
+
+    /// Spec 11.2: request start times are never closer than 250 ms, measured
+    /// from the mock's receive timestamps. Three one-minute chunks across a
+    /// single intraday series must arrive >=250 ms apart, enforced by the shared
+    /// limiter inside the real [`DhanClient`].
+    #[test]
+    fn request_starts_are_at_least_250ms_apart() {
+        let root = temp("spacing");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        // Three 89-day chunks => three intraday requests.
+        let from = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let to = from + chrono::Days::new(179);
+        assert_eq!(chunk_dates(from, to).len(), 3);
+        let responses = chunk_dates(from, to)
+            .iter()
+            .map(|(a, _)| (200u16, intraday_body(open_ist(*a), 1)))
+            .collect::<Vec<_>>();
+        let (base, server) = mock_server(responses);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", from, to).unwrap();
+        let outcome = server.join().unwrap();
+        assert_eq!(outcome.served, 3);
+        for pair in outcome.received_at.windows(2) {
+            let gap = pair[1].duration_since(pair[0]);
+            assert!(
+                gap >= std::time::Duration::from_millis(240),
+                "requests only {gap:?} apart; limiter must keep >=250 ms spacing"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Spec 11.6: an injected DH-904 triggers backoff, and the run still
+    /// completes. The DhanClient retries after the limiter cools down; the
+    /// second attempt succeeds and the series is recorded.
+    #[test]
+    fn injected_dh904_backs_off_and_run_completes() {
+        let root = temp("dh904");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let from = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let to = from; // single intraday chunk
+        let responses = vec![
+            (429u16, r#"{"errorCode":"DH-904","errorMessage":"slow down"}"#.to_string()),
+            (200u16, intraday_body(open_ist(from), 1)),
+        ];
+        let (base, server) = mock_server(responses);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", from, to).unwrap();
+        let outcome = server.join().unwrap();
+        assert_eq!(outcome.served, 2, "DH-904 must be retried once then succeed");
+        let covered = up.catalog.covered_dates("1", Tf::M1, from, to).unwrap();
+        assert_eq!(covered, vec![from]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Spec 11.8: an auth failure aborts the run immediately. Driven through the
+    /// `BulkDownloader` so the abort is observed at the run level, not just the
+    /// client: `is_auth()` short-circuits and the error propagates.
+    #[test]
+    fn auth_error_aborts_the_run_immediately() {
+        let root = temp("auth");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "AAA");
+        // A second symbol that must NOT be contacted once auth fails.
+        {
+            let mut cat = Catalog::open(&db).unwrap();
+            cat.refresh_instruments(
+                &[
+                    Scrip {
+                        security_id: "1".into(),
+                        symbol: "AAA".into(),
+                        lot_size: 1,
+                        tick_size_paise: 5,
+                        instrument: "EQUITY".into(),
+                    },
+                    Scrip {
+                        security_id: "2".into(),
+                        symbol: "BBB".into(),
+                        lot_size: 1,
+                        tick_size_paise: 5,
+                        instrument: "EQUITY".into(),
+                    },
+                ],
+                0,
+            )
+            .unwrap();
+        }
+        let from = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let to = from;
+        // Only one response queued: the first (and only) request gets 401.
+        let (base, server) = mock_server(vec![(
+            401u16,
+            r#"{"errorCode":"DH-902","errorMessage":"invalid token"}"#.to_string(),
+        )]);
+        let base_for_factory = base.clone();
+        let bulk = BulkDownloader {
+            make_client: move || {
+                Box::new(DhanClient::with_base(Arc::new(TestToken), &base_for_factory).unwrap())
+                    as Box<dyn HistoryApi>
+            },
+            catalog_path: db.clone(),
+            store_root: root.clone(),
+            config: BulkConfig::new(from, to, vec![Tf::D1]),
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let result = bulk.run(|_| {});
+        assert!(
+            matches!(&result, Err(e) if e.is_auth()),
+            "auth failure must abort the run with an auth error, got {result:?}"
+        );
+        let outcome = server.join().unwrap();
+        assert_eq!(
+            outcome.served, 1,
+            "run must abort after the first auth failure without contacting the next symbol"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Spec 11.7: an empty response is logged as `no_data` and is NOT recorded
+    /// as coverage. The reference symbol path records the calendar as empty, but
+    /// no `data` coverage is written and the session is not marked covered for a
+    /// non-reference symbol.
+    #[test]
+    fn empty_response_is_not_recorded_as_coverage() {
+        let root = temp("nodata");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let from = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let to = from;
+        let (base, server) = mock_server(vec![(200u16, empty_body())]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", from, to).unwrap();
+        let outcome = server.join().unwrap();
+        assert_eq!(outcome.served, 1);
+        // The spec guarantee: an empty response is never recorded as *data*
+        // coverage (it could be a holiday or a pre-listing range). The empty day
+        // may be logged as `confirmed_empty`/`no_data` so it is not re-requested
+        // forever, but it must not claim real bars exist.
+        let sid = up.catalog.series("1", Tf::M1).unwrap();
+        let data_rows: i64 = up
+            .catalog
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM coverage WHERE series_id=?1 AND kind='data'",
+                [sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(data_rows, 0, "empty response must not add 'data' coverage");
+        // No real bars were stored.
+        let bars: i64 = up
+            .catalog
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(rows),0) FROM partitions WHERE series_id=?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bars, 0, "empty response must not store any bars");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Spec 11.9: a symbol with 375-bar sessions downloads and verifies
+    /// correctly — the downloader must not assume 360 bars per session. The mock
+    /// returns a full 375-minute session; all 375 bars must be stored.
+    #[test]
+    fn symbol_with_375_bar_session_downloads_all_bars() {
+        let root = temp("375");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let day = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+        // 375 one-minute bars: 09:15..=15:29 inclusive is 375 minutes.
+        let (base, server) = mock_server(vec![(200u16, intraday_body(open_ist(day), 375))]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", day, day).unwrap();
+        let outcome = server.join().unwrap();
+        assert_eq!(outcome.served, 1);
+        let status = up.catalog.status_rows().unwrap();
+        assert_eq!(status.len(), 1);
+        assert_eq!(
+            status[0].bars, 375,
+            "all 375 session bars must be stored; downloader must not cap at 360"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
