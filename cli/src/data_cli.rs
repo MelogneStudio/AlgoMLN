@@ -1,11 +1,16 @@
-use algomln_data::{Bar, Catalog, Store, Tf, Updater};
-use chrono::{NaiveDate, Utc};
+use algomln_data::{
+    Bar, BulkConfig, BulkDownloader, Catalog, Store, Tf, Updater, DEFAULT_BUDGET_CAP,
+};
+use chrono::{Datelike, NaiveDate, Utc};
 use dhan_api::{parse_scrip_master, DhanClient, KeychainEnvTokenProvider};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let Some(sub) = args.first().cloned() else {
-        return Err("usage: algomln data <status|verify|update|import> [options]".into());
+        return Err("usage: algomln data <status|verify|update|import|bulk> [options]".into());
     };
     let mut opts = std::collections::BTreeMap::new();
     let mut it = args.into_iter().skip(1);
@@ -112,9 +117,147 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("imported {} bars for {symbol}", bars.len())
         }
+        "bulk" => {
+            if opts
+                .get("--universe")
+                .map(String::as_str)
+                .unwrap_or("nse-eq")
+                != "nse-eq"
+            {
+                return Err("data bulk only supports --universe nse-eq".into());
+            }
+            let master = opts
+                .get("--master")
+                .ok_or("data bulk requires --master <scrip-master.csv>")?;
+            let rows = parse_scrip_master(std::fs::File::open(master)?)?;
+            cat.refresh_instruments(&rows, Utc::now().timestamp())?;
+            let tfs = opts
+                .get("--tf")
+                .map(String::as_str)
+                .unwrap_or("1d,1m")
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(|x| Tf::parse(x).ok_or_else(|| format!("invalid timeframe {x}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            if tfs.is_empty() {
+                return Err("data bulk requires at least one --tf".into());
+            }
+            // 1d first for all symbols, then 1m (spec 4), regardless of input order.
+            let mut tfs = tfs;
+            tfs.sort_by_key(|t| if *t == Tf::D1 { 0 } else { 1 });
+            let to = opts
+                .get("--to")
+                .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
+                .transpose()?
+                .unwrap_or_else(last_completed_session);
+            let from = opts
+                .get("--from")
+                .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
+                .transpose()?
+                .ok_or("data bulk requires --from <YYYY-MM-DD>")?;
+            let budget_cap = opts
+                .get("--budget")
+                .map(|x| x.parse::<u64>())
+                .transpose()
+                .map_err(|e| format!("invalid --budget: {e}"))?
+                .unwrap_or(DEFAULT_BUDGET_CAP);
+            let priority_symbols = match opts.get("--symbols") {
+                Some(path) => std::fs::read_to_string(path)?
+                    .lines()
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                None => Vec::new(),
+            };
+            let reference_symbol_id = cat
+                .resolve(
+                    opts.get("--reference")
+                        .map(String::as_str)
+                        .unwrap_or("RELIANCE"),
+                )
+                .map(|x| x.0)
+                .ok();
+            let mut config = BulkConfig::new(from, to, tfs);
+            config.budget_cap = budget_cap;
+            config.priority_symbols = priority_symbols;
+            config.reference_symbol_id = reference_symbol_id;
+            let db = db.clone();
+            let root = root.clone();
+            let (client, base) = client()?;
+            let make_client = move || {
+                Box::new(
+                    client
+                        .clone_with_base(&base)
+                        .expect("clone Dhan client for bulk symbol"),
+                ) as Box<dyn algomln_data::HistoryApi>
+            };
+            let stop = Arc::new(AtomicBool::new(false));
+            let bulk = BulkDownloader {
+                make_client,
+                catalog_path: db,
+                store_root: root,
+                config,
+                stop,
+            };
+            if opts.contains_key("--dry-run") {
+                let report = bulk.dry_run()?;
+                let remaining = cat.budget_used(&Utc::now().date_naive().to_string())?;
+                let budget_left = budget_cap.saturating_sub(remaining);
+                println!("dry-run: {} symbols", report.symbols_total);
+                let mut total = 0usize;
+                for (tf, n) in &report.planned {
+                    let minutes = (*n as f64) / 4.0 / 60.0;
+                    println!("  {tf}: {n} requests, est {minutes:.1} min at 4 req/s");
+                    total += *n;
+                }
+                let fits = (total as u64) <= budget_left;
+                println!(
+                    "  total {total} requests; remaining budget today {budget_left}/{budget_cap}; fits today: {}",
+                    if fits { "yes" } else { "no" }
+                );
+                return Ok(());
+            }
+            let report = bulk.run(|p| {
+                eprint!("\r{}", p.line());
+            })?;
+            eprintln!();
+            println!(
+                "bulk finished: {}/{} symbols | requests used {} | failures {} | budget {}/{}",
+                report.symbols_completed,
+                report.symbols_total,
+                report.requests_used,
+                report.failures,
+                cat.budget_used(&Utc::now().date_naive().to_string())?,
+                budget_cap,
+            );
+            let fp = cat.catalog_fingerprint()?;
+            println!("catalog fingerprint: {fp}");
+            if report.budget_reached {
+                let used = cat.budget_used(&Utc::now().date_naive().to_string())?;
+                return Err(format!(
+                    "daily budget reached ({used}/{budget_cap}); rerun tomorrow, progress is saved"
+                )
+                .into());
+            }
+        }
         _ => return Err(format!("unknown data command {sub}").into()),
     }
     Ok(())
+}
+/// Last completed NSE session, excluding today (spec 2/10: today's session is
+/// excluded until the daily-close settle time is verified). Weekends roll back
+/// to Friday; exchange holidays are not modelled here.
+fn last_completed_session() -> NaiveDate {
+    let mut d = Utc::now().date_naive() - chrono::Days::new(1);
+    while matches!(
+        d.weekday(),
+        chrono::Weekday::Sat | chrono::Weekday::Sun
+    ) {
+        d -= chrono::Days::new(1);
+    }
+    d
 }
 fn client() -> Result<(DhanClient, String), Box<dyn std::error::Error>> {
     let base = std::env::var("DHAN_API_BASE").unwrap_or_else(|_| "https://api.dhan.co/v2".into());

@@ -16,7 +16,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let command = args.next().ok_or("usage: algomln run|data ...")?;
     if command == "--help" || command == "-h" {
-        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps]\nalgomln data <update|status|verify|import> [options]");
+        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps]\nalgomln data <update|status|verify|import|bulk> [options]\nalgomln data bulk --universe nse-eq --tf 1d,1m --from DATE [--to DATE] [--symbols FILE] [--budget N] [--dry-run] --master CSV");
         return Ok(());
     }
     if command == "data" {
@@ -24,7 +24,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command != "run" {
         return Err(
-            "usage: algomln run <file.algomln> ... | algomln data <update|status|verify|import>"
+            "usage: algomln run <file.algomln> ... | algomln data <update|status|verify|import|bulk>"
                 .into(),
         );
     }
