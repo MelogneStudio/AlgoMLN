@@ -1,0 +1,2 @@
+symbol,entry_ts,exit_ts,qty,avg_entry,avg_entry_paise,avg_exit,avg_exit_paise,fees,fees_paise,net_pnl,net_pnl_paise,exit_reason
+ABC,2,3,1,12.0000000000,1200,7.0000000000,700,0.0000000000,0,-5.0000000000,-500,"Rule(""rule_2"")"

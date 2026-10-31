@@ -1,0 +1,192 @@
+{
+  "name": null,
+  "trade_in": {
+    "Symbols": [
+      "NIFTY"
+    ]
+  },
+  "stop_loss": {
+    "spelling": "2.5",
+    "value": {
+      "negative": false,
+      "coefficient": "25",
+      "scale": 1
+    },
+    "span": {
+      "start": 25,
+      "end": 29,
+      "line": 2,
+      "column": 11
+    }
+  },
+  "take_profit": {
+    "spelling": "5",
+    "value": {
+      "negative": false,
+      "coefficient": "5",
+      "scale": 0
+    },
+    "span": {
+      "start": 42,
+      "end": 44,
+      "line": 3,
+      "column": 13
+    }
+  },
+  "rules": [
+    {
+      "id": "rule_1",
+      "condition": {
+        "Cross": {
+          "direction": "Above",
+          "left": {
+            "Indicator": {
+              "kind": "Ema",
+              "period": 20,
+              "multiplier": null
+            }
+          },
+          "right": {
+            "Indicator": {
+              "kind": "Ema",
+              "period": 50,
+              "multiplier": null
+            }
+          }
+        }
+      },
+      "action": {
+        "Buy": {
+          "Quantity": 10
+        }
+      },
+      "span": {
+        "start": 66,
+        "end": 107,
+        "line": 5,
+        "column": 1
+      },
+      "condition_span": {
+        "start": 71,
+        "end": 100,
+        "line": 5,
+        "column": 6
+      },
+      "action_span": {
+        "start": 101,
+        "end": 107,
+        "line": 6,
+        "column": 1
+      }
+    },
+    {
+      "id": "rule_2",
+      "condition": {
+        "Compare": {
+          "left": {
+            "Indicator": {
+              "kind": "Rsi",
+              "period": 14,
+              "multiplier": null
+            }
+          },
+          "op": "Lt",
+          "right": {
+            "Literal": {
+              "spelling": "30",
+              "value": {
+                "negative": false,
+                "coefficient": "30",
+                "scale": 0
+              },
+              "span": {
+                "start": 123,
+                "end": 125,
+                "line": 7,
+                "column": 16
+              }
+            }
+          }
+        }
+      },
+      "action": {
+        "Buy": {
+          "Quantity": 5
+        }
+      },
+      "span": {
+        "start": 108,
+        "end": 131,
+        "line": 7,
+        "column": 1
+      },
+      "condition_span": {
+        "start": 113,
+        "end": 125,
+        "line": 7,
+        "column": 6
+      },
+      "action_span": {
+        "start": 126,
+        "end": 131,
+        "line": 8,
+        "column": 1
+      }
+    },
+    {
+      "id": "rule_3",
+      "condition": {
+        "Compare": {
+          "left": {
+            "Indicator": {
+              "kind": "Rsi",
+              "period": 14,
+              "multiplier": null
+            }
+          },
+          "op": "Gt",
+          "right": {
+            "Literal": {
+              "spelling": "70",
+              "value": {
+                "negative": false,
+                "coefficient": "70",
+                "scale": 0
+              },
+              "span": {
+                "start": 147,
+                "end": 149,
+                "line": 9,
+                "column": 16
+              }
+            }
+          }
+        }
+      },
+      "action": "SellAll",
+      "span": {
+        "start": 132,
+        "end": 158,
+        "line": 9,
+        "column": 1
+      },
+      "condition_span": {
+        "start": 137,
+        "end": 149,
+        "line": 9,
+        "column": 6
+      },
+      "action_span": {
+        "start": 150,
+        "end": 158,
+        "line": 10,
+        "column": 1
+      }
+    }
+  ],
+  "risk": {
+    "max_orders": null,
+    "max_positions": 3,
+    "max_daily_loss": null
+  }
+}

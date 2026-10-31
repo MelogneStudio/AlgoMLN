@@ -1,0 +1,7 @@
+TRADE_IN NIFTY
+
+WHEN CROSS_ABOVE(close, sma(20))
+BUY 1
+
+WHEN CROSS_BELOW(close, sma(20))
+SELL ALL

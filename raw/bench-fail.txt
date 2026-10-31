@@ -1,0 +1,12 @@
+PS C:\Users\ansh\Documents\Github\AlgoMLN> cargo bench -p algomln-data --bench catalog_source
+   Compiling algomln-data v0.1.0 (C:\Users\ansh\Documents\Github\AlgoMLN\data)
+    Finished `bench` profile [optimized] target(s) in 7.33s
+     Running benches\catalog_source.rs (target\release\deps\catalog_source-4f64db61592ab09a.exe)
+Gnuplot not found, using plotters backend
+preparing ~46M synthetic candles; loader is timed separately
+Benchmarking catalog_source_loader_only/100_symbols_5y_1m: Warming up for 3.0000 s
+thread 'main' (27056) panicked at data\benches\catalog_source.rs:137:67:
+called `Result::unwrap()` on an `Err` value: Other("uncovered range for S000; run `algomln data update` first; run `algomln data update --symbols S000 --tf 1m --from <from> --to <to>`")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+error: bench failed, to rerun pass `-p algomln-data --bench catalog_source`

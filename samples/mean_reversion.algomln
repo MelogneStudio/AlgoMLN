@@ -1,0 +1,7 @@
+TRADE_IN RELIANCE, TCS
+WHEN close > bb_upper(20)
+SELL 10
+WHEN close < bb_lower(20)
+BUY 10
+WHEN ema(9) > ema(21) AND rsi(14) < 60
+BUY 5
