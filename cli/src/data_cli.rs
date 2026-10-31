@@ -255,7 +255,7 @@ fn last_completed_session() -> NaiveDate {
         d.weekday(),
         chrono::Weekday::Sat | chrono::Weekday::Sun
     ) {
-        d -= chrono::Days::new(1);
+        d = d - chrono::Days::new(1);
     }
     d
 }
