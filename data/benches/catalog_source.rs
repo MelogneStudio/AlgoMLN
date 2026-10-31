@@ -59,6 +59,21 @@ fn prepare(root: &PathBuf, symbols: &[String], dates: &[NaiveDate]) {
         })
         .collect();
     cat.refresh_instruments(&scrips, 0).unwrap();
+    let cov_start = Kolkata
+        .from_local_datetime(&dates[0].and_hms_opt(0, 0, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp();
+    let cov_end = Kolkata
+        .from_local_datetime(
+            &(dates[dates.len() - 1] + Duration::days(1))
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        )
+        .single()
+        .unwrap()
+        .timestamp()
+        - 1;
     let store = Store::new(root);
     for (i, _s) in symbols.iter().enumerate() {
         let mut bars = Vec::with_capacity(dates.len() * 360);
@@ -89,6 +104,8 @@ fn prepare(root: &PathBuf, symbols: &[String], dates: &[NaiveDate]) {
         for p in &parts {
             cat.record_partition(sid, &store, p).unwrap();
         }
+        cat.record_coverage(&(i + 1).to_string(), Tf::M1, cov_start, cov_end, "data")
+            .unwrap();
     }
 }
 fn bench(c: &mut Criterion) {
