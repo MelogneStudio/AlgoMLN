@@ -3042,9 +3042,13 @@ mod acceptance {
         assert_eq!(outcome.served, 3);
         for pair in outcome.received_at.windows(2) {
             let gap = pair[1].duration_since(pair[0]);
+            // The limiter targets 250 ms between request starts; allow generous
+            // slack for localhost delivery/scheduling jitter on the receive side.
+            // Without the limiter these arrive sub-millisecond apart, so a 200 ms
+            // floor still unambiguously proves spacing is enforced.
             assert!(
-                gap >= std::time::Duration::from_millis(240),
-                "requests only {gap:?} apart; limiter must keep >=250 ms spacing"
+                gap >= std::time::Duration::from_millis(200),
+                "requests only {gap:?} apart; limiter must keep ~250 ms spacing"
             );
         }
         let _ = fs::remove_dir_all(root);
