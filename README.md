@@ -1,4 +1,4 @@
-<img src=".github/algomln-logo.svg">
+<img src=".github/AlgoMLN-black.svg">
 
 AlgoMLN is a fast, local platform for algorithmic trading.
 

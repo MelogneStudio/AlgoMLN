@@ -4,3 +4,4 @@ node_modules/
 dist/
 /dhan-smoke/
 /sample-data/api-scrip-master.csv
+/data
