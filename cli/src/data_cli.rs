@@ -30,6 +30,8 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match sub.as_str() {
         "status" => {
             println!("catalog: {}", db.display());
+            let (total_eq, fno_eq) = cat.instrument_counts()?;
+            println!("instruments: {total_eq} equities ({fno_eq} F&O-eligible)");
             for series in cat.status_rows()? {
                 println!(
                     "{} {}: {} bars",
@@ -50,8 +52,14 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         "update" => {
             let master = opts
                 .get("--master")
-                .ok_or("data update requires --master <scrip-master.csv>")?;
+                .ok_or("data update requires --master <api-scrip-master-detailed.csv>")?;
             let rows = parse_scrip_master(std::fs::File::open(master)?)?;
+            let fno_count = rows.iter().filter(|r| r.is_fno).count();
+            println!(
+                "scrip master: {} equities ({} F&O-eligible)",
+                rows.len(),
+                fno_count
+            );
             cat.refresh_instruments(&rows, Utc::now().timestamp())?;
             let symbols = opts
                 .get("--symbols")
@@ -128,8 +136,14 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             }
             let master = opts
                 .get("--master")
-                .ok_or("data bulk requires --master <scrip-master.csv>")?;
+                .ok_or("data bulk requires --master <api-scrip-master-detailed.csv>")?;
             let rows = parse_scrip_master(std::fs::File::open(master)?)?;
+            let fno_count = rows.iter().filter(|r| r.is_fno).count();
+            println!(
+                "scrip master: {} equities ({} F&O-eligible)",
+                rows.len(),
+                fno_count
+            );
             cat.refresh_instruments(&rows, Utc::now().timestamp())?;
             let tfs = opts
                 .get("--tf")
@@ -281,10 +295,7 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 /// to Friday; exchange holidays are not modelled here.
 fn last_completed_session() -> NaiveDate {
     let mut d = Utc::now().date_naive() - chrono::Days::new(1);
-    while matches!(
-        d.weekday(),
-        chrono::Weekday::Sat | chrono::Weekday::Sun
-    ) {
+    while matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
         d = d - chrono::Days::new(1);
     }
     d

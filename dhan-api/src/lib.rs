@@ -455,16 +455,36 @@ impl DhanClient {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scrip {
     pub security_id: String,
     pub symbol: String,
     pub lot_size: u32,
     pub tick_size_paise: i64,
     pub instrument: String,
+    pub is_fno: bool,
 }
+
+impl Scrip {
+    /// Expected 1-minute bars per regular session.
+    ///
+    /// Since NSE's closing auction session began on 2026-08-03:
+    /// - F&O-eligible stocks trade until 15:14 (360 bars: 09:15 to 15:14).
+    /// - Non-F&O stocks still trade until 15:29 (375 bars: 09:15 to 15:29).
+    pub fn expected_1m_bars_per_session(&self) -> u32 {
+        if self.is_fno {
+            360
+        } else {
+            375
+        }
+    }
+}
+
+/// Parses Dhan's detailed scrip master CSV.
+///
+/// Data source: <https://images.dhan.co/api-data/api-scrip-master-detailed.csv>
 pub fn parse_scrip_master<R: std::io::Read>(reader: R) -> Result<Vec<Scrip>, ApiError> {
-    let mut csv = csv::Reader::from_reader(reader);
+    let mut csv = csv::ReaderBuilder::new().flexible(true).from_reader(reader);
     let headers = csv
         .headers()
         .map_err(|e| ApiError::Malformed(e.to_string()))?
@@ -475,53 +495,98 @@ pub fn parse_scrip_master<R: std::io::Read>(reader: R) -> Result<Vec<Scrip>, Api
             .position(|x| x == n)
             .ok_or_else(|| ApiError::Malformed(format!("missing scrip column {n}")))
     };
-    let (id, sym, lot, tick, exchange, series, kind, name) = (
-        idx("SEM_SMST_SECURITY_ID")?,
-        idx("SEM_TRADING_SYMBOL")?,
-        idx("SEM_LOT_UNITS")?,
-        idx("SEM_TICK_SIZE")?,
-        idx("SEM_EXM_EXCH_ID")?,
-        idx("SEM_SERIES")?,
-        idx("SEM_EXCH_INSTRUMENT_TYPE")?,
-        idx("SEM_INSTRUMENT_NAME")?,
-    );
-    let mut out = Vec::new();
+    let exchange = idx("EXCH_ID")?;
+    let security_id = idx("SECURITY_ID")?;
+    let underlying_security_id = idx("UNDERLYING_SECURITY_ID")?;
+    let symbol = idx("UNDERLYING_SYMBOL")?;
+    let instrument = idx("INSTRUMENT")?;
+    let instrument_type = idx("INSTRUMENT_TYPE")?;
+    let series = idx("SERIES")?;
+    let lot = idx("LOT_SIZE")?;
+    let tick = idx("TICK_SIZE")?;
+
+    let mut equities = Vec::new();
+    let mut fno_ids = std::collections::HashSet::new();
+    let mut fno_symbols = std::collections::HashSet::new();
+
     for row in csv.records() {
         let r = row.map_err(|e| ApiError::Malformed(e.to_string()))?;
-        if &r[exchange] != "NSE" || &r[series] != "EQ" || &r[kind] != "ES" || &r[name] != "EQUITY" {
-            continue;
+        let exch = r.get(exchange).unwrap_or("");
+        let inst = r.get(instrument).unwrap_or("");
+
+        if exch == "NSE" && (inst == "FUTSTK" || inst == "OPTSTK") {
+            if let Some(und_id) = r.get(underlying_security_id) {
+                let s = und_id.trim();
+                if !s.is_empty() {
+                    fno_ids.insert(s.to_string());
+                }
+            }
+            if let Some(und_sym) = r.get(symbol) {
+                let s = und_sym.trim();
+                if !s.is_empty() {
+                    fno_symbols.insert(s.to_ascii_uppercase());
+                }
+            }
         }
-        let raw: f64 = r[tick]
-            .parse()
-            .map_err(|_| ApiError::Malformed("invalid SEM_TICK_SIZE".into()))?;
-        let paise = raw.round() as i64;
-        let lot_raw: f64 = r[lot]
-            .parse()
-            .map_err(|_| ApiError::Malformed("invalid SEM_LOT_UNITS".into()))?;
-        if !lot_raw.is_finite()
-            || lot_raw < 1.0
-            || lot_raw.fract() != 0.0
-            || lot_raw > u32::MAX as f64
+
+        if exch == "NSE"
+            && r.get(series).is_some_and(|s| s == "EQ")
+            && r.get(instrument_type).is_some_and(|s| s == "ES")
+            && inst == "EQUITY"
         {
-            return Err(ApiError::Malformed(
-                "SEM_LOT_UNITS must be a positive whole number".into(),
-            ));
+            let sec_id = r
+                .get(security_id)
+                .ok_or_else(|| ApiError::Malformed("missing SECURITY_ID in record".into()))?
+                .trim();
+            let sym = r
+                .get(symbol)
+                .ok_or_else(|| ApiError::Malformed("missing UNDERLYING_SYMBOL in record".into()))?
+                .trim();
+            let raw: f64 = r
+                .get(tick)
+                .ok_or_else(|| ApiError::Malformed("missing TICK_SIZE in record".into()))?
+                .parse()
+                .map_err(|_| ApiError::Malformed("invalid TICK_SIZE".into()))?;
+            let paise = raw.round() as i64;
+            let lot_raw: f64 = r
+                .get(lot)
+                .ok_or_else(|| ApiError::Malformed("missing LOT_SIZE in record".into()))?
+                .parse()
+                .map_err(|_| ApiError::Malformed("invalid LOT_SIZE".into()))?;
+            if !lot_raw.is_finite()
+                || lot_raw < 1.0
+                || lot_raw.fract() != 0.0
+                || lot_raw > u32::MAX as f64
+            {
+                return Err(ApiError::Malformed(
+                    "LOT_SIZE must be a positive whole number".into(),
+                ));
+            }
+            if paise <= 0 {
+                return Err(ApiError::Malformed(
+                    "TICK_SIZE must be positive paise".into(),
+                ));
+            }
+            equities.push(Scrip {
+                security_id: sec_id.into(),
+                symbol: sym.to_ascii_uppercase(),
+                lot_size: lot_raw as u32,
+                tick_size_paise: paise,
+                instrument: inst.to_string(),
+                is_fno: false,
+            });
         }
-        if paise <= 0 {
-            return Err(ApiError::Malformed(
-                "SEM_TICK_SIZE must be positive paise".into(),
-            ));
-        }
-        out.push(Scrip {
-            security_id: r[id].into(),
-            symbol: r[sym].to_ascii_uppercase(),
-            lot_size: lot_raw as u32,
-            tick_size_paise: paise,
-            instrument: r[name].to_string(),
-        });
     }
-    Ok(out)
+
+    for scrip in &mut equities {
+        if fno_ids.contains(&scrip.security_id) || fno_symbols.contains(&scrip.symbol) {
+            scrip.is_fno = true;
+        }
+    }
+
+    Ok(equities)
 }
+#[derive(Debug)]
 pub struct ScripResolver {
     by_symbol: std::collections::HashMap<String, Scrip>,
 }
@@ -731,29 +796,152 @@ mod tests {
         assert!(call(&body).unwrap().is_empty());
         assert_eq!(server.join().unwrap(), 2);
     }
+    const DETAILED_HEADER: &str = "EXCH_ID,SEGMENT,SECURITY_ID,ISIN,INSTRUMENT,UNDERLYING_SECURITY_ID,UNDERLYING_SYMBOL,SYMBOL_NAME,DISPLAY_NAME,INSTRUMENT_TYPE,SERIES,LOT_SIZE,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,TICK_SIZE,EXPIRY_FLAG,BRACKET_FLAG,COVER_FLAG,ASM_GSM_FLAG,ASM_GSM_CATEGORY,BUY_SELL_INDICATOR,BUY_CO_MIN_MARGIN_PER,BUY_CO_SL_RANGE_MAX_PERC,BUY_CO_SL_RANGE_MIN_PERC,BUY_BO_MIN_MARGIN_PER,BUY_BO_PROFIT_RANGE_MAX_PERC,BUY_BO_PROFIT_RANGE_MIN_PERC,MTF_LEVERAGE,SM_UPPER_LIMIT,SM_LOWER_LIMIT,SM_FREEZE_QTY,\n";
+
     #[test]
     fn scrip_filter_and_tick_conversion() {
-        let csv="SEM_SMST_SECURITY_ID,SEM_TRADING_SYMBOL,SEM_LOT_UNITS,SEM_TICK_SIZE,SEM_EXM_EXCH_ID,SEM_SERIES,SEM_EXCH_INSTRUMENT_TYPE,SEM_INSTRUMENT_NAME\n1,abc,1,5.0000,NSE,EQ,ES,EQUITY\n2,NO,1,5,NSE,BE,ES,EQUITY\n";
+        let csv = format!(
+            "{DETAILED_HEADER}\
+             NSE,E,1,INE1,EQUITY,,abc,ABC LTD,Abc,ES,EQ,1.0,,,,5.0000,,,,,,,,,,,,,,,\n\
+             NSE,E,2,INE2,EQUITY,,NO,NO LTD,No,ES,BE,1.0,,,,5.0000,,,,,,,,,,,,,,,\n"
+        );
         let x = parse_scrip_master(csv.as_bytes()).unwrap();
         assert_eq!(x.len(), 1);
         assert_eq!(x[0].symbol, "ABC");
         assert_eq!(x[0].tick_size_paise, 5);
         assert_eq!(x[0].instrument, "EQUITY");
+        assert!(!x[0].is_fno);
+        assert_eq!(x[0].expected_1m_bars_per_session(), 375);
     }
+
     #[test]
     fn scrip_master_accepts_decimal_whole_lot_sizes_and_filters_to_nse_eq_equity() {
-        let csv="SEM_SMST_SECURITY_ID,SEM_TRADING_SYMBOL,SEM_LOT_UNITS,SEM_TICK_SIZE,SEM_EXM_EXCH_ID,SEM_SERIES,SEM_EXCH_INSTRUMENT_TYPE,SEM_INSTRUMENT_NAME\n1,RELIANCE,1.0,10.0000,NSE,EQ,ES,EQUITY\n2,FUT,500.0,10.0000,NSE,,FUTSTK,EQUITY\n";
+        let csv = format!(
+            "{DETAILED_HEADER}\
+             NSE,E,1,INE1,EQUITY,,RELIANCE,RELIANCE LTD,Reliance,ES,EQ,1.0,,,,10.0000,,,,,,,,,,,,,,,\n\
+             NSE,D,2,NA,FUTSTK,1,RELIANCE,RELIFUT,Reliance Fut,FUT,NA,500.0,,,,10.0000,,,,,,,,,,,,,,,\n"
+        );
         let rows = parse_scrip_master(csv.as_bytes()).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].lot_size, 1);
         assert_eq!(rows[0].tick_size_paise, 10);
+        assert!(rows[0].is_fno);
+        assert_eq!(rows[0].expected_1m_bars_per_session(), 360);
     }
+
     #[test]
     fn scrip_master_rejects_fractional_lots() {
-        let csv="SEM_SMST_SECURITY_ID,SEM_TRADING_SYMBOL,SEM_LOT_UNITS,SEM_TICK_SIZE,SEM_EXM_EXCH_ID,SEM_SERIES,SEM_EXCH_INSTRUMENT_TYPE,SEM_INSTRUMENT_NAME\n1,RELIANCE,1.5,10.0000,NSE,EQ,ES,EQUITY\n";
+        let csv = format!(
+            "{DETAILED_HEADER}\
+             NSE,E,1,INE1,EQUITY,,RELIANCE,RELIANCE LTD,Reliance,ES,EQ,1.5,,,,10.0000,,,,,,,,,,,,,,,\n"
+        );
         assert!(matches!(
             parse_scrip_master(csv.as_bytes()),
             Err(ApiError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn equity_fno_flag_set_by_futstk_or_optstk() {
+        let csv = format!(
+            "{DETAILED_HEADER}\
+             NSE,E,2885,INE002A01018,EQUITY,,RELIANCE,RELIANCE LTD,Reliance,ES,EQ,1.0,,,,10.0000,,,,,,,,,,,,,,,\n\
+             NSE,E,1594,INE009A01021,EQUITY,,INFY,INFOSYS LTD,Infosys,ES,EQ,1.0,,,,5.0000,,,,,,,,,,,,,,,\n\
+             NSE,E,9999,INE999A01011,EQUITY,,ALOKINDS,ALOK INDUSTRIES LTD,Alok,ES,EQ,1.0,,,,5.0000,,,,,,,,,,,,,,,\n\
+             NSE,D,55121,NA,FUTSTK,2885,RELIANCE,RELIFUT,Reliance Fut,FUT,NA,500.0,,,,10.0000,,,,,,,,,,,,,,,\n\
+             NSE,D,125951,NA,OPTSTK,1594,INFY,INFYOPT,Infosys Opt,OP,NA,400.0,,,,5.0000,,,,,,,,,,,,,,,\n"
+        );
+        let rows = parse_scrip_master(csv.as_bytes()).unwrap();
+        assert_eq!(rows.len(), 3);
+        let reliance = rows.iter().find(|r| r.symbol == "RELIANCE").unwrap();
+        let infy = rows.iter().find(|r| r.symbol == "INFY").unwrap();
+        let alok = rows.iter().find(|r| r.symbol == "ALOKINDS").unwrap();
+        assert!(reliance.is_fno);
+        assert!(infy.is_fno);
+        assert!(!alok.is_fno);
+    }
+
+    #[test]
+    fn futidx_and_optidx_do_not_set_fno_on_anything() {
+        let csv = format!(
+            "{DETAILED_HEADER}\
+             NSE,E,100,INE100A01010,EQUITY,,NIFTY,NIFTY LTD,Nifty,ES,EQ,1.0,,,,5.0000,,,,,,,,,,,,,,,\n\
+             NSE,D,200,NA,FUTIDX,100,NIFTY,NIFTYFUT,Nifty Fut,FUT,NA,50.0,,,,5.0000,,,,,,,,,,,,,,,\n\
+             NSE,D,300,NA,OPTIDX,100,NIFTY,NIFTYOPT,Nifty Opt,OP,NA,50.0,,,,5.0000,,,,,,,,,,,,,,,\n"
+        );
+        let rows = parse_scrip_master(csv.as_bytes()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "NIFTY");
+        assert!(!rows[0].is_fno);
+    }
+
+    #[test]
+    fn missing_required_column_names_missing_column() {
+        let csv =
+            "EXCH_ID,SEGMENT,SECURITY_ID,ISIN,INSTRUMENT,UNDERLYING_SYMBOL,LOT_SIZE,TICK_SIZE\n\
+                   NSE,E,1,INE1,EQUITY,RELIANCE,1.0,10.0000\n";
+        let err = parse_scrip_master(csv.as_bytes()).unwrap_err();
+        match err {
+            ApiError::Malformed(msg) => {
+                assert!(
+                    msg.contains("UNDERLYING_SECURITY_ID")
+                        || msg.contains("SERIES")
+                        || msg.contains("INSTRUMENT_TYPE"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected ApiError::Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_nse_symbol_rejected_by_resolver() {
+        let rows = vec![
+            Scrip {
+                security_id: "1".into(),
+                symbol: "RELIANCE".into(),
+                lot_size: 1,
+                tick_size_paise: 10,
+                instrument: "EQUITY".into(),
+                is_fno: true,
+            },
+            Scrip {
+                security_id: "2".into(),
+                symbol: "RELIANCE".into(),
+                lot_size: 1,
+                tick_size_paise: 10,
+                instrument: "EQUITY".into(),
+                is_fno: true,
+            },
+        ];
+        let err = ScripResolver::new(rows).unwrap_err();
+        assert!(
+            matches!(err, ApiError::Malformed(ref msg) if msg.contains("duplicate NSE symbol RELIANCE"))
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn real_detailed_scrip_master_integration() {
+        let file = std::fs::File::open("sample-data/api-scrip-master-detailed.csv")
+            .or_else(|_| std::fs::File::open("../sample-data/api-scrip-master-detailed.csv"))
+            .expect("detailed master CSV not found in sample-data");
+        let rows = parse_scrip_master(file).expect("failed to parse detailed scrip master");
+        assert_eq!(rows.len(), 2391);
+        let fno_count = rows.iter().filter(|r| r.is_fno).count();
+        assert!(
+            (150..=300).contains(&fno_count),
+            "fno_count {fno_count} not in 150..=300"
+        );
+        let reliance = rows
+            .iter()
+            .find(|r| r.security_id == "2885")
+            .expect("reliance not found");
+        assert!(reliance.is_fno);
+        let alok = rows
+            .iter()
+            .find(|r| r.symbol == "ALOKINDS")
+            .expect("alokinds not found");
+        assert!(!alok.is_fno);
     }
 }

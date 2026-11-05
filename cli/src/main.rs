@@ -114,8 +114,14 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     if opts.contains_key("--update") {
         let master = opts
             .get("--master")
-            .ok_or("--update requires --master <scrip-master.csv>")?;
+            .ok_or("--update requires --master <api-scrip-master-detailed.csv>")?;
         let rows = dhan_api::parse_scrip_master(std::fs::File::open(master)?)?;
+        let fno_count = rows.iter().filter(|r| r.is_fno).count();
+        println!(
+            "scrip master: {} equities ({} F&O-eligible)",
+            rows.len(),
+            fno_count
+        );
         let db = data.join("catalog.sqlite");
         let mut cat = algomln_data::Catalog::open(&db)?;
         cat.refresh_instruments(&rows, chrono::Utc::now().timestamp())?;

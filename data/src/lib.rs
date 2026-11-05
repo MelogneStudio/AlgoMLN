@@ -183,19 +183,22 @@ impl Catalog {
             fs::create_dir_all(p)?;
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000; CREATE TABLE IF NOT EXISTS instruments(security_id TEXT PRIMARY KEY,symbol TEXT NOT NULL UNIQUE,segment TEXT NOT NULL,lot_size INTEGER NOT NULL,tick_size_paise INTEGER NOT NULL,refreshed_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS series(id INTEGER PRIMARY KEY,security_id TEXT NOT NULL,tf TEXT NOT NULL,first_ts INTEGER,last_ts INTEGER,rows INTEGER NOT NULL DEFAULT 0,needs_refresh INTEGER NOT NULL DEFAULT 0,UNIQUE(security_id,tf)); CREATE TABLE IF NOT EXISTS partitions(series_id INTEGER NOT NULL,path TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,rows INTEGER NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(series_id,path)); CREATE TABLE IF NOT EXISTS coverage(series_id INTEGER NOT NULL,start_ts INTEGER NOT NULL,end_ts INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('data','confirmed_empty'))); CREATE TABLE IF NOT EXISTS sessions(series_id INTEGER NOT NULL,date TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,bars INTEGER NOT NULL,PRIMARY KEY(series_id,date)); CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY,series_id INTEGER,kind TEXT NOT NULL,ts INTEGER,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started INTEGER NOT NULL,finished INTEGER,requests INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY,requests INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS trading_calendar(date TEXT PRIMARY KEY,is_trading INTEGER NOT NULL,source TEXT NOT NULL); CREATE TABLE IF NOT EXISTS failures(security_id INTEGER,tf TEXT,from_date TEXT,to_date TEXT,error_code TEXT,attempts INTEGER,next_retry TEXT,PRIMARY KEY(security_id,tf,from_date,to_date));")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000; CREATE TABLE IF NOT EXISTS instruments(security_id TEXT PRIMARY KEY,symbol TEXT NOT NULL UNIQUE,segment TEXT NOT NULL,lot_size INTEGER NOT NULL,tick_size_paise INTEGER NOT NULL,instrument TEXT NOT NULL DEFAULT 'EQUITY',is_fno INTEGER NOT NULL DEFAULT 0,refreshed_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS series(id INTEGER PRIMARY KEY,security_id TEXT NOT NULL,tf TEXT NOT NULL,first_ts INTEGER,last_ts INTEGER,rows INTEGER NOT NULL DEFAULT 0,needs_refresh INTEGER NOT NULL DEFAULT 0,UNIQUE(security_id,tf)); CREATE TABLE IF NOT EXISTS partitions(series_id INTEGER NOT NULL,path TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,rows INTEGER NOT NULL,checksum TEXT NOT NULL,PRIMARY KEY(series_id,path)); CREATE TABLE IF NOT EXISTS coverage(series_id INTEGER NOT NULL,start_ts INTEGER NOT NULL,end_ts INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('data','confirmed_empty'))); CREATE TABLE IF NOT EXISTS sessions(series_id INTEGER NOT NULL,date TEXT NOT NULL,first_ts INTEGER NOT NULL,last_ts INTEGER NOT NULL,bars INTEGER NOT NULL,PRIMARY KEY(series_id,date)); CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY,series_id INTEGER,kind TEXT NOT NULL,ts INTEGER,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started INTEGER NOT NULL,finished INTEGER,requests INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY,requests INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS trading_calendar(date TEXT PRIMARY KEY,is_trading INTEGER NOT NULL,source TEXT NOT NULL); CREATE TABLE IF NOT EXISTS failures(security_id INTEGER,tf TEXT,from_date TEXT,to_date TEXT,error_code TEXT,attempts INTEGER,next_retry TEXT,PRIMARY KEY(security_id,tf,from_date,to_date));")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(DataError::Invalid(format!(
-                "catalog schema version {version} is newer than supported version 1"
+                "catalog schema version {version} is newer than supported version 2"
             )));
         }
-        let has_instrument: bool = {
+        let (has_instrument, has_is_fno): (bool, bool) = {
             let mut q = conn.prepare("PRAGMA table_info(instruments)")?;
             let names = q
                 .query_map([], |r| r.get::<_, String>(1))?
                 .collect::<Result<Vec<_>, _>>()?;
-            names.iter().any(|x| x == "instrument")
+            (
+                names.iter().any(|x| x == "instrument"),
+                names.iter().any(|x| x == "is_fno"),
+            )
         };
         if !has_instrument {
             conn.execute(
@@ -203,16 +206,47 @@ impl Catalog {
                 [],
             )?;
         }
-        conn.execute_batch("PRAGMA user_version=1;")?;
+        if !has_is_fno {
+            conn.execute(
+                "ALTER TABLE instruments ADD COLUMN is_fno INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        conn.execute_batch("PRAGMA user_version=2;")?;
         Ok(Self { conn })
     }
     pub fn refresh_instruments(&mut self, rows: &[Scrip], at: i64) -> Result<(), DataError> {
         let tx = self.conn.transaction()?;
         for x in rows {
-            tx.execute("INSERT INTO instruments(security_id,symbol,segment,lot_size,tick_size_paise,instrument,refreshed_at) VALUES(?1,?2,'NSE_EQ',?3,?4,?5,?6) ON CONFLICT(security_id) DO UPDATE SET symbol=excluded.symbol,lot_size=excluded.lot_size,tick_size_paise=excluded.tick_size_paise,instrument=excluded.instrument,refreshed_at=excluded.refreshed_at",params![x.security_id,x.symbol,x.lot_size,x.tick_size_paise,x.instrument,at])?;
+            tx.execute(
+                "INSERT INTO instruments(security_id,symbol,segment,lot_size,tick_size_paise,instrument,is_fno,refreshed_at) \
+                 VALUES(?1,?2,'NSE_EQ',?3,?4,?5,?6,?7) \
+                 ON CONFLICT(security_id) DO UPDATE SET \
+                 symbol=excluded.symbol,lot_size=excluded.lot_size,tick_size_paise=excluded.tick_size_paise,\
+                 instrument=excluded.instrument,is_fno=excluded.is_fno,refreshed_at=excluded.refreshed_at",
+                params![x.security_id, x.symbol, x.lot_size, x.tick_size_paise, x.instrument, if x.is_fno { 1 } else { 0 }, at],
+            )?;
         }
         tx.commit()?;
         Ok(())
+    }
+    pub fn is_fno(&self, id: &str) -> Result<bool, DataError> {
+        Ok(self.conn.query_row(
+            "SELECT is_fno FROM instruments WHERE security_id=?1",
+            [id],
+            |r| Ok(r.get::<_, i64>(0)? != 0),
+        )?)
+    }
+    pub fn instrument_counts(&self) -> Result<(usize, usize), DataError> {
+        let total: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM instruments", [], |r| r.get(0))?;
+        let fno: usize = self.conn.query_row(
+            "SELECT COUNT(*) FROM instruments WHERE is_fno != 0",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((total, fno))
     }
     pub fn instrument(&self, id: &str) -> Result<String, DataError> {
         Ok(self.conn.query_row(
@@ -578,7 +612,8 @@ impl Catalog {
             .collect::<Result<Vec<_>, _>>()?;
         let mut out = Vec::with_capacity(rows.len());
         for (id, tf, from, to) in rows {
-            let tf = Tf::parse(&tf).ok_or_else(|| DataError::Invalid("bad tf in failures".into()))?;
+            let tf =
+                Tf::parse(&tf).ok_or_else(|| DataError::Invalid("bad tf in failures".into()))?;
             let from = NaiveDate::parse_from_str(&from, "%Y-%m-%d")
                 .map_err(|e| DataError::Invalid(e.to_string()))?;
             let to = NaiveDate::parse_from_str(&to, "%Y-%m-%d")
@@ -1673,10 +1708,7 @@ impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
     /// immediate-auth-abort behaviour is a serial-only guarantee; see
     /// [`run_concurrent`](Self::run_concurrent) for the relaxed concurrent
     /// semantics.
-    pub fn run<P: FnMut(&Progress) + Send>(
-        &self,
-        progress: P,
-    ) -> Result<BulkReport, DataError> {
+    pub fn run<P: FnMut(&Progress) + Send>(&self, progress: P) -> Result<BulkReport, DataError> {
         if self.config.concurrency > 1 {
             self.run_concurrent(progress)
         } else {
@@ -1839,8 +1871,7 @@ impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
             std::thread::scope(|scope| {
                 for _ in 0..workers {
                     scope.spawn(|| {
-                        while !self.stop.load(Ordering::SeqCst)
-                            && !stop_all.load(Ordering::SeqCst)
+                        while !self.stop.load(Ordering::SeqCst) && !stop_all.load(Ordering::SeqCst)
                         {
                             let i = next.fetch_add(1, Ordering::SeqCst);
                             if i >= total {
@@ -2377,6 +2408,7 @@ mod tests {
                 lot_size: 1,
                 tick_size_paise: 5,
                 instrument: "EQUITY".into(),
+                is_fno: false,
             }],
             0,
         )
@@ -2429,6 +2461,7 @@ mod tests {
                 lot_size: 1,
                 tick_size_paise: 5,
                 instrument: "EQUITY".into(),
+                is_fno: false,
             }],
             0,
         )
@@ -2471,6 +2504,7 @@ mod tests {
                     lot_size: 1,
                     tick_size_paise: 5,
                     instrument: "EQUITY".into(),
+                    is_fno: false,
                 }],
                 0,
             )
@@ -2528,6 +2562,7 @@ mod tests {
                 lot_size: 1,
                 tick_size_paise: 5,
                 instrument: "EQUITY".into(),
+                is_fno: false,
             }],
             0,
         )
@@ -2573,6 +2608,7 @@ mod tests {
                 lot_size: 1,
                 tick_size_paise: 5,
                 instrument: "EQUITY".into(),
+                is_fno: false,
             }],
             0,
         )
@@ -2604,6 +2640,7 @@ mod tests {
                 lot_size: 1,
                 tick_size_paise: 5,
                 instrument: "EQUITY".into(),
+                is_fno: false,
             }],
             0,
         )
@@ -2707,6 +2744,7 @@ mod tests {
                     lot_size: 1,
                     tick_size_paise: 5,
                     instrument: "EQUITY".into(),
+                    is_fno: false,
                 }],
                 0,
             )
@@ -2770,6 +2808,7 @@ mod tests {
                 lot_size: 1,
                 tick_size_paise: 10,
                 instrument: "EQUITY".into(),
+                is_fno: false,
             }],
             0,
         )
@@ -2798,8 +2837,42 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
+        assert!(!cat.is_fno("1").unwrap());
         assert_eq!(cat.status_rows().unwrap().len(), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn catalog_migration_from_v1_populates_is_fno_on_refresh() {
+        let root = temp("migration-v1-to-v2");
+        fs::create_dir_all(&root).unwrap();
+        let db = root.join("catalog.sqlite");
+        let legacy = Connection::open(&db).unwrap();
+        legacy.execute_batch("PRAGMA user_version=1; CREATE TABLE instruments(security_id TEXT PRIMARY KEY,symbol TEXT NOT NULL UNIQUE,segment TEXT NOT NULL,lot_size INTEGER NOT NULL,tick_size_paise INTEGER NOT NULL,instrument TEXT NOT NULL DEFAULT 'EQUITY',refreshed_at INTEGER NOT NULL); INSERT INTO instruments VALUES('2885','RELIANCE','NSE_EQ',1,10,'EQUITY',0);").unwrap();
+        drop(legacy);
+        let mut cat = Catalog::open(&db).unwrap();
+        let version: i64 = cat
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        assert!(!cat.is_fno("2885").unwrap());
+        cat.refresh_instruments(
+            &[Scrip {
+                security_id: "2885".into(),
+                symbol: "RELIANCE".into(),
+                lot_size: 1,
+                tick_size_paise: 10,
+                instrument: "EQUITY".into(),
+                is_fno: true,
+            }],
+            Utc::now().timestamp(),
+        )
+        .unwrap();
+        assert!(cat.is_fno("2885").unwrap());
+        let (total, fno) = cat.instrument_counts().unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(fno, 1);
         let _ = fs::remove_dir_all(root);
     }
     #[test]
@@ -2813,6 +2886,7 @@ mod tests {
                 lot_size: 1,
                 tick_size_paise: 5,
                 instrument: "EQUITY".into(),
+                is_fno: false,
             }],
             0,
         )
@@ -2937,6 +3011,7 @@ mod tests {
             lot_size: 1,
             tick_size_paise: 5,
             instrument: "EQUITY".into(),
+            is_fno: false,
         }
     }
     #[test]
@@ -2963,7 +3038,9 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
         let bulk = BulkDownloader {
-            make_client: move || Box::new(CountingHistory { calls: c.clone() }) as Box<dyn HistoryApi>,
+            make_client: move || {
+                Box::new(CountingHistory { calls: c.clone() }) as Box<dyn HistoryApi>
+            },
             catalog_path: db.clone(),
             store_root: root.clone(),
             config: BulkConfig::new(from, to, vec![Tf::D1, Tf::M1]),
@@ -2994,9 +3071,11 @@ mod tests {
         let mut cfg = BulkConfig::new(from, to, vec![Tf::M1]);
         cfg.priority_symbols = vec!["CCC".into()];
         let bulk = BulkDownloader {
-            make_client: || Box::new(CountingHistory {
-                calls: Arc::new(AtomicUsize::new(0)),
-            }) as Box<dyn HistoryApi>,
+            make_client: || {
+                Box::new(CountingHistory {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }) as Box<dyn HistoryApi>
+            },
             catalog_path: db.clone(),
             store_root: root.clone(),
             config: cfg,
@@ -3027,10 +3106,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
         let bulk = BulkDownloader {
-            make_client: move || Box::new(FakeHistory {
-                calls: c.clone(),
-                empty_first: false,
-            }) as Box<dyn HistoryApi>,
+            make_client: move || {
+                Box::new(FakeHistory {
+                    calls: c.clone(),
+                    empty_first: false,
+                }) as Box<dyn HistoryApi>
+            },
             catalog_path: db.clone(),
             store_root: root.clone(),
             config: cfg,
@@ -3184,7 +3265,9 @@ mod acceptance {
     /// Build the intraday columnar JSON the Dhan `/charts/intraday` endpoint
     /// returns for `n` consecutive one-minute bars starting at `start_ts`.
     fn intraday_body(start_ts: i64, n: usize) -> String {
-        let ts: Vec<String> = (0..n).map(|i| (start_ts + i as i64 * 60).to_string()).collect();
+        let ts: Vec<String> = (0..n)
+            .map(|i| (start_ts + i as i64 * 60).to_string())
+            .collect();
         let ones = vec!["1.0"; n].join(",");
         let twos = vec!["2.0"; n].join(",");
         let vols = vec!["10.0"; n].join(",");
@@ -3225,6 +3308,7 @@ mod acceptance {
                 lot_size: 1,
                 tick_size_paise: 5,
                 instrument: "EQUITY".into(),
+                is_fno: false,
             }],
             0,
         )
@@ -3295,14 +3379,20 @@ mod acceptance {
         let from = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let to = from; // single intraday chunk
         let responses = vec![
-            (429u16, r#"{"errorCode":"DH-904","errorMessage":"slow down"}"#.to_string()),
+            (
+                429u16,
+                r#"{"errorCode":"DH-904","errorMessage":"slow down"}"#.to_string(),
+            ),
             (200u16, intraday_body(open_ist(from), 1)),
         ];
         let (base, server) = mock_server(responses);
         let mut up = make_updater(&base, &db, &root);
         up.update("1", Tf::M1, "EQUITY", from, to).unwrap();
         let outcome = server.join().unwrap();
-        assert_eq!(outcome.served, 2, "DH-904 must be retried once then succeed");
+        assert_eq!(
+            outcome.served, 2,
+            "DH-904 must be retried once then succeed"
+        );
         let covered = up.catalog.covered_dates("1", Tf::M1, from, to).unwrap();
         assert_eq!(covered, vec![from]);
         let _ = fs::remove_dir_all(root);
@@ -3327,6 +3417,7 @@ mod acceptance {
                         lot_size: 1,
                         tick_size_paise: 5,
                         instrument: "EQUITY".into(),
+                        is_fno: false,
                     },
                     Scrip {
                         security_id: "2".into(),
@@ -3334,6 +3425,7 @@ mod acceptance {
                         lot_size: 1,
                         tick_size_paise: 5,
                         instrument: "EQUITY".into(),
+                        is_fno: false,
                     },
                 ],
                 0,
@@ -3495,7 +3587,11 @@ mod acceptance {
             "every symbol must commit"
         );
         let outcome = server.join().unwrap();
-        assert_eq!(outcome.served, symbols.len(), "exactly one request per symbol");
+        assert_eq!(
+            outcome.served,
+            symbols.len(),
+            "exactly one request per symbol"
+        );
         let mut times = outcome.received_at;
         times.sort();
         let span = times

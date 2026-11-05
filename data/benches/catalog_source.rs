@@ -56,6 +56,7 @@ fn prepare(root: &PathBuf, symbols: &[String], dates: &[NaiveDate]) {
             lot_size: 1,
             tick_size_paise: 5,
             instrument: "EQUITY".into(),
+            is_fno: false,
         })
         .collect();
     cat.refresh_instruments(&scrips, 0).unwrap();
