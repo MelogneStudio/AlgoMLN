@@ -12,9 +12,9 @@ thiserror = "2"
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1.4"
-parquet = { version = "=53.4.1", default-features = false, features = ["arrow", "snap", "brotli", "flate2", "lz4", "zstd"] }
-arrow-array = "=53.4.1"
-arrow-schema = "=53.4.1"
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "brotli", "flate2-zlib-rs", "lz4", "zstd"] }
+arrow-array = "60"
+arrow-schema = "60"
 chrono-tz = "=0.10.4"
 rayon = "=1.10.0"
 

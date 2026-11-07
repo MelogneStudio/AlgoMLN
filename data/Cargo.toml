@@ -13,9 +13,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
-parquet = { version = "=53.4.1", default-features = false, features = ["arrow", "snap", "brotli", "flate2", "lz4", "zstd"] }
-arrow-array = "=53.4.1"
-arrow-schema = "=53.4.1"
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "brotli", "flate2-zlib-rs", "lz4", "zstd"] }
+arrow-array = "60"
+arrow-schema = "60"
 sha2 = "0.10"
 csv = "1.4"
 criterion = "0.5"
