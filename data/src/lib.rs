@@ -4313,7 +4313,7 @@ mod acceptance {
             let cat = Catalog::open(&db).unwrap();
             cat.conn
                 .execute(
-                    "INSERT INTO calendar (date, is_trading, session_type) VALUES (?1, 0, 'holiday')",
+                    "INSERT INTO trading_calendar (date, is_trading, source) VALUES (?1, 0, 'holiday')",
                     params![tue.to_string()],
                 )
                 .unwrap();
@@ -4543,7 +4543,7 @@ mod acceptance {
         let csv_dir = root.join("csv");
         fs::create_dir_all(&csv_dir).unwrap();
         let mut wtr = csv::Writer::from_path(csv_dir.join("ABC.csv")).unwrap();
-        wtr.write_record(&["timestamp", "open", "high", "low", "close", "volume"])
+        wtr.write_record(&["ts", "open", "high", "low", "close", "volume"])
             .unwrap();
         for (_, c) in &cat_candles {
             wtr.write_record(&[
@@ -4651,13 +4651,7 @@ mod acceptance {
 
         let cat_before = fs::read(&db).unwrap();
 
-        let part_file = fs::read_dir(root.join("1m"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path()
-            .join("2026-01.parquet");
+        let part_file = root.join("candles").join("1").join("1m").join("2026-01.parquet");
         assert!(part_file.exists());
 
         let mut bytes = fs::read(&part_file).unwrap();
@@ -4669,19 +4663,22 @@ mod acceptance {
             from: Some(open_ist(mon)),
             to: Some(open_ist(mon) + 375 * 60 - 60),
         };
-        let stream = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
-        let err = stream.collect::<Result<Vec<_>, _>>().unwrap_err();
-        let err_str = err.to_string();
-        assert!(err_str.contains("checksum mismatch"));
-        assert!(err_str.contains("data verify"));
+        let err = match source.open(&["ABC".into()], Timeframe::M1, range) {
+            Ok(stream) => stream.collect::<Result<Vec<_>, _>>().unwrap_err().to_string(),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("checksum mismatch"));
+        assert!(err.contains("data verify"));
 
         let cat_after = fs::read(&db).unwrap();
         assert_eq!(cat_before, cat_after);
 
         fs::remove_file(&part_file).unwrap();
-        let stream2 = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
-        let err2 = stream2.collect::<Result<Vec<_>, _>>().unwrap_err();
-        assert!(err2.to_string().contains("partition file missing"));
+        let err2 = match source.open(&["ABC".into()], Timeframe::M1, range) {
+            Ok(stream) => stream.collect::<Result<Vec<_>, _>>().unwrap_err().to_string(),
+            Err(e) => e.to_string(),
+        };
+        assert!(err2.contains("missing partition file"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4702,7 +4699,7 @@ mod acceptance {
         up.update("2", Tf::M1, "EQUITY", mon, mon).unwrap();
         let _ = server.join().unwrap();
 
-        let bad_part = root.join("1m").join("BAD").join("2026-01.parquet");
+        let bad_part = root.join("candles").join("2").join("1m").join("2026-01.parquet");
         fs::write(&bad_part, b"garbage data").unwrap();
 
         let source = CatalogSource::new(Store::new(&root), &db);
@@ -4792,7 +4789,7 @@ mod acceptance {
             let cat = Catalog::open(&db).unwrap();
             cat.conn
                 .execute(
-                    "UPDATE partitions SET checksum='changed_hash' WHERE id=1",
+                    "UPDATE partitions SET checksum='changed_hash' WHERE series_id=1",
                     [],
                 )
                 .unwrap();
@@ -4810,8 +4807,8 @@ mod acceptance {
         let db = root.join("catalog.sqlite");
         seed_instrument(&db, "1", "ABC");
         let jan = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
-        let feb = NaiveDate::from_ymd_opt(2026, 2, 2).unwrap();
-        let mar = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap();
+        let feb = NaiveDate::from_ymd_opt(2026, 5, 4).unwrap();
+        let mar = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
         let b1 = multi_day_intraday_body(&[jan], 375);
         let b2 = multi_day_intraday_body(&[feb], 375);
         let b3 = multi_day_intraday_body(&[mar], 375);
