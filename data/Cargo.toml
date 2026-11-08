@@ -16,6 +16,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 parquet = { version = "60", default-features = false, features = ["arrow", "snap", "brotli", "flate2-zlib-rs", "lz4", "zstd"] }
 arrow-array = "60"
 arrow-schema = "60"
+bytes = "1"
 sha2 = "0.10"
 csv = "1.4"
 criterion = "0.5"

@@ -18,7 +18,10 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 use thiserror::Error;
 
@@ -34,6 +37,12 @@ pub enum DataError {
     Invalid(String),
     #[error("uncovered range for {0}; run `algomln data update` first")]
     Uncovered(String),
+    #[error("warmup short for {symbol}: have {have} bars, need {need}")]
+    WarmupShort {
+        symbol: String,
+        have: usize,
+        need: usize,
+    },
     #[error("daily request budget reached ({used}/{cap})")]
     BudgetExhausted { used: u64, cap: u64 },
 }
@@ -65,6 +74,7 @@ impl DataError {
             DataError::Db(_) => "db".into(),
             DataError::Invalid(_) => "invalid".into(),
             DataError::Uncovered(_) => "uncovered".into(),
+            DataError::WarmupShort { .. } => "warmup_short".into(),
         }
     }
 }
@@ -99,7 +109,7 @@ impl Tf {
             _ => return None,
         })
     }
-    fn seconds(self) -> i64 {
+    pub fn seconds(self) -> i64 {
         match self {
             Self::M1 => 60,
             Self::M5 => 300,
@@ -178,6 +188,19 @@ pub struct Catalog {
     conn: Connection,
 }
 impl Catalog {
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, DataError> {
+        let p = path.as_ref();
+        let conn = match Connection::open_with_flags(
+            p,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(c) => c,
+            Err(_) => Connection::open(p)?,
+        };
+        let _ = conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=30000;");
+        Ok(Self { conn })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DataError> {
         if let Some(p) = path.as_ref().parent() {
             fs::create_dir_all(p)?;
@@ -265,7 +288,7 @@ impl Catalog {
             .map_err(|_| DataError::Invalid(format!("unknown symbol {}", s)))
     }
     pub fn series_for_import(&self, id: &str, tf: Tf) -> Result<i64, DataError> {
-        self.series(id, tf)
+        self.ensure_series(id, tf)
     }
     pub fn record_partition(
         &self,
@@ -309,46 +332,120 @@ impl Catalog {
                 r.get(0)
             })?)
     }
-    fn series(&self, id: &str, tf: Tf) -> Result<i64, DataError> {
+    pub fn series(&self, id: &str, tf: Tf) -> Result<i64, DataError> {
+        self.conn
+            .query_row(
+                "SELECT id FROM series WHERE security_id=?1 AND tf=?2",
+                params![id, tf.as_str()],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DataError::Uncovered(id.to_string()),
+                other => DataError::Db(other),
+            })
+    }
+
+    pub fn ensure_series(&self, id: &str, tf: Tf) -> Result<i64, DataError> {
         self.conn.execute(
             "INSERT OR IGNORE INTO series(security_id,tf) VALUES(?1,?2)",
             params![id, tf.as_str()],
         )?;
-        Ok(self.conn.query_row(
-            "SELECT id FROM series WHERE security_id=?1 AND tf=?2",
-            params![id, tf.as_str()],
-            |r| r.get(0),
-        )?)
+        self.series(id, tf)
     }
-    pub fn has_coverage(&self, id: &str, tf: Tf, from: i64, to: i64) -> Result<bool, DataError> {
-        let sid = self.series(id, tf)?;
-        let first = DateTime::<Utc>::from_timestamp(from, 0)
-            .unwrap_or(DateTime::UNIX_EPOCH)
-            .with_timezone(&Kolkata)
-            .date_naive();
-        let last = DateTime::<Utc>::from_timestamp(to, 0)
-            .unwrap_or(DateTime::UNIX_EPOCH)
-            .with_timezone(&Kolkata)
-            .date_naive();
-        let a = local_midnight(first);
-        let b = local_midnight(last + chrono::Days::new(1)) - 1;
-        let mut stmt=self.conn.prepare("SELECT start_ts,end_ts FROM coverage WHERE series_id=?1 AND end_ts>=?2 AND start_ts<=?3 ORDER BY start_ts")?;
-        let rows = stmt.query_map(params![sid, a, b], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })?;
-        let mut cursor = a;
-        for row in rows {
-            let (lo, hi) = row?;
-            if lo > cursor {
-                return Ok(false);
-            }
-            cursor = cursor.max(hi.saturating_add(1));
-            if cursor > b {
-                return Ok(true);
+
+    pub fn record_session(
+        &self,
+        sid: i64,
+        date: NaiveDate,
+        first_ts: i64,
+        last_ts: i64,
+        bars: u64,
+    ) -> Result<(), DataError> {
+        self.conn.execute(
+            "INSERT INTO sessions VALUES(?1,?2,?3,?4,?5) ON CONFLICT(series_id,date) DO UPDATE SET first_ts=excluded.first_ts,last_ts=excluded.last_ts,bars=excluded.bars",
+            params![sid, date.to_string(), first_ts, last_ts, bars],
+        )?;
+        Ok(())
+    }
+
+    pub fn instrument_meta(&self, security_id: &str) -> Result<(u64, i64, bool), DataError> {
+        self.conn.query_row(
+            "SELECT lot_size, tick_size_paise, is_fno FROM instruments WHERE security_id=?1",
+            [security_id],
+            |r| {
+                let lot: u64 = r.get(0)?;
+                let tick: i64 = r.get(1)?;
+                let fno: i64 = r.get(2)?;
+                Ok((lot.max(1), tick.max(1), fno != 0))
+            },
+        ).map_err(DataError::Db)
+    }
+
+    pub fn is_holiday(&self, date: NaiveDate) -> Result<bool, DataError> {
+        let not_trading: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM trading_calendar WHERE date=?1 AND is_trading=0)",
+            [date.to_string()],
+            |r| r.get(0),
+        )?;
+        Ok(not_trading)
+    }
+
+    pub fn first_covered_date(&self, sid: i64) -> Result<Option<NaiveDate>, DataError> {
+        let date_str: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT MIN(date) FROM sessions WHERE series_id=?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(s) = date_str {
+            if let Ok(d) = NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
+                return Ok(Some(d));
             }
         }
-        Ok(false)
+        let first_ts: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT first_ts FROM series WHERE id=?1",
+                [sid],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        if let Some(ts) = first_ts {
+            return Ok(Some(ts_to_ist_date(ts)));
+        }
+        Ok(None)
     }
+
+    pub fn bars_before_ts(&self, sid: i64, from_date: NaiveDate, cutoff_ts: i64) -> Result<usize, DataError> {
+        let session_count: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(bars), 0) FROM sessions WHERE series_id=?1 AND date>=?2 AND first_ts < ?3",
+            params![sid, from_date.to_string(), cutoff_ts],
+            |r| r.get(0),
+        )?;
+        if session_count > 0 {
+            return Ok(session_count as usize);
+        }
+        let partition_count: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(rows), 0) FROM partitions WHERE series_id=?1 AND first_ts < ?2",
+            params![sid, cutoff_ts],
+            |r| r.get(0),
+        )?;
+        Ok(partition_count as usize)
+    }
+
+    pub fn has_coverage(&self, id: &str, tf: Tf, from: i64, to: i64) -> Result<bool, DataError> {
+        let first = ts_to_ist_date(from);
+        let last = ts_to_ist_date(to);
+        if first > last {
+            return Ok(false);
+        }
+        let missing = self.missing_dates(id, tf, first, last)?;
+        Ok(missing.is_empty())
+    }
+
     pub fn record_coverage(
         &self,
         id: &str,
@@ -360,13 +457,14 @@ impl Catalog {
         if start > end || !(kind == "data" || kind == "confirmed_empty") {
             return Err(DataError::Invalid("invalid coverage interval".into()));
         }
-        let sid = self.series(id, tf)?;
+        let sid = self.ensure_series(id, tf)?;
         self.conn.execute(
             "INSERT OR IGNORE INTO coverage VALUES(?1,?2,?3,?4)",
             params![sid, start, end, kind],
         )?;
         Ok(())
     }
+
     pub fn covered_dates(
         &self,
         id: &str,
@@ -374,13 +472,26 @@ impl Catalog {
         from: NaiveDate,
         to: NaiveDate,
     ) -> Result<Vec<NaiveDate>, DataError> {
-        let sid = self.series(id, tf)?;
-        let mut q=self.conn.prepare("SELECT date FROM sessions WHERE series_id=?1 AND date>=?2 AND date<=?3 UNION SELECT date FROM trading_calendar WHERE is_trading=0 AND date>=?2 AND date<=?3 ORDER BY date")?;
-        let xs = q
-            .query_map(params![sid, from.to_string(), to.to_string()], |r| {
+        let sid = self.series(id, tf).ok();
+        let xs: Vec<String> = if let Some(sid) = sid {
+            let mut q = self.conn.prepare(
+                "SELECT date FROM sessions WHERE series_id=?1 AND date>=?2 AND date<=?3 UNION SELECT date FROM trading_calendar WHERE is_trading=0 AND date>=?2 AND date<=?3 ORDER BY date",
+            )?;
+            let rows = q.query_map(params![sid, from.to_string(), to.to_string()], |r| {
                 r.get::<_, String>(0)
             })?
             .collect::<Result<Vec<_>, _>>()?;
+            rows
+        } else {
+            let mut q = self.conn.prepare(
+                "SELECT date FROM trading_calendar WHERE is_trading=0 AND date>=?1 AND date<=?2 ORDER BY date",
+            )?;
+            let rows = q.query_map(params![from.to_string(), to.to_string()], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
         xs.into_iter()
             .map(|x| {
                 let text = if x.contains('-') && x.len() > 10 {
@@ -398,6 +509,7 @@ impl Catalog {
             })
             .collect()
     }
+
     pub fn record_calendar(
         &self,
         date: NaiveDate,
@@ -407,8 +519,9 @@ impl Catalog {
         self.conn.execute("INSERT INTO trading_calendar VALUES(?1,?2,?3) ON CONFLICT(date) DO UPDATE SET is_trading=excluded.is_trading,source=excluded.source",params![date.to_string(),is_trading,source])?;
         Ok(())
     }
+
     pub fn mark_session_empty(&self, id: &str, tf: Tf, date: NaiveDate) -> Result<(), DataError> {
-        let sid = self.series(id, tf)?;
+        let sid = self.ensure_series(id, tf)?;
         self.conn.execute(
             "INSERT OR IGNORE INTO coverage VALUES(?1,?2,?3,'confirmed_empty')",
             params![
@@ -420,6 +533,7 @@ impl Catalog {
         self.conn.execute("INSERT OR IGNORE INTO sessions(series_id,date,first_ts,last_ts,bars) VALUES(?1,?2,?3,?3,0)", params![sid,date.to_string(),local_midnight(date)])?;
         Ok(())
     }
+
     pub fn missing_dates(
         &self,
         id: &str,
@@ -427,6 +541,9 @@ impl Catalog {
         from: NaiveDate,
         to: NaiveDate,
     ) -> Result<Vec<NaiveDate>, DataError> {
+        if from > to {
+            return Ok(Vec::new());
+        }
         let covered = self
             .covered_dates(id, tf, from, to)?
             .into_iter()
@@ -677,7 +794,7 @@ impl Catalog {
         Ok(())
     }
     pub fn mark_quality(&self, id: &str, tf: Tf, q: &Quality) -> Result<(), DataError> {
-        let sid = self.series(id, tf)?;
+        let sid = self.ensure_series(id, tf)?;
         self.conn.execute(
             "INSERT INTO quality(series_id,kind,ts,detail) VALUES(?1,?2,?3,?4)",
             params![sid, q.kind, q.ts, q.detail],
@@ -973,6 +1090,13 @@ pub fn missing_date_ranges(
         _ => Vec::new(),
     })
 }
+pub fn ts_to_ist_date(ts: i64) -> NaiveDate {
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .unwrap_or(DateTime::UNIX_EPOCH)
+        .with_timezone(&Kolkata)
+        .date_naive()
+}
+
 fn local_midnight(d: NaiveDate) -> i64 {
     d.and_hms_opt(0, 0, 0)
         .unwrap()
@@ -1338,8 +1462,7 @@ impl Updater {
                     if saved.is_empty() {
                         continue;
                     }
-                    let existing_all: Vec<Bar> = {
-                        let sid = self.catalog.series(security_id, tf)?;
+                    let existing_all: Vec<Bar> = if let Ok(sid) = self.catalog.series(security_id, tf) {
                         let mut q = self
                             .catalog
                             .conn
@@ -1352,6 +1475,8 @@ impl Updater {
                             all.extend(read_bars(&self.store.root.join(rel))?)
                         }
                         all
+                    } else {
+                        Vec::new()
                     };
                     let (kind, diffs) = check_overlap(&existing_all, &saved);
                     if kind == "corporate_action" {
@@ -1425,7 +1550,7 @@ impl Updater {
                         )?;
                     }
                     let partitions = self.store.write_partitions(security_id, tf, &saved)?;
-                    let sid = self.catalog.series(security_id, tf)?;
+                    let sid = self.catalog.ensure_series(security_id, tf)?;
                     let tx = self
                         .catalog
                         .conn
@@ -1518,7 +1643,7 @@ impl Updater {
                                             tf,
                                             &completed,
                                         )?;
-                                        let sid = self.catalog.series(security_id, tf)?;
+                                        let sid = self.catalog.ensure_series(security_id, tf)?;
                                         for part in pieces {
                                             self.catalog.record_partition(
                                                 sid,
@@ -2078,27 +2203,290 @@ fn group_thousands(n: u64) -> String {
     out
 }
 
+pub fn read_partition_verified(
+    path: &Path,
+    expected_checksum: &str,
+) -> Result<Vec<Bar>, SourceError> {
+    let bytes = fs::read(path).map_err(|e| {
+        SourceError::Other(format!(
+            "missing partition file {}: {e}; run `algomln data verify`",
+            path.display()
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual_checksum = format!("{:x}", hasher.finalize());
+    if actual_checksum != expected_checksum {
+        return Err(SourceError::Other(format!(
+            "partition checksum mismatch for {}: expected {}, got {}; run `algomln data verify`",
+            path.display(),
+            expected_checksum,
+            actual_checksum
+        )));
+    }
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
+        .map_err(|e| SourceError::Other(format!("{}: {e}", path.display())))?
+        .build()
+        .map_err(|e| SourceError::Other(format!("{}: {e}", path.display())))?;
+    let mut bars = Vec::new();
+    for batch in reader {
+        let b = batch.map_err(|e| SourceError::Other(format!("{}: {e}", path.display())))?;
+        let ts = b
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| SourceError::Other("missing or invalid ts column".into()))?;
+        let open = b
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or_else(|| SourceError::Other("invalid open column".into()))?;
+        let high = b
+            .column(2)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or_else(|| SourceError::Other("invalid high column".into()))?;
+        let low = b
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or_else(|| SourceError::Other("invalid low column".into()))?;
+        let close = b
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or_else(|| SourceError::Other("invalid close column".into()))?;
+        let volume = b
+            .column(5)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .ok_or_else(|| SourceError::Other("invalid volume column".into()))?;
+        for i in 0..b.num_rows() {
+            bars.push(Bar {
+                ts: ts.value(i),
+                open: open.value(i),
+                high: high.value(i),
+                low: low.value(i),
+                close: close.value(i),
+                volume: volume.value(i),
+            });
+        }
+    }
+    Ok(bars)
+}
+
+#[derive(Clone, Debug)]
+pub struct PartitionMetaRow {
+    pub path: PathBuf,
+    pub checksum: String,
+    pub first_ts: i64,
+    pub last_ts: i64,
+}
+
+pub struct CatalogCursor {
+    pub symbol: Symbol,
+    pub partitions: Vec<PartitionMetaRow>,
+    pub current_partition_idx: usize,
+    pub current_bars: Vec<Bar>,
+    pub bar_idx: usize,
+    pub filter_from: i64,
+    pub filter_to: i64,
+    pub resident_count: Arc<AtomicUsize>,
+}
+
+impl CatalogCursor {
+    pub fn next_candle(&mut self) -> Result<Option<Candle>, SourceError> {
+        loop {
+            while self.bar_idx < self.current_bars.len() {
+                let bar = &self.current_bars[self.bar_idx];
+                self.bar_idx += 1;
+                if bar.ts >= self.filter_from && bar.ts <= self.filter_to {
+                    return Ok(Some(Candle {
+                        timestamp: bar.ts,
+                        open: bar.open,
+                        high: bar.high,
+                        low: bar.low,
+                        close: bar.close,
+                        volume: bar.volume,
+                    }));
+                }
+            }
+            if self.current_partition_idx >= self.partitions.len() {
+                if !self.current_bars.is_empty() {
+                    self.current_bars = Vec::new();
+                    self.resident_count.store(0, Ordering::Relaxed);
+                }
+                return Ok(None);
+            }
+            let part = &self.partitions[self.current_partition_idx];
+            self.current_partition_idx += 1;
+            let loaded = read_partition_verified(&part.path, &part.checksum)?;
+            self.current_bars = loaded;
+            self.resident_count.store(1, Ordering::Relaxed);
+            self.bar_idx = 0;
+        }
+    }
+}
+
 pub struct CatalogSource {
     pub store: Store,
     pub catalog_path: PathBuf,
     pub allow_gaps: bool,
+    pub warmup_bars: usize,
+    pub resident_counters: Arc<Mutex<HashMap<Symbol, Arc<AtomicUsize>>>>,
 }
+
+#[derive(Clone, Debug)]
+pub struct ResolvedInfo {
+    pub resolved_from: Option<i64>,
+    pub resolved_to: Option<i64>,
+    pub warmup_start: Option<NaiveDate>,
+    pub fno_count: usize,
+    pub non_fno_count: usize,
+}
+
 impl CatalogSource {
     pub fn new(store: Store, catalog_path: impl Into<PathBuf>) -> Self {
         Self {
             store,
             catalog_path: catalog_path.into(),
             allow_gaps: false,
+            warmup_bars: 0,
+            resident_counters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    fn catalog(&self) -> Result<Catalog, DataError> {
-        Catalog::open(&self.catalog_path)
+
+    pub fn with_warmup_bars(mut self, bars: usize) -> Self {
+        self.warmup_bars = bars;
+        self
     }
+
+    pub fn catalog(&self) -> Result<Catalog, DataError> {
+        Catalog::open_read_only(&self.catalog_path)
+    }
+
     pub fn reconcile(&self) -> Result<(), DataError> {
-        let mut catalog = self.catalog()?;
+        let mut catalog = Catalog::open(&self.catalog_path)?;
         self.store.reconcile(&mut catalog)
     }
+
+    pub fn gaps(
+        &self,
+        symbol: &str,
+        tf: Tf,
+        from_date: NaiveDate,
+        to_date: NaiveDate,
+    ) -> Vec<(NaiveDate, NaiveDate)> {
+        let Ok(cat) = self.catalog() else {
+            return vec![(from_date, to_date)];
+        };
+        let Ok((id, _)) = cat.resolve(symbol) else {
+            return vec![(from_date, to_date)];
+        };
+        missing_date_ranges(&cat, &id, tf, from_date, to_date)
+            .unwrap_or_else(|_| vec![(from_date, to_date)])
+    }
+
+    pub fn resident_counter_for(&self, symbol: &Symbol) -> Option<Arc<AtomicUsize>> {
+        self.resident_counters.lock().ok()?.get(symbol).cloned()
+    }
+
+    pub fn resolved_info(
+        &self,
+        symbols: &[Symbol],
+        timeframe: Timeframe,
+        range: DateRange,
+    ) -> Result<ResolvedInfo, SourceError> {
+        let catalog = self.catalog().map_err(|e| SourceError::Other(e.to_string()))?;
+        let tf = Tf::parse(timeframe.as_str())
+            .ok_or_else(|| SourceError::Other("unsupported timeframe".into()))?;
+
+        let mut min_from: Option<i64> = None;
+        let mut max_to: Option<i64> = None;
+        let mut min_warmup: Option<NaiveDate> = None;
+        let mut fno_count = 0;
+        let mut non_fno_count = 0;
+
+        for symbol in symbols {
+            let (id, _) = match catalog.resolve(symbol) {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            let (_lot_size, _tick_size, is_fno) = catalog.instrument_meta(&id).unwrap_or((1, 5, false));
+            if is_fno {
+                fno_count += 1;
+            } else {
+                non_fno_count += 1;
+            }
+
+            let series_row: Option<(i64, Option<i64>, Option<i64>, u64)> = catalog
+                .conn
+                .query_row(
+                    "SELECT id, first_ts, last_ts, rows FROM series WHERE security_id=?1 AND tf=?2",
+                    params![id, tf.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .ok();
+
+            if let Some((sid, Some(first_ts), Some(last_ts), rows)) = series_row {
+                if rows > 0 {
+                    let res_from = range.from.unwrap_or(first_ts);
+                    let res_to = range.to.unwrap_or(last_ts);
+                    min_from = Some(min_from.map_or(res_from, |m| m.min(res_from)));
+                    max_to = Some(max_to.map_or(res_to, |m| m.max(res_to)));
+
+                    let from_d = ts_to_ist_date(res_from);
+                    let bars_per_session: usize = if tf == Tf::D1 {
+                        1
+                    } else {
+                        let session_mins: usize = if is_fno { 360 } else { 375 };
+                        let tf_mins: usize = (tf.seconds() as usize / 60).max(1);
+                        (session_mins + tf_mins - 1) / tf_mins
+                    };
+
+                    let w_date = if self.warmup_bars == 0 {
+                        from_d
+                    } else {
+                        let sessions_needed =
+                            (self.warmup_bars + bars_per_session - 1) / bars_per_session + 1;
+                        let mut cur = from_d;
+                        let mut count = 0;
+                        while count < sessions_needed {
+                            cur = cur - chrono::Days::new(1);
+                            if matches!(
+                                cur.weekday(),
+                                chrono::Weekday::Mon
+                                    | chrono::Weekday::Tue
+                                    | chrono::Weekday::Wed
+                                    | chrono::Weekday::Thu
+                                    | chrono::Weekday::Fri
+                            ) {
+                                if !catalog.is_holiday(cur).unwrap_or(false) {
+                                    count += 1;
+                                }
+                            }
+                        }
+                        let first_covered = catalog
+                            .first_covered_date(sid)
+                            .unwrap_or(None)
+                            .unwrap_or(ts_to_ist_date(first_ts));
+                        cur.max(first_covered)
+                    };
+                    min_warmup = Some(min_warmup.map_or(w_date, |m| m.min(w_date)));
+                }
+            }
+        }
+
+        Ok(ResolvedInfo {
+            resolved_from: min_from,
+            resolved_to: max_to,
+            warmup_start: min_warmup,
+            fno_count,
+            non_fno_count,
+        })
+    }
 }
+
 impl CandleSource for CatalogSource {
     fn open(
         &self,
@@ -2106,70 +2494,205 @@ impl CandleSource for CatalogSource {
         timeframe: Timeframe,
         range: DateRange,
     ) -> Result<CandleStream, SourceError> {
-        self.reconcile()
-            .map_err(|e| SourceError::Other(format!("catalog reconciliation failed: {e}")))?;
         let catalog = self
             .catalog()
             .map_err(|e| SourceError::Other(e.to_string()))?;
         let tf = Tf::parse(timeframe.as_str())
             .ok_or_else(|| SourceError::Other("unsupported timeframe".into()))?;
-        let (start, end) = (range.from.unwrap_or(i64::MIN), range.to.unwrap_or(i64::MAX));
-        let mut streams = Vec::<Vec<(Symbol, Candle)>>::new();
+
+        let mut uncovered_gaps: BTreeMap<(NaiveDate, NaiveDate), Vec<Symbol>> = BTreeMap::new();
+        let mut warmup_shorts: Vec<(Symbol, usize, usize)> = Vec::new();
+        let mut cursor_data = Vec::new();
+
         for symbol in symbols {
-            let (id, _) = catalog
-                .resolve(symbol)
-                .map_err(|e| SourceError::Other(e.to_string()))?;
-            if !catalog
-                .has_coverage(&id, tf, start, end)
-                .map_err(|e| SourceError::Other(e.to_string()))?
-            {
-                if self.allow_gaps {
+            let (id, _) = match catalog.resolve(symbol) {
+                Ok(x) => x,
+                Err(_) => {
+                    let from_d = range
+                        .from
+                        .map(ts_to_ist_date)
+                        .unwrap_or_else(|| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+                    let to_d = range
+                        .to
+                        .map(ts_to_ist_date)
+                        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2099, 12, 31).unwrap());
+                    uncovered_gaps
+                        .entry((from_d, to_d))
+                        .or_default()
+                        .push(symbol.clone());
                     continue;
                 }
-                return Err(SourceError::Other(format!(
-                    "{}; run `algomln data update --symbols {} --tf {} --from <from> --to <to>`",
-                    DataError::Uncovered(symbol.clone()),
-                    symbol,
-                    timeframe.as_str()
-                )));
-            }
-            let sid = catalog
-                .series(&id, tf)
-                .map_err(|e| SourceError::Other(e.to_string()))?;
-            let mut stmt = catalog
+            };
+
+            let (_lot, _tick, is_fno) = catalog.instrument_meta(&id).unwrap_or((1, 5, false));
+
+            let series_row: Option<(i64, Option<i64>, Option<i64>, u64)> = catalog
                 .conn
-                .prepare("SELECT path FROM partitions WHERE series_id=?1 ORDER BY first_ts")
-                .map_err(|e| SourceError::Other(e.to_string()))?;
-            let files = stmt
-                .query_map([sid], |r| r.get::<_, String>(0))
-                .map_err(|e| SourceError::Other(e.to_string()))?;
-            let mut symbol_rows = Vec::new();
-            for f in files {
-                let path = self
-                    .store
-                    .root
-                    .join(f.map_err(|e| SourceError::Other(e.to_string()))?);
-                for b in read_bars(&path).map_err(|e| SourceError::Other(e.to_string()))? {
-                    if (start..=end).contains(&b.ts) {
-                        symbol_rows.push((
-                            symbol.clone(),
-                            Candle {
-                                timestamp: b.ts,
-                                open: b.open,
-                                high: b.high,
-                                low: b.low,
-                                close: b.close,
-                                volume: b.volume,
-                            },
-                        ));
+                .query_row(
+                    "SELECT id, first_ts, last_ts, rows FROM series WHERE security_id=?1 AND tf=?2",
+                    params![id, tf.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .ok();
+
+            let (sid, first_ts, last_ts) = match series_row {
+                Some((sid, Some(f), Some(l), rows)) if rows > 0 => (sid, f, l),
+                _ => {
+                    let from_d = range
+                        .from
+                        .map(ts_to_ist_date)
+                        .unwrap_or_else(|| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+                    let to_d = range
+                        .to
+                        .map(ts_to_ist_date)
+                        .unwrap_or_else(|| NaiveDate::from_ymd_opt(2099, 12, 31).unwrap());
+                    uncovered_gaps
+                        .entry((from_d, to_d))
+                        .or_default()
+                        .push(symbol.clone());
+                    continue;
+                }
+            };
+
+            let resolved_from = range.from.unwrap_or(first_ts);
+            let resolved_to = range.to.unwrap_or(last_ts);
+            let from_date = ts_to_ist_date(resolved_from);
+            let to_date = ts_to_ist_date(resolved_to);
+
+            let bars_per_session: usize = if tf == Tf::D1 {
+                1
+            } else {
+                let session_mins: usize = if is_fno { 360 } else { 375 };
+                let tf_mins: usize = (tf.seconds() as usize / 60).max(1);
+                (session_mins + tf_mins - 1) / tf_mins
+            };
+
+            let (warmup_start_date, warmup_start_ts) = if self.warmup_bars == 0 {
+                (from_date, resolved_from)
+            } else {
+                let sessions_needed =
+                    (self.warmup_bars + bars_per_session - 1) / bars_per_session + 1;
+                let mut cur = from_date;
+                let mut count = 0;
+                while count < sessions_needed {
+                    cur = cur - chrono::Days::new(1);
+                    if matches!(
+                        cur.weekday(),
+                        chrono::Weekday::Mon
+                            | chrono::Weekday::Tue
+                            | chrono::Weekday::Wed
+                            | chrono::Weekday::Thu
+                            | chrono::Weekday::Fri
+                    ) {
+                        if !catalog.is_holiday(cur).unwrap_or(false) {
+                            count += 1;
+                        }
                     }
                 }
+                let first_covered = catalog
+                    .first_covered_date(sid)
+                    .unwrap_or(None)
+                    .unwrap_or(ts_to_ist_date(first_ts));
+                let clamped_date = cur.max(first_covered);
+                let w_start_ts = local_midnight(clamped_date);
+
+                let have = catalog.bars_before_ts(sid, clamped_date, resolved_from).unwrap_or(0);
+                if have < self.warmup_bars {
+                    if self.allow_gaps {
+                        eprintln!(
+                            "warning: warmup short for {symbol}: have {have} bars, need {}",
+                            self.warmup_bars
+                        );
+                    } else {
+                        warmup_shorts.push((symbol.clone(), have, self.warmup_bars));
+                    }
+                }
+                (clamped_date, w_start_ts)
+            };
+
+            let gaps = missing_date_ranges(&catalog, &id, tf, warmup_start_date, to_date)
+                .unwrap_or_else(|_| vec![(warmup_start_date, to_date)]);
+            if !gaps.is_empty() {
+                if self.allow_gaps {
+                    eprintln!("warning: skipping uncovered symbol {symbol}");
+                    continue;
+                }
+                let merged_gap = (gaps.first().unwrap().0, gaps.last().unwrap().1);
+                uncovered_gaps
+                    .entry(merged_gap)
+                    .or_default()
+                    .push(symbol.clone());
+                continue;
             }
-            symbol_rows.sort_by_key(|x| x.1.timestamp);
-            streams.push(symbol_rows);
+
+            let mut stmt = catalog
+                .conn
+                .prepare(
+                    "SELECT path, checksum, first_ts, last_ts FROM partitions \
+                     WHERE series_id=?1 AND last_ts >= ?2 AND first_ts <= ?3 \
+                     ORDER BY first_ts",
+                )
+                .map_err(|e| SourceError::Other(e.to_string()))?;
+            let parts: Vec<PartitionMetaRow> = stmt
+                .query_map(params![sid, warmup_start_ts, resolved_to], |r| {
+                    Ok(PartitionMetaRow {
+                        path: self.store.root.join(r.get::<_, String>(0)?),
+                        checksum: r.get::<_, String>(1)?,
+                        first_ts: r.get(2)?,
+                        last_ts: r.get(3)?,
+                    })
+                })
+                .map_err(|e| SourceError::Other(e.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| SourceError::Other(e.to_string()))?;
+
+            cursor_data.push((symbol.clone(), parts, warmup_start_ts, resolved_to));
         }
-        Ok(Box::new(KWayMerge::new(streams)))
+
+        if !uncovered_gaps.is_empty() || !warmup_shorts.is_empty() {
+            let mut lines = Vec::new();
+            for ((gap_from, gap_to), mut syms) in uncovered_gaps {
+                syms.sort();
+                let s_list = syms.join(",");
+                lines.push(format!(
+                    "uncovered range for {s_list}; run `algomln data update --symbols {s_list} --tf {} --from {gap_from} --to {gap_to}`",
+                    tf.as_str()
+                ));
+            }
+            for (sym, have, need) in warmup_shorts {
+                lines.push(format!("warmup short for {sym}: have {have} bars, need {need}"));
+            }
+            return Err(SourceError::Other(lines.join("\n")));
+        }
+
+        if cursor_data.is_empty() {
+            return Ok(Box::new(std::iter::empty()));
+        }
+
+        cursor_data.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut cursors = Vec::with_capacity(cursor_data.len());
+        for (symbol, partitions, filter_from, filter_to) in cursor_data {
+            let resident_count = Arc::new(AtomicUsize::new(0));
+            if let Ok(mut counters) = self.resident_counters.lock() {
+                counters.insert(symbol.clone(), resident_count.clone());
+            }
+            cursors.push(CatalogCursor {
+                symbol,
+                partitions,
+                current_partition_idx: 0,
+                current_bars: Vec::new(),
+                bar_idx: 0,
+                filter_from,
+                filter_to,
+                resident_count,
+            });
+        }
+
+        let merge = KWayMerge::new(cursors)?;
+        Ok(Box::new(merge))
     }
+
     fn instrument_rules(
         &self,
         symbols: &[Symbol],
@@ -2197,6 +2720,7 @@ impl CandleSource for CatalogSource {
         }
         out
     }
+
     fn tick_sizes_paise(&self, symbols: &[Symbol]) -> BTreeMap<Symbol, i64> {
         let Ok(c) = self.catalog() else {
             return BTreeMap::new();
@@ -2215,74 +2739,168 @@ impl CandleSource for CatalogSource {
         }
         out
     }
+
     fn fingerprint(&self, symbols: &[Symbol], tf: Timeframe, range: DateRange) -> Fingerprint {
         let Ok(c) = self.catalog() else {
             return Fingerprint("catalog-unavailable".into());
         };
+        let Some(t) = Tf::parse(tf.as_str()) else {
+            return Fingerprint("unsupported-timeframe".into());
+        };
+
+        let mut sorted_symbols = symbols.to_vec();
+        sorted_symbols.sort();
+
         let mut h = Sha256::new();
-        for s in symbols {
+        h.update(b"cf2;");
+
+        let mut partitions_to_hash = BTreeMap::<String, String>::new();
+
+        for s in &sorted_symbols {
+            let (id, _) = match c.resolve(s) {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            let (lot_size, tick_size_paise, is_fno) = c.instrument_meta(&id).unwrap_or((1, 5, false));
+            let series_row: Option<(i64, Option<i64>, Option<i64>, u64)> = c
+                .conn
+                .query_row(
+                    "SELECT id, first_ts, last_ts, rows FROM series WHERE security_id=?1 AND tf=?2",
+                    params![id, t.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .ok();
+
+            let (sid, first_ts, last_ts) = match series_row {
+                Some((sid, Some(f), Some(l), rows)) if rows > 0 => (sid, f, l),
+                _ => continue,
+            };
+
+            let resolved_from = range.from.unwrap_or(first_ts);
+            let resolved_to = range.to.unwrap_or(last_ts);
+            let from_date = ts_to_ist_date(resolved_from);
+            let to_date = ts_to_ist_date(resolved_to);
+
+            let bars_per_session: usize = if t == Tf::D1 {
+                1
+            } else {
+                let session_mins: usize = if is_fno { 360 } else { 375 };
+                let tf_mins: usize = (t.seconds() as usize / 60).max(1);
+                (session_mins + tf_mins - 1) / tf_mins
+            };
+
+            let (warmup_start_date, warmup_start_ts) = if self.warmup_bars == 0 {
+                (from_date, resolved_from)
+            } else {
+                let sessions_needed =
+                    (self.warmup_bars + bars_per_session - 1) / bars_per_session + 1;
+                let mut cur = from_date;
+                let mut count = 0;
+                while count < sessions_needed {
+                    cur = cur - chrono::Days::new(1);
+                    if matches!(
+                        cur.weekday(),
+                        chrono::Weekday::Mon
+                            | chrono::Weekday::Tue
+                            | chrono::Weekday::Wed
+                            | chrono::Weekday::Thu
+                            | chrono::Weekday::Fri
+                    ) {
+                        if !c.is_holiday(cur).unwrap_or(false) {
+                            count += 1;
+                        }
+                    }
+                }
+                let first_covered = c
+                    .first_covered_date(sid)
+                    .unwrap_or(None)
+                    .unwrap_or(ts_to_ist_date(first_ts));
+                let clamped = cur.max(first_covered);
+                (clamped, local_midnight(clamped))
+            };
+
             let _ = write!(
                 h,
-                "{s}:{}:{}:{};",
-                tf.as_str(),
-                range.from.unwrap_or(i64::MIN),
-                range.to.unwrap_or(i64::MAX)
+                "{}|{}|{}|{}|{}|{}|{}|{};",
+                s,
+                t.as_str(),
+                from_date,
+                to_date,
+                warmup_start_date,
+                lot_size,
+                tick_size_paise,
+                if is_fno { 1 } else { 0 }
             );
-            if let Ok((id, _)) = c.resolve(s) {
-                if let Some(t) = Tf::parse(tf.as_str()) {
-                    if let Ok(sid) = c.series(&id, t) {
-                        if let Ok(mut q) = c.conn.prepare(
-                            "SELECT path,checksum FROM partitions WHERE series_id=?1 ORDER BY path",
-                        ) {
-                            if let Ok(it) = q.query_map([sid], |r| {
-                                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                            }) {
-                                for x in it.flatten() {
-                                    let _ = write!(h, "{}:{}", x.0, x.1);
-                                }
-                            }
-                        }
+
+            if let Ok(mut q) = c.conn.prepare(
+                "SELECT path, checksum FROM partitions WHERE series_id=?1 AND last_ts >= ?2 AND first_ts <= ?3 ORDER BY path",
+            ) {
+                if let Ok(it) = q.query_map(params![sid, warmup_start_ts, resolved_to], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                }) {
+                    for x in it.flatten() {
+                        partitions_to_hash.insert(x.0, x.1);
                     }
                 }
             }
         }
+
+        for (path, checksum) in partitions_to_hash {
+            let _ = write!(h, "{path}:{checksum};");
+        }
+
         Fingerprint(format!("sha256:{:x}", h.finalize()))
     }
 }
 
 struct KWayMerge {
-    streams: Vec<Vec<(Symbol, Candle)>>,
-    positions: Vec<usize>,
+    cursors: Vec<CatalogCursor>,
     heap: std::collections::BinaryHeap<std::cmp::Reverse<(i64, Symbol, usize)>>,
+    current_candles: Vec<Option<Candle>>,
 }
+
 impl KWayMerge {
-    fn new(streams: Vec<Vec<(Symbol, Candle)>>) -> Self {
+    fn new(mut cursors: Vec<CatalogCursor>) -> Result<Self, SourceError> {
         let mut heap = std::collections::BinaryHeap::new();
-        let positions = vec![0; streams.len()];
-        for (i, s) in streams.iter().enumerate() {
-            if let Some((sym, c)) = s.first() {
-                heap.push(std::cmp::Reverse((c.timestamp, sym.clone(), i)));
+        let mut current_candles = Vec::with_capacity(cursors.len());
+        for (i, cursor) in cursors.iter_mut().enumerate() {
+            if let Some(candle) = cursor.next_candle()? {
+                heap.push(std::cmp::Reverse((candle.timestamp, cursor.symbol.clone(), i)));
+                current_candles.push(Some(candle));
+            } else {
+                current_candles.push(None);
             }
         }
-        Self {
-            streams,
-            positions,
+        Ok(Self {
+            cursors,
             heap,
-        }
+            current_candles,
+        })
     }
 }
+
 impl Iterator for KWayMerge {
     type Item = Result<(Symbol, Candle), SourceError>;
+
     fn next(&mut self) -> Option<Self::Item> {
         let std::cmp::Reverse((_, _, i)) = self.heap.pop()?;
-        let pos = self.positions[i];
-        let item = self.streams[i][pos].clone();
-        self.positions[i] += 1;
-        if let Some((sym, c)) = self.streams[i].get(self.positions[i]) {
-            self.heap
-                .push(std::cmp::Reverse((c.timestamp, sym.clone(), i)));
+        let candle = self.current_candles[i].take().expect("candle must be present");
+        let sym = self.cursors[i].symbol.clone();
+
+        match self.cursors[i].next_candle() {
+            Ok(Some(next_candle)) => {
+                self.heap.push(std::cmp::Reverse((
+                    next_candle.timestamp,
+                    self.cursors[i].symbol.clone(),
+                    i,
+                )));
+                self.current_candles[i] = Some(next_candle);
+            }
+            Ok(None) => {}
+            Err(e) => return Some(Err(e)),
         }
-        Some(Ok(item))
+
+        Some(Ok((sym, candle)))
     }
 }
 
@@ -2725,14 +3343,24 @@ mod tests {
         let root = temp("atomic");
         let db = root.join("catalog.sqlite");
         let store = Store::new(&root);
-        let ts = NaiveDate::from_ymd_opt(2026, 1, 31)
+        let d1 = NaiveDate::from_ymd_opt(2026, 1, 30).unwrap();
+        let ts1 = d1
+            .and_hms_opt(15, 20, 0)
             .unwrap()
-            .and_hms_opt(18, 29, 0)
+            .and_local_timezone(Kolkata)
+            .single()
             .unwrap()
-            .and_utc()
+            .timestamp();
+        let d2 = NaiveDate::from_ymd_opt(2026, 2, 2).unwrap();
+        let ts2 = d2
+            .and_hms_opt(9, 15, 0)
+            .unwrap()
+            .and_local_timezone(Kolkata)
+            .single()
+            .unwrap()
             .timestamp();
         let parts = store
-            .write_partitions("1", Tf::M1, &[bar(ts, 10.0), bar(ts + 60 * 24, 11.0)])
+            .write_partitions("1", Tf::M1, &[bar(ts1, 10.0), bar(ts2, 11.0)])
             .unwrap();
         assert_eq!(parts.len(), 2);
         {
@@ -2753,11 +3381,13 @@ mod tests {
             for part in &parts {
                 cat.record_partition(sid, &store, part).unwrap();
             }
-            assert!(cat.has_coverage("1", Tf::M1, ts, ts).unwrap());
+            cat.record_session(sid, d1, ts1, ts1 + 60, 1).unwrap();
+            cat.record_session(sid, d2, ts2, ts2 + 60, 1).unwrap();
+            assert!(cat.has_coverage("1", Tf::M1, ts1, ts1).unwrap());
             store.reconcile(&mut cat).unwrap();
             std::fs::remove_file(&parts[0].path).unwrap();
             store.reconcile(&mut cat).unwrap();
-            assert!(!cat.has_coverage("1", Tf::M1, ts, ts).unwrap());
+            assert!(!cat.has_coverage("1", Tf::M1, ts1, ts1).unwrap());
         }
         let _ = fs::remove_dir_all(root);
     }
@@ -3202,6 +3832,7 @@ mod acceptance {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Instant;
+    use algomln::sim::FileSource;
 
     struct TestToken;
     impl TokenProvider for TestToken {
@@ -3483,7 +4114,7 @@ mod acceptance {
         // coverage (it could be a holiday or a pre-listing range). The empty day
         // may be logged as `confirmed_empty`/`no_data` so it is not re-requested
         // forever, but it must not claim real bars exist.
-        let sid = up.catalog.series("1", Tf::M1).unwrap();
+        let sid = up.catalog.ensure_series("1", Tf::M1).unwrap();
         let data_rows: i64 = up
             .catalog
             .conn
@@ -3608,6 +4239,648 @@ mod acceptance {
         let status = cat.status_rows().unwrap();
         assert_eq!(status.len(), symbols.len());
         assert!(status.iter().all(|s| s.bars == 1));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn multi_day_intraday_body(days: &[NaiveDate], bars_per_day: usize) -> String {
+        let mut ts = Vec::new();
+        for &d in days {
+            let base = open_ist(d);
+            for i in 0..bars_per_day {
+                ts.push((base + i as i64 * 60).to_string());
+            }
+        }
+        let n = ts.len();
+        let ones = vec!["1.0"; n].join(",");
+        let twos = vec!["2.0"; n].join(",");
+        let vols = vec!["10.0"; n].join(",");
+        format!(
+            "{{\"open\":[{o}],\"high\":[{h}],\"low\":[{l}],\"close\":[{c}],\"volume\":[{v}],\"timestamp\":[{t}]}}",
+            o = ones,
+            h = twos,
+            l = ones,
+            c = twos,
+            v = vols,
+            t = ts.join(",")
+        )
+    }
+
+    /// T1: Update a symbol over Monday to the following Monday with the mock server,
+    /// then open the same range. Must succeed (regression for D1).
+    #[test]
+    fn t1_update_over_weekend_then_open_must_succeed() {
+        let root = temp("t1-weekend");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let mon1 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let mon2 = NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        let trading_days = vec![
+            mon1,
+            NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 8).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 9).unwrap(),
+            mon2,
+        ];
+        let body = multi_day_intraday_body(&trading_days, 375);
+        let (base, server) = mock_server(vec![(200u16, body)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon1, mon2).unwrap();
+        let outcome = server.join().unwrap();
+        assert_eq!(outcome.served, 1);
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(mon1)),
+            to: Some(open_ist(mon2) + 375 * 60 - 60),
+        };
+        let stream = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
+        let candles: Vec<_> = stream.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(candles.len(), 6 * 375);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T2: A weekday holiday marked non-trading in the calendar inside the range does not block open.
+    #[test]
+    fn t2_weekday_holiday_does_not_block_open() {
+        let root = temp("t2-holiday");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let tue = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let wed = NaiveDate::from_ymd_opt(2026, 1, 7).unwrap();
+        {
+            let cat = Catalog::open(&db).unwrap();
+            cat.conn
+                .execute(
+                    "INSERT INTO calendar (date, is_trading, session_type) VALUES (?1, 0, 'holiday')",
+                    params![tue.to_string()],
+                )
+                .unwrap();
+        }
+        let trading_days = vec![mon, wed];
+        let body = multi_day_intraday_body(&trading_days, 375);
+        let (base, server) = mock_server(vec![(200u16, body)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, wed).unwrap();
+        let _ = server.join().unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(mon)),
+            to: Some(open_ist(wed) + 375 * 60 - 60),
+        };
+        let stream = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
+        let candles: Vec<_> = stream.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(candles.len(), 2 * 375);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T3: Uncovered symbols: the error lists all of them with exact commands, and the catalog file is byte-identical afterwards.
+    #[test]
+    fn t3_uncovered_symbols_error_and_catalog_byte_identical() {
+        let root = temp("t3-uncovered");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        seed_instrument(&db, "2", "XYZ");
+        let before_bytes = fs::read(&db).unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let d1 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let range = DateRange {
+            from: Some(open_ist(d1)),
+            to: Some(open_ist(d2) + 375 * 60 - 60),
+        };
+        let err = match source.open(&["ABC".into(), "XYZ".into()], Timeframe::M1, range) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("ABC"));
+        assert!(err.contains("XYZ"));
+        assert!(err.contains("algomln data update --symbols ABC,XYZ --tf 1m"));
+
+        let after_bytes = fs::read(&db).unwrap();
+        assert_eq!(before_bytes, after_bytes);
+
+        let cat = Catalog::open(&db).unwrap();
+        let count: i64 = cat
+            .conn
+            .query_row("SELECT count(*) FROM series", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T4: Open-ended from and to resolve to the series bounds. An empty series returns Uncovered.
+    #[test]
+    fn t4_open_ended_ranges_and_empty_series() {
+        let root = temp("t4-openended");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        seed_instrument(&db, "2", "EMPTY");
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let tue = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let body = multi_day_intraday_body(&[mon, tue], 375);
+        let (base, server) = mock_server(vec![(200u16, body)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, tue).unwrap();
+        let _ = server.join().unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let stream = source
+            .open(
+                &["ABC".into()],
+                Timeframe::M1,
+                DateRange {
+                    from: None,
+                    to: None,
+                },
+            )
+            .unwrap();
+        let candles: Vec<_> = stream.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(candles.len(), 2 * 375);
+
+        let res = source.open(
+            &["EMPTY".into()],
+            Timeframe::M1,
+            DateRange {
+                from: None,
+                to: None,
+            },
+        );
+        assert!(res.is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T5: Warm-up: an F&O and a non-F&O symbol get different sessions_needed for the same warmup_bars.
+    /// Insufficient history returns WarmupShort. With allow_gaps it warns and continues.
+    #[test]
+    fn t5_warmup_fno_vs_non_fno_and_warmup_short() {
+        let root = temp("t5-warmup");
+        let db = root.join("catalog.sqlite");
+        {
+            let mut cat = Catalog::open(&db).unwrap();
+            cat.refresh_instruments(
+                &[
+                    Scrip {
+                        security_id: "1".into(),
+                        symbol: "FNO_SYM".into(),
+                        lot_size: 25,
+                        tick_size_paise: 5,
+                        instrument: "EQUITY".into(),
+                        is_fno: true,
+                    },
+                    Scrip {
+                        security_id: "2".into(),
+                        symbol: "EQ_SYM".into(),
+                        lot_size: 1,
+                        tick_size_paise: 5,
+                        instrument: "EQUITY".into(),
+                        is_fno: false,
+                    },
+                ],
+                0,
+            )
+            .unwrap();
+        }
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let tue = NaiveDate::from_ymd_opt(2026, 1, 6).unwrap();
+        let body_fno = multi_day_intraday_body(&[mon, tue], 360);
+        let body_eq = multi_day_intraday_body(&[mon, tue], 375);
+        let (base, server) = mock_server(vec![(200u16, body_fno), (200u16, body_eq)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, tue).unwrap();
+        up.update("2", Tf::M1, "EQUITY", mon, tue).unwrap();
+        let _ = server.join().unwrap();
+
+        let mut source = CatalogSource::new(Store::new(&root), &db).with_warmup_bars(365);
+        let range = DateRange {
+            from: Some(open_ist(tue)),
+            to: Some(open_ist(tue) + 360 * 60 - 60),
+        };
+        let err = match source.open(&["FNO_SYM".into()], Timeframe::M1, range) {
+            Ok(_) => panic!("expected warmup short error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("warmup short"));
+
+        let range_eq = DateRange {
+            from: Some(open_ist(tue)),
+            to: Some(open_ist(tue) + 375 * 60 - 60),
+        };
+        let stream = source
+            .open(&["EQ_SYM".into()], Timeframe::M1, range_eq)
+            .unwrap();
+        let candles: Vec<_> = stream.collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(candles.len() > 375);
+
+        source.allow_gaps = true;
+        let stream_fno = source
+            .open(&["FNO_SYM".into()], Timeframe::M1, range)
+            .unwrap();
+        let candles_fno: Vec<_> = stream_fno.collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(!candles_fno.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T6: Bit-identical reruns: two runs give the same candle-sequence hash, the same fingerprint.
+    #[test]
+    fn t6_bit_identical_reruns() {
+        let root = temp("t6-identical");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let body = multi_day_intraday_body(&[mon], 375);
+        let (base, server) = mock_server(vec![(200u16, body)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, mon).unwrap();
+        let _ = server.join().unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(mon)),
+            to: Some(open_ist(mon) + 375 * 60 - 60),
+        };
+        let fp1 = source.fingerprint(&["ABC".into()], Timeframe::M1, range);
+        let fp2 = source.fingerprint(&["ABC".into()], Timeframe::M1, range);
+        assert_eq!(fp1, fp2);
+
+        let stream1 = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
+        let c1: Vec<_> = stream1.collect::<Result<Vec<_>, _>>().unwrap();
+        let stream2 = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
+        let c2: Vec<_> = stream2.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(c1, c2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T7: FileSource and CatalogSource on identical candles produce identical streams.
+    #[test]
+    fn t7_filesource_and_catalogsource_identical() {
+        let root = temp("t7-file-vs-cat");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let body = multi_day_intraday_body(&[mon], 375);
+        let (base, server) = mock_server(vec![(200u16, body)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, mon).unwrap();
+        let _ = server.join().unwrap();
+
+        let cat_source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(mon)),
+            to: Some(open_ist(mon) + 375 * 60 - 60),
+        };
+        let cat_candles: Vec<_> = cat_source
+            .open(&["ABC".into()], Timeframe::M1, range)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let csv_dir = root.join("csv");
+        fs::create_dir_all(&csv_dir).unwrap();
+        let mut wtr = csv::Writer::from_path(csv_dir.join("ABC.csv")).unwrap();
+        wtr.write_record(&["timestamp", "open", "high", "low", "close", "volume"])
+            .unwrap();
+        for (_, c) in &cat_candles {
+            wtr.write_record(&[
+                c.timestamp.to_string(),
+                c.open.to_string(),
+                c.high.to_string(),
+                c.low.to_string(),
+                c.close.to_string(),
+                c.volume.to_string(),
+            ])
+            .unwrap();
+        }
+        wtr.flush().unwrap();
+
+        let file_source = FileSource::new(&csv_dir);
+        let file_candles: Vec<_> = file_source
+            .open(&["ABC".into()], Timeframe::M1, range)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(cat_candles.len(), file_candles.len());
+        for (c_cat, c_file) in cat_candles.iter().zip(file_candles.iter()) {
+            assert_eq!(c_cat.0, c_file.0);
+            assert_eq!(c_cat.1.timestamp, c_file.1.timestamp);
+            assert_eq!(c_cat.1.open, c_file.1.open);
+            assert_eq!(c_cat.1.close, c_file.1.close);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T8: A 360-bar symbol and a 375-bar symbol merge: ties resolved by symbol name.
+    #[test]
+    fn t8_symbol_merge_ties_resolved_by_symbol_name() {
+        let root = temp("t8-merge");
+        let db = root.join("catalog.sqlite");
+        {
+            let mut cat = Catalog::open(&db).unwrap();
+            cat.refresh_instruments(
+                &[
+                    Scrip {
+                        security_id: "1".into(),
+                        symbol: "BBB".into(),
+                        lot_size: 1,
+                        tick_size_paise: 5,
+                        instrument: "EQUITY".into(),
+                        is_fno: false,
+                    },
+                    Scrip {
+                        security_id: "2".into(),
+                        symbol: "AAA".into(),
+                        lot_size: 25,
+                        tick_size_paise: 5,
+                        instrument: "EQUITY".into(),
+                        is_fno: true,
+                    },
+                ],
+                0,
+            )
+            .unwrap();
+        }
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let body_b = multi_day_intraday_body(&[mon], 375);
+        let body_a = multi_day_intraday_body(&[mon], 360);
+        let (base, server) = mock_server(vec![(200u16, body_b), (200u16, body_a)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, mon).unwrap();
+        up.update("2", Tf::M1, "EQUITY", mon, mon).unwrap();
+        let _ = server.join().unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(mon)),
+            to: Some(open_ist(mon) + 375 * 60 - 60),
+        };
+        let stream = source
+            .open(&["BBB".into(), "AAA".into()], Timeframe::M1, range)
+            .unwrap();
+        let merged: Vec<_> = stream.collect::<Result<Vec<_>, _>>().unwrap();
+
+        assert_eq!(merged.len(), 360 + 375);
+        let a_count = merged.iter().filter(|(s, _)| s == "AAA").count();
+        let b_count = merged.iter().filter(|(s, _)| s == "BBB").count();
+        assert_eq!(a_count, 360);
+        assert_eq!(b_count, 375);
+
+        assert_eq!(merged[0].0, "AAA");
+        assert_eq!(merged[1].0, "BBB");
+        assert_eq!(merged[0].1.timestamp, merged[1].1.timestamp);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T9: Flip one byte in a partition: run fails naming the path, catalog unchanged. A deleted partition file fails the same way.
+    #[test]
+    fn t9_corrupted_or_deleted_partition_fails() {
+        let root = temp("t9-corrupt");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let body = multi_day_intraday_body(&[mon], 375);
+        let (base, server) = mock_server(vec![(200u16, body)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, mon).unwrap();
+        let _ = server.join().unwrap();
+
+        let cat_before = fs::read(&db).unwrap();
+
+        let part_file = fs::read_dir(root.join("1m"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("2026-01.parquet");
+        assert!(part_file.exists());
+
+        let mut bytes = fs::read(&part_file).unwrap();
+        bytes[0] ^= 0xFF;
+        fs::write(&part_file, &bytes).unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(mon)),
+            to: Some(open_ist(mon) + 375 * 60 - 60),
+        };
+        let stream = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
+        let err = stream.collect::<Result<Vec<_>, _>>().unwrap_err();
+        let err_str = err.to_string();
+        assert!(err_str.contains("checksum mismatch"));
+        assert!(err_str.contains("data verify"));
+
+        let cat_after = fs::read(&db).unwrap();
+        assert_eq!(cat_before, cat_after);
+
+        fs::remove_file(&part_file).unwrap();
+        let stream2 = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
+        let err2 = stream2.collect::<Result<Vec<_>, _>>().unwrap_err();
+        assert!(err2.to_string().contains("partition file missing"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T10: A corrupted partition of an unrelated symbol does not affect or slow the run.
+    #[test]
+    fn t10_corrupted_partition_of_unrelated_symbol_does_not_affect_run() {
+        let root = temp("t10-unrelated");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "GOOD");
+        seed_instrument(&db, "2", "BAD");
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let body1 = multi_day_intraday_body(&[mon], 375);
+        let body2 = multi_day_intraday_body(&[mon], 375);
+        let (base, server) = mock_server(vec![(200u16, body1), (200u16, body2)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, mon).unwrap();
+        up.update("2", Tf::M1, "EQUITY", mon, mon).unwrap();
+        let _ = server.join().unwrap();
+
+        let bad_part = root.join("1m").join("BAD").join("2026-01.parquet");
+        fs::write(&bad_part, b"garbage data").unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(mon)),
+            to: Some(open_ist(mon) + 375 * 60 - 60),
+        };
+        let stream = source.open(&["GOOD".into()], Timeframe::M1, range).unwrap();
+        let candles: Vec<_> = stream.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(candles.len(), 375);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T11: Fingerprint: a partition outside the window leaves it unchanged. A changed bar or lot size changes it.
+    #[test]
+    fn t11_fingerprint_window_and_metadata_sensitivity() {
+        let root = temp("t11-fingerprint");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let jan = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let feb = NaiveDate::from_ymd_opt(2026, 2, 2).unwrap();
+        let mar = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap();
+        let b_jan = multi_day_intraday_body(&[jan], 375);
+        let b_feb = multi_day_intraday_body(&[feb], 375);
+        let (base, server) = mock_server(vec![(200u16, b_jan), (200u16, b_feb)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", jan, jan).unwrap();
+        up.update("1", Tf::M1, "EQUITY", feb, feb).unwrap();
+        let _ = server.join().unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range_jan = DateRange {
+            from: Some(open_ist(jan)),
+            to: Some(open_ist(jan) + 375 * 60 - 60),
+        };
+        let fp1 = source.fingerprint(&["ABC".into()], Timeframe::M1, range_jan);
+
+        let b_mar = multi_day_intraday_body(&[mar], 375);
+        let (base2, server2) = mock_server(vec![(200u16, b_mar)]);
+        let mut up2 = make_updater(&base2, &db, &root);
+        up2.update("1", Tf::M1, "EQUITY", mar, mar).unwrap();
+        let _ = server2.join().unwrap();
+
+        let fp2 = source.fingerprint(&["ABC".into()], Timeframe::M1, range_jan);
+        assert_eq!(
+            fp1, fp2,
+            "partition outside window must not change fingerprint"
+        );
+
+        {
+            let cat = Catalog::open(&db).unwrap();
+            cat.conn
+                .execute(
+                    "UPDATE instruments SET lot_size=50 WHERE security_id='1'",
+                    [],
+                )
+                .unwrap();
+        }
+        let fp3 = source.fingerprint(&["ABC".into()], Timeframe::M1, range_jan);
+        assert_ne!(fp1, fp3, "changing lot size must change fingerprint");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T12: Mid-run data update makes the start and end fingerprints differ.
+    #[test]
+    fn t12_mid_run_update_fingerprint_differ() {
+        let root = temp("t12-midrun");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let body = multi_day_intraday_body(&[mon], 375);
+        let (base, server) = mock_server(vec![(200u16, body)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, mon).unwrap();
+        let _ = server.join().unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(mon)),
+            to: Some(open_ist(mon) + 375 * 60 - 60),
+        };
+        let fp_start = source.fingerprint(&["ABC".into()], Timeframe::M1, range);
+
+        {
+            let cat = Catalog::open(&db).unwrap();
+            cat.conn
+                .execute(
+                    "UPDATE partitions SET checksum='changed_hash' WHERE id=1",
+                    [],
+                )
+                .unwrap();
+        }
+        let fp_end = source.fingerprint(&["ABC".into()], Timeframe::M1, range);
+        assert_ne!(fp_start, fp_end);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T13: Lazy loading: a counter in the cursor proves at most one partition per symbol is resident at any time.
+    #[test]
+    fn t13_lazy_loading_resident_partition_at_most_one() {
+        let root = temp("t13-lazy");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let jan = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let feb = NaiveDate::from_ymd_opt(2026, 2, 2).unwrap();
+        let mar = NaiveDate::from_ymd_opt(2026, 3, 2).unwrap();
+        let b1 = multi_day_intraday_body(&[jan], 375);
+        let b2 = multi_day_intraday_body(&[feb], 375);
+        let b3 = multi_day_intraday_body(&[mar], 375);
+        let (base, server) = mock_server(vec![(200u16, b1), (200u16, b2), (200u16, b3)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", jan, mar).unwrap();
+        let _ = server.join().unwrap();
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(jan)),
+            to: Some(open_ist(mar) + 375 * 60 - 60),
+        };
+        let stream = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
+        let counter = source
+            .resident_counter_for(&"ABC".into())
+            .expect("resident counter");
+
+        let mut max_resident = 0;
+        let mut total_candles = 0;
+        for item in stream {
+            let _ = item.unwrap();
+            total_candles += 1;
+            let current = counter.load(std::sync::atomic::Ordering::SeqCst);
+            if current > max_resident {
+                max_resident = current;
+            }
+        }
+        assert_eq!(total_candles, 3 * 375);
+        assert_eq!(
+            max_resident, 1,
+            "at most 1 partition per symbol may be resident at any time"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// T14: The catalog file is unchanged (bytes and mtime) after open plus a full run.
+    #[test]
+    fn t14_catalog_file_unchanged_bytes_and_mtime() {
+        let root = temp("t14-unchanged");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+        let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let body = multi_day_intraday_body(&[mon], 375);
+        let (base, server) = mock_server(vec![(200u16, body)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon, mon).unwrap();
+        let _ = server.join().unwrap();
+
+        let before_bytes = fs::read(&db).unwrap();
+        let before_mtime = fs::metadata(&db).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let source = CatalogSource::new(Store::new(&root), &db);
+        let range = DateRange {
+            from: Some(open_ist(mon)),
+            to: Some(open_ist(mon) + 375 * 60 - 60),
+        };
+        let stream = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
+        let candles: Vec<_> = stream.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(candles.len(), 375);
+
+        let after_bytes = fs::read(&db).unwrap();
+        let after_mtime = fs::metadata(&db).unwrap().modified().unwrap();
+        assert_eq!(before_bytes, after_bytes, "catalog bytes must be unchanged");
+        assert_eq!(before_mtime, after_mtime, "catalog mtime must be unchanged");
+
         let _ = fs::remove_dir_all(root);
     }
 }

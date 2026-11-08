@@ -1,0 +1,156 @@
+[33me12857c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m fix(deps): bump parquet and arrow to v60 and resolve security advisories
+[33m47f5d28[m feat(data): adopt detailed Dhan scrip master and track F&O eligibility
+[33mdb80fc6[m chore(branding): update logo
+[33mbf2acb1[m Merge pull request #20 from MelogneStudio/AlgoMLN2
+[33m7220a7c[m Merge branch 'main' into AlgoMLN2
+[33m440b2ac[m[33m ([m[1;32mAlgoMLN2[m[33m)[m fix: low-severity cleanups M2, L2, L3, L5
+[33m9b84505[m perf(sim): incremental per-symbol P&L; document D1 gap policy (M4,M5)
+[33m01a9f1b[m test(data): assert concurrent throttling by total span, not per-gap
+[33md385bd0[m feat(data): add across-symbols concurrency to bulk download (§6)
+[33me8a9c24[m fix(trader): route rupees_to_paise through the integer half-even path
+[33m84d3a22[m docs: add remaining-work handoff note
+[33md89c488[m test(data): loosen request-spacing assertion for receive-side jitter
+[33md57aafe[m docs(data): defer step 5b concurrency semaphore with design note
+[33m0304947[m feat(cli): handle ctrl-c in data bulk by flipping the stop flag
+[33mc8bd99e[m test(data): add mock-server acceptance tests for bulk download
+[33mdd2b748[m fix(cli): use binary date subtraction in last_completed_session
+[33m43e2c95[m feat(cli): wire data bulk command
+[33m15d3579[m feat(data): add bulk downloader, planner cost model and progress
+[33m09729aa[m feat(data): add failures table and configurable budget hard-stop
+[33mfac3e58[m fix(data): make catalog_source bench tractable and report real memory
+[33m5b069c0[m fix(sim): reject duplicate candles within a frame
+[33m4983ba1[m fix(trader): evaluate stop-loss/take-profit in integer paise
+[33m4b0e209[m fix(parser): bound nesting by current paren depth, not historical peak
+[33ma72a47b[m fix(indicators): reset VWAP per IST day and tighten candle validation
+[33m43dcd53[m fix(data): register coverage via catalog API in bench fixture
+[33mddc266c[m feat(data): optimise number of calls
+[33m2f58492[m fix(data): fix status command
+[33m3a034fc[m feat(data): add Dhan NSE history layer
+[33m0706c4c[m feat(simulation): enforce exact monetary precision
+[33md939a30[m refactor(trader): migrate financial ledger to integer paise
+[33mc73be00[m feat(sim): complete deterministic simulation and backtesting pipeline
+[33md2750f7[m feat(trader): flatten portfolio on daily loss breach
+[33m5f5bc7d[m feat(trader): complete portfolio trader lifecycle
+[33mea2bb96[m feat(trader): add portfolio trader foundation
+[33m14df3f7[m feat(engine): add condition-level strategy evaluation
+[33meb5d0a2[m feat(indicators): add indicators, tests and benchmarks
+[33mf87b94b[m feat(dsl): expand test coverage and improve diagnostics
+[33m6763880[m[33m ([m[1;33mtag: [m[1;33mv0.1.0[m[33m)[m feat(dsl): complete frontend test and fuzz coverage
+[33m2835da6[m fix(dsl): resolve predicate and lexical edge cases
+[33mf9cb15c[m feat(dsl): expand syntax support and handle edge cases
+[33m276307d[m fix(dsl): handle edge cases and add tests
+[33mbad8163[m Recreate DSL
+[33m63e4f46[m Clear all code.
+[33m5d5624a[m[33m ([m[1;31morigin/AlgoMLN0[m[33m)[m Update README.md
+[33mce3e8e3[m Fix security problems in plugin runtimes
+[33me09cc6d[m More bug-fixes
+[33m92c8e5c[m I js gotta finish ts real quick
+[33m1d7084c[m Merge pull request #18 from MelogneStudio/bridge-plugin-apis
+[33m289ea2d[m Fix indentation error + extra curly brace
+[33mfe00cc3[m Finished API Bridge :)
+[33me8f70f5[m implement stateless Rhai callback registry and cleanup logic
+[33m7a83355[m Fix flaky execution test and harden plugin execution errors
+[33m08f7203[m Fix Rhai lifecycle hooks to tolerate non-unit return values
+[33m31637d0[m Bridge full plugin capability surface + fix Rhai on_load Arc bug
+[33m41b886e[m Merge branch 'main' of https://github.com/MelogneStudio/AlgoMLN
+[33m291057c[m Update doc for a4 being fixed
+[33mbffb7b7[m Merge pull request #17 from MelogneStudio/bug-b4
+[33mfe0e839[m Fix B4
+[33m9dc2585[m Merge pull request #16 from MelogneStudio/bug-b4
+[33mfd238c5[m Update docs to represent current status
+[33m6409214[m Update rest.rs
+[33mf54a3bc[m Fix Bad Parameters error
+[33mc4274b1[m Fix compile errors
+[33m6bb0e67[m Add new live broker testing command
+[33m3ea4d91[m Merge pull request #14 from MelogneStudio/bug-a4
+[33mab47194[m Fix A4: restore plugin on enable/disable error path to prevent permanent loss
+[33m3bd4e49[m Merge pull request #13 from MelogneStudio/bug-a3
+[33m3e51735[m A3: use relative tolerance for DSL floats
+[33m2d4d653[m Merge pull request #12 from MelogneStudio/fix/b3-wasm-cpu-cap
+[33m76f4278[m C5: Remove BS not needed from WASM
+[33m3f031d7[m C4: Update doc
+[33me50397e[m C4: Update docs for the WASM Upgrade
+[33m28d1ad4[m C3: Fix test bugs and add a new test
+[33m4efbba4[m C2 : Bump WASM 23 -> 48
+[33m626ce25[m Add B3 investigation handoff notes
+[33m5097d58[m Create b3.txt
+[33m801e849[m Fix B3: drive WASM epoch CPU cap with a watchdog thread
+[33mb02e39b[m Update docs for current status
+[33md9da202[m B2 Fix
+[33m262f1ec[m B1 fix
+[33me981834[m Merge plan with Claude's plan for best features
+[33m9ca7e30[m A2 fix
+[33m5cbe297[m A1 fix
+[33mf951d0d[m Add external API audit notes
+[33m679a2fa[m Add total audit notes
+[33m68dee0a[m Finish task 4 lol
+[33mf9dc018[m Fix H3 and C2
+[33m691f909[m Finish phase 7 + fix anomolies
+[33m8e92d1b[m Create dhan_endpoints.md
+[33mb83d1b6[m Phase 7.i dont even know - Add UI item
+[33m22433cb[m Finish Phase 7.6
+[33m5d57926[m finish phase 7.4
+[33m9935f1b[m Fix 7: Loud failure signalling via SessionEventEmitter trait
+[33ma961aa2[m Fix test_lag_error_does_not_break_loop: use capacity-2 channel
+[33mdc9c545[m Fix 6: Tick loop robustness — stale check, lag handling, lock audit
+[33md6fbaa5[m Fix 5: Pause semantics + candle_history bound
+[33m16e13bc[m Fix compile error and warnings from Fix 4
+[33m7d28333[m Live execution hardening: Dhan broker improvements and session refactor
+[33meb6c614[m WIP: ongoing live execution changes
+[33m0401bd8[m Live execution broker and order model updates
+[33me06a632[m Part 1 completed: Dhan broker order polling and live execution hardening
+[33m85be718[m Part 2 & 3 completed
+[33m526cef9[m Starting part 1 of **REAL MONEY execution**
+[33m7f7b498[m Stage 3 of risk control finished
+[33ma49f034[m Update Docs (All of them)
+[33m57b0d92[m Stage 1 of better position sizing and exits
+[33m4125361[m Add portfolio engine and index IPC commands
+[33mf71e5f9[m Part 1 of Multi-Symbol live trading finished
+[33m16b8353[m Fixed logging security concern (issue #7 )
+[33m98afd4e[m Finish Phase 11 of plugin system
+[33ma7d3221[m update package-lock to fix vulnerabilities
+[33ma88de2b[m Finish phase 10 and phase 11
+[33mfdbdbb5[m Add prompts planned to use and used
+[33mb3639a1[m Update README lwk
+[33m45149d2[m Plugin system: end stage 9
+[33m46d35c0[m fixing stage 8 and started 9
+[33m1052726[m phase 6 7 complete LOL
+[33mf02de03[m Implement stage 5 of plugins
+[33m1600a22[m Merge branch 'main' of https://github.com/WTRMLNv1/AlgoMLN
+[33mb52bd2f[m useless
+[33ma193bee[m Update CLAUDE.md with editing instructions
+[33md89ac68[m wired backend <-> frontend
+[33m3ef3b07[m i left random stuff in UI sorry
+[33m6c623dc[m updated readme hehe
+[33mccf9524[m fix few dependancy errors and stuff
+[33m9b9cfdf[m Merge pull request #4 from WTRMLNv1/fix/glass-window-and-scale
+[33mf2d74be[m Fix glass bg, window sizing, remove user scale slider
+[33ma15c4d9[m Fix opaque webview bg, window sizing, and lock UI scale to screen
+[33mbc005eb[m Merge branch 'main' of https://github.com/WTRMLNv1/AlgoMLN
+[33m537440e[m fixing UI, still broken
+[33mda75a42[m Add LICENSE
+[33m55db655[m Add code of conduct
+[33mec9164c[m Create SECURITY.md for clarity and completeness
+[33mc63de66[m Update issue templates
+[33me4d36bb[m tryna fix ui lwk
+[33m770ee08[m finished UI (i hope)
+[33mc2a7d64[m (trying) adding UI
+[33m35ef0bc[m Add PrevOpen PrevHigh & PrevLow
+[33maae09d2[m Tried using gemini; crashed my pc
+[33mf6a3a72[m Add backtest analytics and better log
+[33m521f3b8[m Add analytics plan
+[33m23b3dd0[m Added prev close and rel volume
+[33mc9f017d[m Add data fetch to --backtest
+[33m7519303[m Rewrite README: restructure and expand docs
+[33mc147991[m Enhance CLI power while UI is wip
+[33mebd1c3d[m Fixed O(N^2) performance issue!
+[33mcb511ca[m Add timestamps to backtest to see bottleneck (bug)
+[33m9a05663[m Add README
+[33m6ab367f[m Adding paper backtesting
+[33m73af618[m Fix backtesting (again)
+[33me4fa0ae[m Fixing tests
+[33m31cb363[m Merge branch 'main' of https://github.com/WTRMLNv1/AlgoMLN
+[33mec65bcc[m Added scripting layer, and trade engine
+[33md14d8e6[m Delete .env
+[33m042d7bb[m Add indicator and charting layer (Tradingview)
+[33md11b551[m Initial commit

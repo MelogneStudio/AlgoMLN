@@ -90,17 +90,10 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let code = std::fs::read_to_string(&strategy)?;
     let program = algomln::compile(&code).map_err(|e| format!("strategy compile failed: {e}"))?;
     let to = date("--to")?.map(|t| t.saturating_add(86_399));
-    let mut range = DateRange {
+    let range = DateRange {
         from: date("--from")?,
         to,
     };
-    if let Some(from) = range.from {
-        let daily = matches!(tf, Timeframe::D1);
-        let warm = program.warmup_bars() as i64;
-        let sessions = (warm + if daily { 1 } else { 359 }) / if daily { 1 } else { 360 };
-        let extra = sessions.saturating_mul(86_400 * 7 / 5 + 86_400);
-        range.from = Some(from.saturating_sub(extra));
-    }
     let symbols: Vec<String> = opts
         .get("--symbols")
         .map(|s| {
@@ -111,6 +104,18 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 .collect()
         })
         .unwrap_or_else(|| program.symbols().into_iter().map(str::to_owned).collect());
+    let warmup_bars = opts
+        .get("--warmup-bars")
+        .map_or(Ok(program.warmup_bars()), |s| {
+            s.parse().map_err(|e| format!("invalid --warmup-bars: {e}"))
+        })?;
+    let mut catalog = algomln_data::CatalogSource::new(
+        algomln_data::Store::new(&data),
+        data.join("catalog.sqlite"),
+    );
+    catalog.warmup_bars = warmup_bars;
+    catalog.allow_gaps = opts.contains_key("--allow-gaps");
+
     if opts.contains_key("--update") {
         let master = opts
             .get("--master")
@@ -125,80 +130,83 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         let db = data.join("catalog.sqlite");
         let mut cat = algomln_data::Catalog::open(&db)?;
         cat.refresh_instruments(&rows, chrono::Utc::now().timestamp())?;
-        let to = opts
+        let to_d = opts
             .get("--to")
             .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
             .transpose()?
             .unwrap_or_else(|| chrono::Utc::now().date_naive());
-        let from = opts
+        let from_d = opts
             .get("--from")
             .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
             .transpose()?
-            .unwrap_or(to - chrono::Days::new(365 * 5));
-        let base =
-            std::env::var("DHAN_API_BASE").unwrap_or_else(|_| "https://api.dhan.co/v2".into());
-        let token = std::sync::Arc::new(dhan_api::KeychainEnvTokenProvider::default());
-        let reference_id = cat
-            .resolve(
-                opts.get("--reference")
-                    .map(String::as_str)
-                    .unwrap_or("RELIANCE"),
-            )
-            .map(|x| x.0)
-            .ok();
-        if let Some(reference_id) = reference_id.as_deref() {
-            if !symbols
-                .iter()
-                .any(|s| cat.resolve(s).is_ok_and(|(id, _)| id == reference_id))
-            {
-                let instrument = cat.instrument(reference_id)?;
-                algomln_data::Updater {
+            .unwrap_or(to_d - chrono::Days::new(365 * 5));
+
+        let data_tf = algomln_data::Tf::parse(tf.as_str()).unwrap();
+        let mut symbols_with_gaps = Vec::new();
+        for symbol in &symbols {
+            let gaps = catalog.gaps(symbol, data_tf, from_d, to_d);
+            if !gaps.is_empty() {
+                symbols_with_gaps.push((symbol, gaps));
+            }
+        }
+
+        if !symbols_with_gaps.is_empty() {
+            let base =
+                std::env::var("DHAN_API_BASE").unwrap_or_else(|_| "https://api.dhan.co/v2".into());
+            let token = std::sync::Arc::new(dhan_api::KeychainEnvTokenProvider::default());
+            let reference_id = cat
+                .resolve(
+                    opts.get("--reference")
+                        .map(String::as_str)
+                        .unwrap_or("RELIANCE"),
+                )
+                .map(|x| x.0)
+                .ok();
+            if let Some(reference_id) = reference_id.as_deref() {
+                if !symbols
+                    .iter()
+                    .any(|s| cat.resolve(s).is_ok_and(|(id, _)| id == reference_id))
+                {
+                    let instrument = cat.instrument(reference_id)?;
+                    algomln_data::Updater {
+                        client: Box::new(dhan_api::DhanClient::with_base(token.clone(), &base)?),
+                        catalog: algomln_data::Catalog::open(&db)?,
+                        store: algomln_data::Store::new(&data),
+                        max_retries: 3,
+                        margin_seconds: 30,
+                        reference_symbol_id: Some(reference_id.to_owned()),
+                        budget_cap: algomln_data::DEFAULT_BUDGET_CAP,
+                    }
+                    .update(
+                        reference_id,
+                        data_tf,
+                        &instrument,
+                        from_d,
+                        to_d,
+                    )?;
+                }
+            }
+            for (symbol, gaps) in symbols_with_gaps {
+                let (id, _) = cat.resolve(symbol)?;
+                let instrument = cat.instrument(&id)?;
+                let mut updater = algomln_data::Updater {
                     client: Box::new(dhan_api::DhanClient::with_base(token.clone(), &base)?),
                     catalog: algomln_data::Catalog::open(&db)?,
                     store: algomln_data::Store::new(&data),
                     max_retries: 3,
                     margin_seconds: 30,
-                    reference_symbol_id: Some(reference_id.to_owned()),
+                    reference_symbol_id: reference_id.clone(),
                     budget_cap: algomln_data::DEFAULT_BUDGET_CAP,
+                };
+                for (gap_from, gap_to) in gaps {
+                    updater.update(&id, data_tf, &instrument, gap_from, gap_to)?;
                 }
-                .update(
-                    reference_id,
-                    algomln_data::Tf::parse(tf.as_str()).unwrap(),
-                    &instrument,
-                    from,
-                    to,
-                )?;
             }
-        }
-        for symbol in &symbols {
-            let (id, _) = cat.resolve(symbol)?;
-            let instrument = cat.instrument(&id)?;
-            algomln_data::Updater {
-                client: Box::new(dhan_api::DhanClient::with_base(token.clone(), &base)?),
-                catalog: algomln_data::Catalog::open(&db)?,
-                store: algomln_data::Store::new(&data),
-                max_retries: 3,
-                margin_seconds: 30,
-                reference_symbol_id: reference_id.clone(),
-                budget_cap: algomln_data::DEFAULT_BUDGET_CAP,
-            }
-            .update(
-                &id,
-                algomln_data::Tf::parse(tf.as_str()).unwrap(),
-                &instrument,
-                from,
-                to,
-            )?;
         }
     }
     let mut legacy = FileSource::new(data.clone());
     legacy.csv_tz = opts.get("--csv-tz").cloned();
     legacy.skip_bad = opts.contains_key("--skip-bad");
-    let mut catalog = algomln_data::CatalogSource::new(
-        algomln_data::Store::new(&data),
-        data.join("catalog.sqlite"),
-    );
-    catalog.allow_gaps = opts.contains_key("--allow-gaps");
     let src: &dyn algomln::sim::CandleSource =
         if opts.contains_key("--csv-tz") || opts.contains_key("--skip-bad") {
             &legacy
@@ -260,11 +268,49 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         },
         debug_invariants: opts.contains_key("--debug-invariants"),
     };
-    let result = sim::run(&program, src, config, Some(symbols))?;
-    println!(
-        "dataset fingerprint: {}",
-        result.manifest["source_fingerprint"]
-    );
+    let fp_start = src.fingerprint(&symbols, config.timeframe, config.range);
+    println!("dataset fingerprint: {fp_start}");
+    if let Ok(info) = catalog.resolved_info(&symbols, config.timeframe, config.range) {
+        let from_str = info
+            .resolved_from
+            .map(|t| {
+                chrono::DateTime::from_timestamp(t, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|| t.to_string())
+            })
+            .unwrap_or_else(|| "none".into());
+        let to_str = info
+            .resolved_to
+            .map(|t| {
+                chrono::DateTime::from_timestamp(t, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|| t.to_string())
+            })
+            .unwrap_or_else(|| "none".into());
+        let warmup_str = info
+            .warmup_start
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "none".into());
+        println!("resolved range: {from_str} ..= {to_str}");
+        println!("warmup start: {warmup_str}");
+        println!(
+            "symbols: total={}, F&O={}, non-F&O={}",
+            symbols.len(),
+            info.fno_count,
+            info.non_fno_count
+        );
+    }
+    let tf = config.timeframe;
+    let range = config.range;
+    let mut result = sim::run(&program, src, config, Some(symbols.clone()))?;
+    let fp_end = src.fingerprint(&symbols, tf, range);
+    println!("dataset fingerprint (end): {fp_end}");
+    if fp_start != fp_end {
+        eprintln!("WARNING: dataset fingerprint changed mid-run! (data update detected)");
+        if let Some(obj) = result.manifest.as_object_mut() {
+            obj.insert("fingerprint_changed".into(), serde_json::Value::Bool(true));
+        }
+    }
     sim::write_results(
         opts.get("--out")
             .map(PathBuf::from)
