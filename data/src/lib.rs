@@ -4950,4 +4950,96 @@ mod acceptance {
 
         let _ = fs::remove_dir_all(root);
     }
+
+    /// T15: Regression test: CatalogSource returns bars before the range start for warmup.
+    /// In a simulation with --from and --warmup-bars, CatalogSource supplies the requested
+    /// warmup bars from prior sessions without failing with WarmupShort.
+    #[test]
+    fn t15_catalog_source_warmup_before_range_start() {
+        let root = temp("t15-warmup-regression");
+        let db = root.join("catalog.sqlite");
+        seed_instrument(&db, "1", "ABC");
+
+        // Two weeks of trading days:
+        // Week 1 (prior week): Mon 2026-01-05 .. Fri 2026-01-09
+        // Week 2 (target week): Mon 2026-01-12 .. Fri 2026-01-16
+        let mon1 = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let mon2 = NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        let fri2 = NaiveDate::from_ymd_opt(2026, 1, 16).unwrap();
+        let trading_days = vec![
+            mon1,
+            NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 7).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 8).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 9).unwrap(),
+            mon2,
+            NaiveDate::from_ymd_opt(2026, 1, 13).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 14).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            fri2,
+        ];
+        let body = multi_day_intraday_body(&trading_days, 375);
+        let (base, server) = mock_server(vec![(200u16, body)]);
+        let mut up = make_updater(&base, &db, &root);
+        up.update("1", Tf::M1, "EQUITY", mon1, fri2).unwrap();
+        let outcome = server.join().unwrap();
+        assert_eq!(outcome.served, 1);
+
+        let range = DateRange {
+            from: Some(open_ist(mon2)),
+            to: Some(open_ist(fri2) + 375 * 60 - 60),
+        };
+
+        // Direct check: CatalogSource::open with warmup_bars = 20 returns candles before range start.
+        let source = CatalogSource::new(Store::new(&root), &db).with_warmup_bars(20);
+        let stream = source.open(&["ABC".into()], Timeframe::M1, range).unwrap();
+        let candles: Vec<_> = stream.collect::<Result<Vec<_>, _>>().unwrap();
+        let range_start = open_ist(mon2);
+        let warmup_bars_count = candles.iter().filter(|(_, c)| c.timestamp < range_start).count();
+        assert!(
+            warmup_bars_count >= 20,
+            "CatalogSource must return warmup bars before range start, got {warmup_bars_count}"
+        );
+
+        // Simulation check: sim::run with CatalogSource and warmup_bars = 20 succeeds.
+        let program = algomln::compile(
+            "STRATEGY \"WarmupTest\"\nTRADE_IN ABC\nWHEN close > sma(20)\nBUY 1\n",
+        )
+        .unwrap();
+        assert_eq!(program.warmup_bars(), 20);
+
+        let config = algomln::sim::RunConfig {
+            timeframe: Timeframe::M1,
+            range,
+            initial_cash: 100_000.0,
+            warmup_bars: 20,
+            latency: 1,
+            slippage_bps: 0.0,
+            fee_model: algomln::sim::FeeModel::default(),
+            partial_fills_pct: None,
+            gap_policy: algomln::sim::GapPolicy::None,
+            debug_invariants: true,
+        };
+
+        let res = algomln::sim::run(&program, &source, config.clone(), Some(vec!["ABC".into()]));
+        assert!(
+            res.is_ok(),
+            "sim::run must succeed with catalog warmup: {:?}",
+            res.err()
+        );
+
+        let res_pre = algomln::sim::run_precomputed(
+            &program,
+            &source,
+            config,
+            Some(vec!["ABC".into()]),
+        );
+        assert!(
+            res_pre.is_ok(),
+            "sim::run_precomputed must succeed with catalog warmup: {:?}",
+            res_pre.err()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

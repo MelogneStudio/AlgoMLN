@@ -1160,10 +1160,7 @@ pub fn run_precomputed(
     let stream = source.open(
         &symbols,
         config.timeframe,
-        DateRange {
-            from: None,
-            to: config.range.to,
-        },
+        config.range,
     )?;
     let stream = limit_to_warmup_window(stream, config.range.from, config.warmup_bars);
     let mut series = BTreeMap::<Symbol, Vec<Candle>>::new();
@@ -1252,10 +1249,7 @@ fn run_internal(
     let stream = source.open(
         &symbols,
         config.timeframe,
-        DateRange {
-            from: None,
-            to: config.range.to,
-        },
+        config.range,
     )?;
     let stream = limit_to_warmup_window(stream, config.range.from, config.warmup_bars);
     let mut engines: BTreeMap<Symbol, Engine> = symbols
