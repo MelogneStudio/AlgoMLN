@@ -259,6 +259,7 @@ pub struct Trader {
     prev_levels: BTreeMap<(Symbol, RuleId), bool>,
     positions: BTreeMap<Symbol, Position>,
     orders: BTreeMap<OrderId, Pending>,
+    completed_orders: BTreeMap<OrderId, OrderState>,
     last_prices: BTreeMap<Symbol, (f64, i64)>,
     cash_paise: i64,
     initial_cash_paise: i64,
@@ -282,6 +283,7 @@ impl Trader {
             prev_levels: BTreeMap::new(),
             positions: BTreeMap::new(),
             orders: BTreeMap::new(),
+            completed_orders: BTreeMap::new(),
             last_prices: BTreeMap::new(),
             cash_paise,
             initial_cash_paise: cash_paise,
@@ -332,7 +334,10 @@ impl Trader {
         self.positions.get(s)
     }
     pub fn order_state(&self, id: &str) -> Option<OrderState> {
-        self.orders.get(id).map(|o| o.state)
+        self.orders
+            .get(id)
+            .map(|o| o.state)
+            .or_else(|| self.completed_orders.get(id).copied())
     }
     pub fn on_order_event(&mut self, ev: OrderEvent) -> Vec<TraderEvent> {
         let id = event_id(&ev).to_owned();
@@ -422,7 +427,10 @@ impl Trader {
             self.apply_fill(&s, side, q, rupees_to_paise(p), rupees_to_paise(fees))
         }
         if self.orders.get(&id).is_some_and(|o| !o.live()) {
-            events.push(TraderEvent::OrderClosed { id })
+            events.push(TraderEvent::OrderClosed { id: id.clone() });
+            if let Some(o) = self.orders.remove(&id) {
+                self.completed_orders.insert(id, o.state);
+            }
         }
         events
     }

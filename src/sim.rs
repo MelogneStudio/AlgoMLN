@@ -2601,6 +2601,10 @@ fn build_metrics(
     let n = result.symbol_equity.len().max(1) as i64;
     let allocation_base = start_paise / n;
     let allocation_remainder = start_paise.rem_euclid(n);
+    let mut trades_by_symbol = BTreeMap::<&str, Vec<&Trade>>::new();
+    for t in &result.trades {
+        trades_by_symbol.entry(t.symbol.as_str()).or_default().push(t);
+    }
     for (index, (symbol, series)) in result.symbol_equity.iter().enumerate() {
         let allocation_paise = allocation_base + i64::from((index as i64) < allocation_remainder);
         let final_eq_paise = series.last().map_or(allocation_paise, |p| p.equity_paise);
@@ -2612,11 +2616,7 @@ fn build_metrics(
                 dd = dd.max((peak_paise - p.equity_paise) as f64 / peak_paise as f64 * 100.0)
             }
         }
-        let ts: Vec<_> = result
-            .trades
-            .iter()
-            .filter(|t| &t.symbol == symbol)
-            .collect();
+        let ts = trades_by_symbol.remove(symbol.as_str()).unwrap_or_default();
         let mut item = stats(ts);
         if let Some(obj) = item.as_object_mut() {
             let net_pnl_paise = final_eq_paise - allocation_paise;
@@ -2667,12 +2667,23 @@ fn build_metrics(
     if let Some(first) = result.equity.first() {
         if let Some(last) = result.equity.last() {
             total_seconds = (last.ts - first.ts).max(0) as f64;
+            let series_list: Vec<&[SymbolEquityPoint]> =
+                result.symbol_equity.values().map(Vec::as_slice).collect();
+            let mut cursors = vec![0usize; series_list.len()];
             for w in result.equity.windows(2) {
-                let any = result.symbol_equity.values().any(|s| {
-                    s.iter()
-                        .find(|x| x.ts == w[0].ts)
-                        .is_some_and(|x| x.position_qty > 0)
-                });
+                let ts = w[0].ts;
+                let mut any = false;
+                for (idx, series) in series_list.iter().enumerate() {
+                    while cursors[idx] < series.len() && series[cursors[idx]].ts < ts {
+                        cursors[idx] += 1;
+                    }
+                    if cursors[idx] < series.len()
+                        && series[cursors[idx]].ts == ts
+                        && series[cursors[idx]].position_qty > 0
+                    {
+                        any = true;
+                    }
+                }
                 if any {
                     held_seconds += (w[1].ts - w[0].ts).max(0) as f64;
                 }
