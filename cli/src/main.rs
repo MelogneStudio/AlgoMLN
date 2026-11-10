@@ -36,7 +36,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         if matches!(
             k.as_str(),
-            "--skip-bad" | "--debug-invariants" | "--update" | "--allow-gaps"
+            "--skip-bad" | "--debug-invariants" | "--update" | "--allow-gaps" | "--timings"
         ) {
             opts.insert(k, "true".into());
             continue;
@@ -311,11 +311,20 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             obj.insert("fingerprint_changed".into(), serde_json::Value::Bool(true));
         }
     }
+    let out_start = std::time::Instant::now();
     sim::write_results(
         opts.get("--out")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("run-output")),
         &result,
     )?;
+    let out_time = out_start.elapsed();
+    if opts.contains_key("--timings") {
+        println!("timings:");
+        println!("  load/merge:        {:?}", result.timings.load_merge);
+        println!("  engine+indicators: {:?}", result.timings.engine_indicators);
+        println!("  trader:            {:?}", result.timings.trader);
+        println!("  output writing:    {:?}", out_time);
+    }
     Ok(())
 }

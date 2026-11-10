@@ -1065,6 +1065,12 @@ pub struct SymbolEquityPoint {
     pub equity_paise: i64,
     pub position_qty: i64,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StageTimings {
+    pub load_merge: std::time::Duration,
+    pub engine_indicators: std::time::Duration,
+    pub trader: std::time::Duration,
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct RunResult {
     pub fills: Vec<Fill>,
@@ -1075,6 +1081,7 @@ pub struct RunResult {
     pub source_stats: SourceStats,
     pub trades: Vec<Trade>,
     pub symbol_equity: BTreeMap<Symbol, Vec<SymbolEquityPoint>>,
+    pub timings: StageTimings,
 }
 #[derive(Debug, Error)]
 pub enum SimError {
@@ -1246,12 +1253,20 @@ fn run_internal(
     if std::env::var_os("ALGOMLN_BENCHMARK").is_none() {
         eprintln!("source fingerprint: {}", fp.0);
     }
+    let mut load_time = std::time::Duration::ZERO;
+    let mut engine_time = std::time::Duration::ZERO;
+    let mut trader_time = std::time::Duration::ZERO;
+
+    let t_load_start = std::time::Instant::now();
     let stream = source.open(
         &symbols,
         config.timeframe,
         config.range,
     )?;
-    let stream = limit_to_warmup_window(stream, config.range.from, config.warmup_bars);
+    let mut stream = limit_to_warmup_window(stream, config.range.from, config.warmup_bars);
+    load_time += t_load_start.elapsed();
+
+    let t_trader_init = std::time::Instant::now();
     let mut engines: BTreeMap<Symbol, Engine> = symbols
         .iter()
         .map(|s| Ok((s.clone(), Engine::new(program, s.clone())?)))
@@ -1285,6 +1300,7 @@ fn run_internal(
     // replaying the whole fills vector per symbol per frame (was O(frames x fills)).
     let mut symbol_pnl_state = BTreeMap::<Symbol, SymbolPnlAccum>::new();
     let mut processed_fills = 0usize;
+    trader_time += t_trader_init.elapsed();
     let mut process = |ts: i64,
                        candles: &BTreeMap<Symbol, Candle>,
                        trader: &mut Trader,
@@ -1299,8 +1315,11 @@ fn run_internal(
                        day: &mut Option<i64>,
                        observed: &mut BTreeMap<Symbol, usize>,
                        symbol_pnl_state: &mut BTreeMap<Symbol, SymbolPnlAccum>,
-                       processed_fills: &mut usize|
+                       processed_fills: &mut usize,
+                       engine_time: &mut std::time::Duration,
+                       trader_time: &mut std::time::Duration|
      -> Result<(), SimError> {
+        let t_trader_frame = std::time::Instant::now();
         let d = ist_day(ts);
         if *day != Some(d) {
             trader.start_day(d);
@@ -1335,8 +1354,11 @@ fn run_internal(
             }
             events.extend(trader.on_order_event(ev));
         }
+        *trader_time += t_trader_frame.elapsed();
+
         for (s, c) in candles {
             last.insert(s.clone(), *c);
+            let t_eng = std::time::Instant::now();
             let frame = if let Some(frames) = precomputed.as_mut() {
                 frames.remove(&(s.clone(), c.timestamp)).ok_or_else(|| {
                     SimError::Other(format!(
@@ -1350,6 +1372,9 @@ fn run_internal(
                     .expect("configured symbol")
                     .on_candle(c)?
             };
+            *engine_time += t_eng.elapsed();
+
+            let t_trader_item = std::time::Instant::now();
             let count = observed.entry(s.clone()).or_default();
             let mode = if let Some(from) = config.range.from {
                 if ts < from {
@@ -1384,7 +1409,9 @@ fn run_internal(
                     )));
                 }
             }
+            *trader_time += t_trader_item.elapsed();
         }
+        let t_trader_tail = std::time::Instant::now();
         let mut pos_value_paise = 0i128;
         for s in &symbols {
             if let (Some(p), Some(c)) = (trader.position(s), last.get(s)) {
@@ -1466,9 +1493,16 @@ fn run_internal(
         if config.debug_invariants || cfg!(test) {
             check_invariants(trader, &symbols, fills, ts)?;
         }
+        *trader_time += t_trader_tail.elapsed();
         Ok(())
     };
-    for item in stream {
+    loop {
+        let t_load = std::time::Instant::now();
+        let next_item = stream.next();
+        load_time += t_load.elapsed();
+        let Some(item) = next_item else {
+            break;
+        };
         let (s, c) = item?;
         if current_ts.is_some_and(|t| t != c.timestamp) {
             process(
@@ -1487,6 +1521,8 @@ fn run_internal(
                 &mut observed,
                 &mut symbol_pnl_state,
                 &mut processed_fills,
+                &mut engine_time,
+                &mut trader_time,
             )?;
             candles.clear();
         }
@@ -1516,8 +1552,11 @@ fn run_internal(
             &mut observed,
             &mut symbol_pnl_state,
             &mut processed_fills,
+            &mut engine_time,
+            &mut trader_time,
         )?;
     }
+    let t_trader_end = std::time::Instant::now();
     if config.debug_invariants || cfg!(test) {
         if let Some(last_point) = equity.last() {
             let mut qty = BTreeMap::<Symbol, u64>::new();
@@ -1601,6 +1640,7 @@ fn run_internal(
         eprintln!("source fingerprint: {}", fp.0);
     }
     let trades = derive_trades(&fills);
+    trader_time += t_trader_end.elapsed();
     Ok(RunResult {
         fills,
         equity,
@@ -1610,6 +1650,11 @@ fn run_internal(
         source_stats,
         trades,
         symbol_equity,
+        timings: StageTimings {
+            load_merge: load_time,
+            engine_indicators: engine_time,
+            trader: trader_time,
+        },
     })
 }
 fn ist_day(ts: i64) -> i64 {
