@@ -1,0 +1,9 @@
+STRATEGY "SMA 20 Trend Following"
+
+TRADE_IN RELIANCE
+
+WHEN close > sma(20)
+BUY 1
+
+WHEN close < sma(20)
+SELL ALL
