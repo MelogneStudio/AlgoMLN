@@ -6,3 +6,6 @@ dist/
 /sample-data/api-scrip-master.csv
 data/catalog.sqlite
 data/candles/
+run-output/
+data/catalog.sqlite-shm
+data/catalog.sqlite-wal
