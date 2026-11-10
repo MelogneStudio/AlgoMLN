@@ -142,8 +142,12 @@ cargo run -p algomln-cli -- data status [--data <DIR>]
 - Path to `catalog.sqlite`
 - Total equities and F&O-eligible count
 - Stored series list (`<symbol> <tf>: <bars> bars`)
-- Date coverage intervals (`<from>..<to> <kind>`)
-- Data quality flags (e.g. gaps, suspicious sessions)
+- Date coverage intervals (`  <from>..<to> <kind>`)
+- Data quality rows formatted as `quality <symbol> <tf> <date> <kind>`:
+  - `session_regime_change`: Session length regime change detected (e.g. 360 vs 375 minute bars).
+  - `reconcile_missing_or_checksum`: Partition removed or flagged due to missing file or checksum mismatch.
+  - `reconcile_orphan_file`: Unindexed Parquet partition discovered on disk during verification.
+  - `missing_symbol_session`: Trading session confirmed empty after retries.
 
 ---
 
@@ -199,6 +203,7 @@ cargo run -p algomln-cli -- run <strategy.algomln> [options]
 | `--gap-policy <POLICY>`| `none` | Policy for missing intraday candles: `none` or `fill` (flat forward-fill within session). |
 | `--allow-gaps` | Flag | Permit missing ranges in data without halting execution. |
 | `--debug-invariants` | Flag | Enables internal simulation invariant checks during the run. |
+| `--timings` | Flag | Prints per-stage wall clock times at completion (`load/merge`, `engine+indicators`, `trader`, `output writing`). |
 | `--out <DIR>` | `run-output` | Directory where backtest outputs (metrics, trades, equity curve) are written. |
 
 ### 3.2. Automatic Pre-Run Data Update (`--update`)
@@ -215,6 +220,20 @@ cargo run -p algomln-cli -- run examples/momentum.algomln \
 Used when streaming from raw non-catalog CSV files:
 - `--csv-tz <TZ>`: Timezone for CSV timestamps (e.g. `Asia/Kolkata`).
 - `--skip-bad`: Ignores malformed bars instead of terminating.
+
+### 3.4. Wall Time Diagnostics (`--timings`)
+Pass `--timings` to print detailed per-stage wall time benchmarks after writing artifacts:
+```bash
+cargo run -p algomln-cli -- run examples/momentum.algomln --symbols RELIANCE,TCS --timings
+```
+Output:
+```text
+timings:
+  load/merge:        21.78ms
+  engine+indicators: 10.62ms
+  trader:            237.58ms
+  output writing:    144.32ms
+```
 
 ---
 
