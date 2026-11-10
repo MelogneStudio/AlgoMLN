@@ -5,3 +5,4 @@ dist/
 /dhan-smoke/
 /sample-data/api-scrip-master.csv
 data/catalog.sqlite
+data/candles/
