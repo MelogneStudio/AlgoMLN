@@ -41,8 +41,8 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     println!("  {}..{} {}", range.from, range.to, range.kind);
                 }
             }
-            for (kind, detail) in cat.quality_rows()? {
-                println!("quality {kind}: {detail}");
+            for row in cat.quality_rows()? {
+                println!("quality {} {} {} {}", row.symbol, row.tf, row.date, row.kind);
             }
         }
         "verify" => {

@@ -183,6 +183,13 @@ pub struct SeriesStatus {
     pub bars: u64,
     pub coverage: Vec<CoverageRange>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QualityRow {
+    pub symbol: String,
+    pub tf: String,
+    pub date: String,
+    pub kind: String,
+}
 
 pub struct Catalog {
     conn: Connection,
@@ -659,11 +666,32 @@ impl Catalog {
         }
         Ok(true)
     }
-    pub fn quality_rows(&self) -> Result<Vec<(String, String)>, DataError> {
-        let mut q = self
-            .conn
-            .prepare("SELECT kind,detail FROM quality ORDER BY id")?;
-        let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    pub fn quality_rows(&self) -> Result<Vec<QualityRow>, DataError> {
+        let mut q = self.conn.prepare(
+            "SELECT COALESCE(i.symbol, ''), COALESCE(s.tf, ''), q.ts, q.kind
+             FROM quality q
+             LEFT JOIN series s ON q.series_id = s.id
+             LEFT JOIN instruments i ON s.security_id = i.security_id
+             ORDER BY q.id",
+        )?;
+        let rows = q.query_map([], |r| {
+            let symbol: String = r.get(0)?;
+            let tf: String = r.get(1)?;
+            let ts: Option<i64> = r.get(2)?;
+            let kind: String = r.get(3)?;
+            let date = match ts {
+                Some(t) => DateTime::<Utc>::from_timestamp(t, 0)
+                    .map(|dt| dt.with_timezone(&Kolkata).date_naive().to_string())
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            Ok(QualityRow {
+                symbol,
+                tf,
+                date,
+                kind,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
     pub fn budget_used(&self, date: &str) -> Result<u64, DataError> {
@@ -3591,6 +3619,48 @@ mod tests {
         }
         let changes = session_regime_changes(&shapes);
         assert_eq!(changes, vec![start + chrono::Days::new(4)]);
+    }
+    #[test]
+    fn quality_rows_joins_symbol_tf_and_formats_ist_date() {
+        let root = temp("quality_rows");
+        let db = root.join("catalog.sqlite");
+        let mut cat = Catalog::open(&db).unwrap();
+        cat.refresh_instruments(
+            &[Scrip {
+                security_id: "101".into(),
+                symbol: "RELIANCE".into(),
+                lot_size: 1,
+                tick_size_paise: 5,
+                instrument: "EQUITY".into(),
+                is_fno: false,
+            }],
+            0,
+        )
+        .unwrap();
+        cat.series_for_import("101", Tf::M1).unwrap();
+        let day = NaiveDate::from_ymd_opt(2026, 8, 7).unwrap();
+        cat.mark_quality(
+            "101",
+            Tf::M1,
+            &Quality {
+                kind: "session_regime_change".into(),
+                ts: Some(local_midnight(day)),
+                detail: "derived session end mode changed".into(),
+            },
+        )
+        .unwrap();
+        let rows = cat.quality_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0],
+            QualityRow {
+                symbol: "RELIANCE".into(),
+                tf: "1m".into(),
+                date: "2026-08-07".into(),
+                kind: "session_regime_change".into(),
+            }
+        );
+        let _ = fs::remove_dir_all(root);
     }
     #[test]
     fn repeated_identical_write_keeps_checksum_and_bytes() {
