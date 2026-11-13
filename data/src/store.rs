@@ -138,20 +138,27 @@ impl Store {
         ));
         let file = File::create(&tmp)?;
         let sync_file = file.try_clone()?;
+        let mut hasher = Sha256::new();
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
-        let mut writer = ArrowWriter::try_new(file, schema, Some(props))
-            .map_err(|e| DataError::Invalid(e.to_string()))?;
-        writer
-            .write(&batch)
-            .map_err(|e| DataError::Invalid(e.to_string()))?;
-        writer
-            .close()
-            .map_err(|e| DataError::Invalid(e.to_string()))?;
+        {
+            let hw = HashingWriter {
+                inner: file,
+                hasher: &mut hasher,
+            };
+            let mut writer = ArrowWriter::try_new(hw, schema, Some(props))
+                .map_err(|e| DataError::Invalid(e.to_string()))?;
+            writer
+                .write(&batch)
+                .map_err(|e| DataError::Invalid(e.to_string()))?;
+            writer
+                .close()
+                .map_err(|e| DataError::Invalid(e.to_string()))?;
+        }
         sync_file.sync_all()?;
         atomic_replace(&tmp, path)?;
-        let sum = checksum(path)?;
+        let sum = format!("{:x}", hasher.finalize());
         Ok((
             sum,
             rows.first().unwrap().ts,
@@ -258,6 +265,29 @@ pub(crate) fn atomic_replace(from: &Path, to: &Path) -> Result<(), DataError> {
 pub(crate) fn atomic_replace(from: &Path, to: &Path) -> Result<(), DataError> {
     fs::rename(from, to)?;
     Ok(())
+}
+
+struct HashingWriter<'a, W> {
+    inner: W,
+    hasher: &'a mut Sha256,
+}
+
+impl<'a, W: std::io::Write> std::io::Write for HashingWriter<'a, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.inner.write_all(buf)?;
+        self.hasher.update(buf);
+        Ok(())
+    }
 }
 
 fn checksum(p: &Path) -> Result<String, DataError> {

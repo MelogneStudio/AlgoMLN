@@ -1,5 +1,7 @@
 use super::*;
 use dhan_api::Scrip;
+use chrono::TimeZone;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FakeHistory {
@@ -1097,5 +1099,33 @@ fn kway_merge_deterministic_symbol_tie_break() {
     // Even though both have identical timestamp, AAPL must come before MSFT due to symbol tie-break
     assert_eq!(results[0].0, "AAPL");
     assert_eq!(results[1].0, "MSFT");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn write_partitions_checksum_matches_file_content() {
+    let root = temp("store-streaming-checksum");
+    fs::create_dir_all(&root).unwrap();
+    let store = Store::new(&root);
+    let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+    let ts = Kolkata.from_local_datetime(&mon.and_hms_opt(9, 15, 0).unwrap()).single().unwrap().timestamp();
+    let bars: Vec<Bar> = (0..100)
+        .map(|i| Bar {
+            ts: ts + i * 60,
+            open: 100.0 + i as f64,
+            high: 105.0 + i as f64,
+            low: 95.0 + i as f64,
+            close: 102.0 + i as f64,
+            volume: 500.0,
+        })
+        .collect();
+    let partitions = store.write_partitions("100", Tf::M1, &bars).unwrap();
+    assert!(!partitions.is_empty());
+    for p in partitions {
+        let full_path = store.root.join(&p.path);
+        let actual_bytes = fs::read(&full_path).unwrap();
+        let expected_hash = format!("{:x}", Sha256::digest(&actual_bytes));
+        assert_eq!(p.checksum, expected_hash, "streaming checksum must match on-disk file sha256");
+    }
     let _ = fs::remove_dir_all(root);
 }
