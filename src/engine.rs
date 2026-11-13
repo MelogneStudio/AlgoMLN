@@ -45,8 +45,26 @@ impl Program {
     /// default amount of history to feed in observe mode before a run.
     pub fn warmup_bars(&self) -> usize {
         fn expr(e: &NumericExpr, max: &mut usize) {
-            if let NumericExpr::Indicator(i) = e {
-                *max = (*max).max(i.period as usize);
+            match e {
+                NumericExpr::Indicator(i) => {
+                    let needed = match i.kind {
+                        IndicatorKind::Rsi | IndicatorKind::RelVol | IndicatorKind::Atr => {
+                            (i.period as usize).saturating_add(1)
+                        }
+                        _ => i.period as usize,
+                    };
+                    *max = (*max).max(needed);
+                }
+                NumericExpr::Price(p) => match p {
+                    PriceField::PrevClose
+                    | PriceField::PrevOpen
+                    | PriceField::PrevHigh
+                    | PriceField::PrevLow => {
+                        *max = (*max).max(1);
+                    }
+                    _ => {}
+                },
+                _ => {}
             }
         }
         fn condition(c: &Condition, max: &mut usize) {
@@ -409,6 +427,24 @@ mod tests {
     fn no_indicator_rules_are_warm_from_first_valid_candle() {
         let p = program("TRADE_IN ABC\nWHEN close > 1\nBUY 1\n");
         assert!(evaluate_series(&p, "ABC".into(), &[candle(1, 2.)]).unwrap()[0].warm);
+    }
+
+    #[test]
+    fn warmup_bars_accounts_for_delta_indicators_and_prev_price() {
+        let p_rsi = program("TRADE_IN ABC\nWHEN rsi(14) < 30\nBUY 1\n");
+        assert_eq!(p_rsi.warmup_bars(), 15);
+
+        let p_atr = program("TRADE_IN ABC\nWHEN atr(14) > 1\nBUY 1\n");
+        assert_eq!(p_atr.warmup_bars(), 15);
+
+        let p_relvol = program("TRADE_IN ABC\nWHEN rel_vol(20) > 2\nBUY 1\n");
+        assert_eq!(p_relvol.warmup_bars(), 21);
+
+        let p_sma = program("TRADE_IN ABC\nWHEN sma(20) > 100\nBUY 1\n");
+        assert_eq!(p_sma.warmup_bars(), 20);
+
+        let p_prev = program("TRADE_IN ABC\nWHEN prev_close > 100\nBUY 1\n");
+        assert_eq!(p_prev.warmup_bars(), 1);
     }
 
     proptest::proptest! {
