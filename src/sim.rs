@@ -1356,9 +1356,10 @@ fn run_internal(
         }
         *trader_time += t_trader_frame.elapsed();
 
+        let t_eng = std::time::Instant::now();
+        let mut frames_vec = Vec::with_capacity(candles.len());
         for (s, c) in candles {
             last.insert(s.clone(), *c);
-            let t_eng = std::time::Instant::now();
             let frame = if let Some(frames) = precomputed.as_mut() {
                 frames.remove(&(s.clone(), c.timestamp)).ok_or_else(|| {
                     SimError::Other(format!(
@@ -1372,9 +1373,12 @@ fn run_internal(
                     .expect("configured symbol")
                     .on_candle(c)?
             };
-            *engine_time += t_eng.elapsed();
+            frames_vec.push((s, c, frame));
+        }
+        *engine_time += t_eng.elapsed();
 
-            let t_trader_item = std::time::Instant::now();
+        let t_trader_tail = std::time::Instant::now();
+        for (s, c, frame) in frames_vec {
             let count = observed.entry(s.clone()).or_default();
             let mode = if let Some(from) = config.range.from {
                 if ts < from {
@@ -1409,9 +1413,7 @@ fn run_internal(
                     )));
                 }
             }
-            *trader_time += t_trader_item.elapsed();
         }
-        let t_trader_tail = std::time::Instant::now();
         let mut pos_value_paise = 0i128;
         for s in &symbols {
             if let (Some(p), Some(c)) = (trader.position(s), last.get(s)) {
@@ -1496,10 +1498,21 @@ fn run_internal(
         *trader_time += t_trader_tail.elapsed();
         Ok(())
     };
+    const LOAD_SAMPLE_INTERVAL: u64 = 64;
+    let mut load_sample_time = std::time::Duration::ZERO;
+    let mut load_sample_count = 0u64;
+    let mut total_loaded_items = 0u64;
     loop {
-        let t_load = std::time::Instant::now();
-        let next_item = stream.next();
-        load_time += t_load.elapsed();
+        let next_item = if total_loaded_items % LOAD_SAMPLE_INTERVAL == 0 {
+            let t_load = std::time::Instant::now();
+            let item = stream.next();
+            load_sample_time += t_load.elapsed();
+            load_sample_count += 1;
+            item
+        } else {
+            stream.next()
+        };
+        total_loaded_items += 1;
         let Some(item) = next_item else {
             break;
         };
@@ -1534,6 +1547,9 @@ fn run_internal(
             )));
         }
         candles.insert(s, c);
+    }
+    if load_sample_count > 0 {
+        load_time += load_sample_time.mul_f64(total_loaded_items as f64 / load_sample_count as f64);
     }
     if let Some(ts) = current_ts {
         process(
@@ -2411,6 +2427,17 @@ mod tests {
         let r = run(&p, &src, cfg, None).unwrap();
         assert_eq!(r.fills.len(), 1);
         assert_eq!(r.fills[0].symbol, "A");
+    }
+
+    #[test]
+    fn stage_timings_are_measured_and_positive() {
+        let p = crate::compile("TRADE_IN A\nWHEN close > 0\nBUY 1\n").unwrap();
+        let src = MemorySource((1..=100).map(|i| ("A".into(), candle(i, 10.0, 10.0))).collect());
+        let cfg = config();
+        let r = run(&p, &src, cfg, None).unwrap();
+        assert!(r.timings.load_merge >= std::time::Duration::ZERO);
+        assert!(r.timings.engine_indicators >= std::time::Duration::ZERO);
+        assert!(r.timings.trader >= std::time::Duration::ZERO);
     }
 }
 
