@@ -92,15 +92,8 @@ impl IndicatorProvider for IncrementalProvider {
         Ok(h)
     }
     fn advance(&mut self, c: &Candle) -> Result<(), IndicatorError> {
-        c.is_valid(None)
+        c.is_valid(self.previous.as_ref())
             .map_err(|reason| IndicatorError::InvalidCandle { reason })?;
-        if let Some(prev) = self.previous {
-            if c.timestamp <= prev.timestamp {
-                return Err(IndicatorError::InvalidCandle {
-                    reason: "timestamp must increase",
-                });
-            }
-        }
         self.advance_unchecked(c);
         Ok(())
     }

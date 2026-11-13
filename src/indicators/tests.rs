@@ -255,3 +255,26 @@ fn reset_replay_reproduces_values_and_preserves_handles() {
     }
     assert_eq!(first, replay);
 }
+
+#[test]
+fn candle_is_valid_rejects_duplicate_and_decreasing_timestamps() {
+    let c1 = sample(100, 10.0, 1.0);
+    let c_duplicate = sample(100, 11.0, 1.0);
+    let c_decreasing = sample(99, 11.0, 1.0);
+    let c_increasing = sample(101, 11.0, 1.0);
+
+    assert!(c1.is_valid(None).is_ok());
+    assert_eq!(
+        c_duplicate.is_valid(Some(&c1)),
+        Err("timestamp must increase")
+    );
+    assert_eq!(
+        c_decreasing.is_valid(Some(&c1)),
+        Err("timestamp must increase")
+    );
+    assert!(c_increasing.is_valid(Some(&c1)).is_ok());
+
+    let mut provider = IncrementalProvider::new();
+    provider.advance(&c1).unwrap();
+    assert!(provider.advance(&c_duplicate).is_err());
+}

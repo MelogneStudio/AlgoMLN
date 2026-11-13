@@ -27,8 +27,8 @@ impl Candle {
         if self.volume < 0.0 {
             return Err("volume must be non-negative");
         }
-        if previous.is_some_and(|p| self.timestamp < p.timestamp) {
-            return Err("timestamp precedes previous candle");
+        if previous.is_some_and(|p| self.timestamp <= p.timestamp) {
+            return Err("timestamp must increase");
         }
         Ok(())
     }
