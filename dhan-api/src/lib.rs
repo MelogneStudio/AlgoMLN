@@ -237,27 +237,35 @@ impl Limiter {
         90_000
     }
     pub fn wait(&self) {
-        loop {
-            let delay = {
-                let mut b = self.inner.lock().expect("limiter poisoned");
-                let now = std::time::Instant::now();
-                let elapsed = now.duration_since(b.last).as_secs_f64();
-                b.last = now;
-                let cap = if b.tight_until.is_some_and(|t| t > now) {
-                    2.0
-                } else {
-                    self.cap as f64
-                };
-                if b.tight_until.is_some_and(|t| t <= now) {
-                    b.tight_until = None;
-                }
-                b.tokens = (b.tokens + elapsed * cap).min(cap);
-                if b.tokens >= 1.0 {
-                    b.tokens -= 1.0;
-                    return;
-                }
-                Duration::from_secs_f64((1.0 - b.tokens) / cap)
+        let delay = {
+            let mut b = self.inner.lock().expect("limiter poisoned");
+            let now = std::time::Instant::now();
+            let cap = if b.tight_until.is_some_and(|t| t > now) {
+                2.0
+            } else {
+                self.cap as f64
             };
+            if b.tight_until.is_some_and(|t| t <= now) {
+                b.tight_until = None;
+            }
+            if now > b.last {
+                let elapsed = (now - b.last).as_secs_f64();
+                b.tokens = (b.tokens + elapsed * cap).min(cap);
+                b.last = now;
+            }
+            if b.tokens >= 1.0 {
+                b.tokens -= 1.0;
+                Duration::ZERO
+            } else {
+                let needed = 1.0 - b.tokens;
+                let wait_time = Duration::from_secs_f64(needed / cap);
+                b.tokens = 0.0;
+                let scheduled = b.last + wait_time;
+                b.last = scheduled;
+                scheduled.saturating_duration_since(now)
+            }
+        };
+        if !delay.is_zero() {
             std::thread::sleep(delay);
         }
     }
@@ -943,5 +951,32 @@ mod tests {
             .find(|r| r.symbol == "ALOKINDS")
             .expect("alokinds not found");
         assert!(!alok.is_fno);
+    }
+
+    #[test]
+    fn limiter_concurrent_wait_enforces_spacing_without_starvation() {
+        let limiter = Limiter::provisional(); // cap: 4 -> 250ms spacing
+        let start = std::time::Instant::now();
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                let lim = limiter.clone();
+                std::thread::spawn(move || {
+                    lim.wait();
+                    std::time::Instant::now()
+                })
+            })
+            .collect();
+        let mut times: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        times.sort();
+        // With 3 requests and cap 4 (250ms spacing, starting with 1 token):
+        // Req 0: 0ms
+        // Req 1: ~250ms
+        // Req 2: ~500ms
+        // Total elapsed should be at least ~450ms
+        let elapsed = times[2].duration_since(start);
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "expected at least 400ms for 3 requests, got {elapsed:?}"
+        );
     }
 }
