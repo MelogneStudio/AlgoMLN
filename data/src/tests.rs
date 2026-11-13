@@ -1060,3 +1060,42 @@ fn atomic_replace_replaces_existing_file_correctly() {
     assert!(!source.exists());
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn kway_merge_deterministic_symbol_tie_break() {
+    use algomln::sim::CandleSource;
+    use chrono::TimeZone;
+    use chrono_tz::Asia::Kolkata;
+    let root = temp("kway-merge-test");
+    fs::create_dir_all(&root).unwrap();
+    let db = root.join("catalog.sqlite");
+    let mut cat = Catalog::open(&db).unwrap();
+    cat.refresh_instruments(&[scrip("1", "AAPL"), scrip("2", "MSFT")], 0).unwrap();
+    let store = Store::new(&root);
+    let mon = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+    let ts = Kolkata.from_local_datetime(&mon.and_hms_opt(9, 15, 0).unwrap()).single().unwrap().timestamp();
+    let bar_a = Bar { ts, open: 10.0, high: 11.0, low: 9.0, close: 10.5, volume: 100.0 };
+    let bar_m = Bar { ts, open: 20.0, high: 21.0, low: 19.0, close: 20.5, volume: 200.0 };
+    let parts_a = store.write_partitions("1", Tf::M1, &[bar_a]).unwrap();
+    let parts_m = store.write_partitions("2", Tf::M1, &[bar_m]).unwrap();
+    let sid_a = cat.series_for_import("1", Tf::M1).unwrap();
+    let sid_m = cat.series_for_import("2", Tf::M1).unwrap();
+    for p in &parts_a { cat.record_partition(sid_a, &store, p).unwrap(); }
+    for p in &parts_m { cat.record_partition(sid_m, &store, p).unwrap(); }
+    cat.record_session(sid_a, mon, ts, ts, 1).unwrap();
+    cat.record_session(sid_m, mon, ts, ts, 1).unwrap();
+    cat.record_coverage("1", Tf::M1, ts - 60, ts + 3600, "data").unwrap();
+    cat.record_coverage("2", Tf::M1, ts - 60, ts + 3600, "data").unwrap();
+    drop(cat);
+
+    let source = CatalogSource::new(Store::new(&root), &db);
+    let syms = vec!["MSFT".to_string(), "AAPL".to_string()]; // unsorted input
+    let range = algomln::sim::DateRange { from: Some(ts), to: Some(ts) };
+    let stream = source.open(&syms, algomln::sim::Timeframe::M1, range).unwrap();
+    let results: Vec<_> = stream.map(|r| r.unwrap()).collect();
+    assert_eq!(results.len(), 2);
+    // Even though both have identical timestamp, AAPL must come before MSFT due to symbol tie-break
+    assert_eq!(results[0].0, "AAPL");
+    assert_eq!(results[1].0, "MSFT");
+    let _ = fs::remove_dir_all(root);
+}

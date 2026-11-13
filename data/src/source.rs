@@ -676,7 +676,7 @@ impl CandleSource for CatalogSource {
 
 struct KWayMerge {
     cursors: Vec<CatalogCursor>,
-    heap: std::collections::BinaryHeap<std::cmp::Reverse<(i64, Symbol, usize)>>,
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(i64, usize)>>,
     current_candles: Vec<Option<Candle>>,
 }
 
@@ -686,7 +686,7 @@ impl KWayMerge {
         let mut current_candles = Vec::with_capacity(cursors.len());
         for (i, cursor) in cursors.iter_mut().enumerate() {
             if let Some(candle) = cursor.next_candle()? {
-                heap.push(std::cmp::Reverse((candle.timestamp, cursor.symbol.clone(), i)));
+                heap.push(std::cmp::Reverse((candle.timestamp, i)));
                 current_candles.push(Some(candle));
             } else {
                 current_candles.push(None);
@@ -704,7 +704,7 @@ impl Iterator for KWayMerge {
     type Item = Result<(Symbol, Candle), SourceError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let std::cmp::Reverse((_, _, i)) = self.heap.pop()?;
+        let std::cmp::Reverse((_, i)) = self.heap.pop()?;
         let candle = self.current_candles[i].take().expect("candle must be present");
         let sym = self.cursors[i].symbol.clone();
 
@@ -712,7 +712,6 @@ impl Iterator for KWayMerge {
             Ok(Some(next_candle)) => {
                 self.heap.push(std::cmp::Reverse((
                     next_candle.timestamp,
-                    self.cursors[i].symbol.clone(),
                     i,
                 )));
                 self.current_candles[i] = Some(next_candle);
