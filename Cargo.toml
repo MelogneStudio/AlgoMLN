@@ -36,3 +36,10 @@ path = "src/lib.rs"
 [workspace]
 members = ["dhan-api", "data", "cli"]
 exclude = ["fuzz"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
