@@ -1045,3 +1045,18 @@ fn bulk_concurrent_does_not_generate_false_orphans() {
     assert_eq!(orphans, 0, "concurrent downloads should not flag sibling files as orphans");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn atomic_replace_replaces_existing_file_correctly() {
+    let root = temp("atomic-replace");
+    fs::create_dir_all(&root).unwrap();
+    let target = root.join("target.txt");
+    let source = root.join("source.txt");
+    fs::write(&target, "old content").unwrap();
+    fs::write(&source, "new content").unwrap();
+
+    crate::store::atomic_replace(&source, &target).unwrap();
+    assert_eq!(fs::read_to_string(&target).unwrap(), "new content");
+    assert!(!source.exists());
+    let _ = fs::remove_dir_all(root);
+}

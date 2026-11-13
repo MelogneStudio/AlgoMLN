@@ -224,28 +224,39 @@ impl Store {
     }
 }
 
-#[cfg(not(windows))]
-fn atomic_replace(from: &Path, to: &Path) -> Result<(), DataError> {
-    fs::rename(from, to)?;
-    Ok(())
-}
-
 #[cfg(windows)]
-fn atomic_replace(from: &Path, to: &Path) -> Result<(), DataError> {
+pub(crate) fn atomic_replace(from: &Path, to: &Path) -> Result<(), DataError> {
     use std::os::windows::ffi::OsStrExt;
     let src: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
     let dst: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
-    let ok = unsafe {
-        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
-            src.as_ptr(),
-            dst.as_ptr(),
-            windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
-                | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error().into());
+    let mut attempts = 0;
+    loop {
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                src.as_ptr(),
+                dst.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                    | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        let code = err.raw_os_error().unwrap_or(0) as u32;
+        // ERROR_ACCESS_DENIED (5) or ERROR_SHARING_VIOLATION (32)
+        if (code == 5 || code == 32) && attempts < 10 {
+            attempts += 1;
+            std::thread::sleep(std::time::Duration::from_millis(15 * attempts as u64));
+            continue;
+        }
+        return Err(err.into());
     }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn atomic_replace(from: &Path, to: &Path) -> Result<(), DataError> {
+    fs::rename(from, to)?;
     Ok(())
 }
 
