@@ -1129,3 +1129,21 @@ fn write_partitions_checksum_matches_file_content() {
     }
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn catalog_schema_composite_indexes_exist() {
+    let root = temp("catalog-indexes");
+    fs::create_dir_all(&root).unwrap();
+    let db = root.join("catalog.sqlite");
+    let cat = Catalog::open(&db).unwrap();
+    let mut stmt = cat.conn.prepare("SELECT name FROM sqlite_master WHERE type='index'").unwrap();
+    let indexes: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(indexes.contains(&"idx_partitions_range".to_string()));
+    assert!(indexes.contains(&"idx_coverage_range".to_string()));
+    assert!(indexes.contains(&"idx_quality_series".to_string()));
+    let _ = fs::remove_dir_all(root);
+}
