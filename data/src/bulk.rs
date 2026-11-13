@@ -163,8 +163,10 @@ impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
             ..Default::default()
         };
         {
-            let cat = Catalog::open(&self.catalog_path)?;
+            let mut cat = Catalog::open(&self.catalog_path)?;
             report.failures = cat.failure_count()?;
+            let store = Store::new(&self.store_root);
+            store.reconcile(&mut cat)?;
         }
         'tfs: for tf in &self.config.tfs {
             let mut done = 0usize;
@@ -191,7 +193,7 @@ impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
                     budget_cap: self.config.budget_cap,
                 };
                 let before = updater.catalog.budget_used(&today)?;
-                let outcome = updater.update(id, *tf, instrument, self.config.from, self.config.to);
+                let outcome = updater.update_without_reconcile(id, *tf, instrument, self.config.from, self.config.to);
                 let after = updater.catalog.budget_used(&today)?;
                 report.requests_used += after.saturating_sub(before);
                 match outcome {
@@ -295,6 +297,12 @@ impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
         // picking up new symbols (in-flight symbols still finish).
         let stop_all = AtomicBool::new(false);
 
+        {
+            let mut cat = Catalog::open(&self.catalog_path)?;
+            let store = Store::new(&self.store_root);
+            store.reconcile(&mut cat)?;
+        }
+
         'tfs: for tf in &self.config.tfs {
             let next = AtomicUsize::new(0);
             let done = AtomicUsize::new(0);
@@ -343,7 +351,7 @@ impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
                                 }
                             };
                             let before = updater.catalog.budget_used(&today).unwrap_or(0);
-                            let outcome = updater.update(
+                            let outcome = updater.update_without_reconcile(
                                 id,
                                 *tf,
                                 instrument,

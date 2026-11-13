@@ -57,12 +57,37 @@ impl Updater {
         from: NaiveDate,
         to: NaiveDate,
     ) -> Result<bool, DataError> {
+        self.update_internal(security_id, tf, instrument, from, to, true)
+    }
+
+    pub fn update_without_reconcile(
+        &mut self,
+        security_id: &str,
+        tf: Tf,
+        instrument: &str,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<bool, DataError> {
+        self.update_internal(security_id, tf, instrument, from, to, false)
+    }
+
+    fn update_internal(
+        &mut self,
+        security_id: &str,
+        tf: Tf,
+        instrument: &str,
+        from: NaiveDate,
+        to: NaiveDate,
+        do_reconcile: bool,
+    ) -> Result<bool, DataError> {
         let today = chrono::Utc::now().date_naive().to_string();
         self.budget_guard(&today)?;
         let run = self.catalog.runs_start()?;
         let mut requests = 0;
         let result = (|| {
-            self.store.reconcile(&mut self.catalog)?;
+            if do_reconcile {
+                self.store.reconcile(&mut self.catalog)?;
+            }
             let gaps = missing_date_ranges(&self.catalog, security_id, tf, from, to)?;
             let chunks = if let (Some((first, _)), Some((_, last))) = (gaps.first(), gaps.last()) {
                 if tf == Tf::D1 {

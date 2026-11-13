@@ -1004,3 +1004,44 @@ fn last_complete_bar_daily_cutoff_regression() {
         .timestamp();
     assert_eq!(res_after, expected_after, "after 16:00 cutoff should return today 09:15 IST");
 }
+
+#[test]
+fn bulk_concurrent_does_not_generate_false_orphans() {
+    let root = temp("bulk-concurrent");
+    let db = root.join("catalog.sqlite");
+    let mut cat = Catalog::open(&db).unwrap();
+    cat.refresh_instruments(&[scrip("1", "AAA"), scrip("2", "BBB")], 0).unwrap();
+    drop(cat);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut cfg = BulkConfig::new(
+        NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
+        NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
+        vec![Tf::M1],
+    );
+    cfg.concurrency = 2;
+    let bulk = BulkDownloader {
+        make_client: {
+            let calls = calls.clone();
+            move || Box::new(CountingHistory { calls: calls.clone() })
+        },
+        catalog_path: db.clone(),
+        store_root: root.clone(),
+        config: cfg,
+        stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let report = bulk.run(|_| {}).unwrap();
+    assert_eq!(report.symbols_completed, 2);
+
+    let cat = Catalog::open(&db).unwrap();
+    let orphans: usize = cat
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM quality WHERE kind='reconcile_orphan_file'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0, "concurrent downloads should not flag sibling files as orphans");
+    let _ = fs::remove_dir_all(root);
+}
