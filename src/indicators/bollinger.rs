@@ -56,8 +56,11 @@ impl Indicator for Bollinger {
         let delta = centered - self.mean_offset;
         self.mean_offset += delta / n as f64;
         self.m2 += delta * (centered - self.mean_offset);
-        self.pos = (self.pos + 1) % self.p;
-        if self.ticks % 4096 == 0 {
+        self.pos += 1;
+        if self.pos == self.p {
+            self.pos = 0;
+        }
+        if (self.ticks & 4095) == 0 {
             self.sum = self.buf.iter().take(self.n).map(|x| x - anchor).sum();
             self.mean_offset = 0.0;
             self.m2 = 0.0;

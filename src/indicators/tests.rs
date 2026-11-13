@@ -278,3 +278,28 @@ fn candle_is_valid_rejects_duplicate_and_decreasing_timestamps() {
     provider.advance(&c1).unwrap();
     assert!(provider.advance(&c_duplicate).is_err());
 }
+
+#[test]
+fn ring_buffer_indicators_long_series_continuity() {
+    let mut provider = IncrementalProvider::new();
+    let sma_h = provider.register(IndicatorSpec::new(IndicatorType::Sma, 20, None).unwrap()).unwrap();
+    let ema_h = provider.register(IndicatorSpec::new(IndicatorType::Ema, 20, None).unwrap()).unwrap();
+    let rsi_h = provider.register(IndicatorSpec::new(IndicatorType::Rsi, 14, None).unwrap()).unwrap();
+    let atr_h = provider.register(IndicatorSpec::new(IndicatorType::Atr, 14, None).unwrap()).unwrap();
+    let bb_h = provider.register(IndicatorSpec::new(IndicatorType::BbUpper, 20, Some(2.0)).unwrap()).unwrap();
+
+    for i in 1..=10000 {
+        let price = 100.0 + (i as f64 * 0.1).sin() * 5.0;
+        let c = sample(i, price, 10.0);
+        provider.advance(&c).unwrap();
+        if i >= 20 {
+            assert!(provider.get(sma_h).is_some());
+            assert!(provider.get(ema_h).is_some());
+            assert!(provider.get(bb_h).is_some());
+        }
+        if i >= 15 {
+            assert!(provider.get(rsi_h).is_some());
+            assert!(provider.get(atr_h).is_some());
+        }
+    }
+}

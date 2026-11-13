@@ -1,6 +1,8 @@
 use super::{candle::Candle, state::Indicator};
 pub(super) struct Atr {
     p: usize,
+    p_f64: f64,
+    p_minus_1_f64: f64,
     n: usize,
     sum: f64,
     prev: Option<f64>,
@@ -10,6 +12,8 @@ impl Atr {
     pub fn new(p: usize) -> Self {
         Self {
             p,
+            p_f64: p as f64,
+            p_minus_1_f64: (p - 1) as f64,
             n: 0,
             sum: 0.,
             prev: None,
@@ -24,12 +28,12 @@ impl Indicator for Atr {
                 .max((c.high - prev).abs())
                 .max((c.low - prev).abs());
             if let Some(v) = self.value {
-                self.value = Some((v * (self.p - 1) as f64 + tr) / self.p as f64)
+                self.value = Some((v * self.p_minus_1_f64 + tr) / self.p_f64)
             } else {
                 self.n += 1;
                 self.sum += tr;
                 if self.n == self.p {
-                    self.value = Some(self.sum / self.p as f64)
+                    self.value = Some(self.sum / self.p_f64)
                 }
             }
         }

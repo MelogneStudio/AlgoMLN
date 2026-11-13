@@ -5,22 +5,25 @@ pub(super) struct Ema {
     sum: f64,
     value: Option<f64>,
     alpha: f64,
+    one_minus_alpha: f64,
 }
 impl Ema {
     pub fn new(p: usize) -> Self {
+        let alpha = 2. / (p as f64 + 1.);
         Self {
             p,
             n: 0,
             sum: 0.,
             value: None,
-            alpha: 2. / (p as f64 + 1.),
+            alpha,
+            one_minus_alpha: 1. - alpha,
         }
     }
 }
 impl Indicator for Ema {
     fn update(&mut self, c: &Candle) -> Option<f64> {
         if let Some(v) = self.value {
-            let next = self.alpha * c.close + (1. - self.alpha) * v;
+            let next = self.alpha * c.close + self.one_minus_alpha * v;
             self.value = next.is_finite().then_some(next)
         } else {
             self.n += 1;

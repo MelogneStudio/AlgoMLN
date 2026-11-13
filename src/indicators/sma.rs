@@ -29,8 +29,11 @@ impl Indicator for Sma {
         }
         self.buf[self.pos] = c.close;
         self.sum += c.close;
-        self.pos = (self.pos + 1) % self.p;
-        if self.ticks % 4096 == 0 {
+        self.pos += 1;
+        if self.pos == self.p {
+            self.pos = 0;
+        }
+        if (self.ticks & 4095) == 0 {
             self.sum = self.buf.iter().sum()
         }
         (self.n == self.p).then(|| self.sum / self.p as f64)
