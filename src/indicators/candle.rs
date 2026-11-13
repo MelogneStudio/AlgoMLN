@@ -1,5 +1,8 @@
+/// Represents a single market candle.
+/// All timestamps are integer Unix epoch timestamps in seconds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Candle {
+    /// Unix timestamp in seconds since the Unix epoch (1970-01-01T00:00:00Z).
     pub timestamp: i64,
     pub open: f64,
     pub high: f64,

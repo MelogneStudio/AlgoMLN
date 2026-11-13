@@ -15,7 +15,7 @@ fn candles() -> Vec<Candle> {
             let low = n();
             let close = n();
             Candle {
-                timestamp: i as i64 * 60_000,
+                timestamp: i as i64 * 60,
                 open,
                 high: high.max(close),
                 low: low.min(open).min(close),

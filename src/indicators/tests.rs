@@ -23,7 +23,7 @@ fn candles() -> &'static [Candle] {
                 let high = high.max(open).max(close);
                 let low = low.min(open).min(close);
                 Candle {
-                    timestamp: i as i64 * 60_000,
+                    timestamp: i as i64 * 60,
                     open,
                     high,
                     low,
