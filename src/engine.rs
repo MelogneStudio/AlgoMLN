@@ -113,13 +113,46 @@ impl fmt::Display for EngineError {
     }
 }
 impl std::error::Error for EngineError {}
+#[derive(Clone, Copy, Debug)]
+enum FastExpr {
+    Literal(Option<f64>),
+    Price(PField),
+    Indicator(IndicatorHandle),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ActionKind {
+    Entry,
+    Exit,
+}
+
+#[derive(Clone, Debug)]
+enum FastCondition {
+    Compare {
+        left: FastExpr,
+        op: CompareOp,
+        right: FastExpr,
+    },
+    Cross {
+        cross_id: usize,
+        direction: CrossDirection,
+        left: FastExpr,
+        right: FastExpr,
+    },
+    And(Box<FastCondition>, Box<FastCondition>),
+    Or(Box<FastCondition>, Box<FastCondition>),
+    Not(Box<FastCondition>),
+    Constant(bool),
+}
+
 pub struct Engine {
     symbol: Symbol,
     provider: PrecomputedProvider,
-    handles: HashMap<IndicatorSpec, IndicatorHandle>,
+    handles: Vec<IndicatorHandle>,
     previous_ts: Option<i64>,
-    cross_prev: HashMap<(NumericExpr, NumericExpr), (Option<f64>, Option<f64>)>,
-    program: Program,
+    cross_pairs: Vec<(FastExpr, FastExpr)>,
+    cross_prev: Vec<(Option<f64>, Option<f64>)>,
+    compiled_rules: Vec<(RuleId, ActionKind, FastCondition)>,
 }
 impl Engine {
     pub fn warmup_bars(program: &Program) -> usize {
@@ -157,13 +190,115 @@ impl Engine {
         for r in &program.strategy.rules {
             reg(&r.condition, &mut provider, &mut handles)?;
         }
+
+        fn compile_expr(
+            e: &NumericExpr,
+            handles: &HashMap<IndicatorSpec, IndicatorHandle>,
+        ) -> Result<FastExpr, EngineError> {
+            match e {
+                NumericExpr::Literal(x) => Ok(FastExpr::Literal(x.spelling.parse().ok())),
+                NumericExpr::Price(x) => {
+                    let field = match x {
+                        PriceField::Close => PField::Close,
+                        PriceField::Open => PField::Open,
+                        PriceField::High => PField::High,
+                        PriceField::Low => PField::Low,
+                        PriceField::Volume => PField::Volume,
+                        PriceField::PrevClose => PField::PrevClose,
+                        PriceField::PrevOpen => PField::PrevOpen,
+                        PriceField::PrevHigh => PField::PrevHigh,
+                        PriceField::PrevLow => PField::PrevLow,
+                    };
+                    Ok(FastExpr::Price(field))
+                }
+                NumericExpr::Indicator(i) => {
+                    let spec = IndicatorSpec::from_call(i)?;
+                    let handle = *handles
+                        .get(&spec)
+                        .ok_or(EngineError::InvalidProgram("unregistered indicator handle"))?;
+                    Ok(FastExpr::Indicator(handle))
+                }
+            }
+        }
+
+        fn compile_condition(
+            c: &Condition,
+            handles: &HashMap<IndicatorSpec, IndicatorHandle>,
+            cross_pairs: &mut Vec<(FastExpr, FastExpr)>,
+            cross_map: &mut HashMap<(NumericExpr, NumericExpr), usize>,
+        ) -> Result<FastCondition, EngineError> {
+            match c {
+                Condition::Compare { left, op, right } => {
+                    let left = compile_expr(left, handles)?;
+                    let right = compile_expr(right, handles)?;
+                    Ok(FastCondition::Compare {
+                        left,
+                        op: *op,
+                        right,
+                    })
+                }
+                Condition::Cross {
+                    direction,
+                    left,
+                    right,
+                } => {
+                    let left_fast = compile_expr(left, handles)?;
+                    let right_fast = compile_expr(right, handles)?;
+                    let key = (left.clone(), right.clone());
+                    let cross_id = if let Some(&id) = cross_map.get(&key) {
+                        id
+                    } else {
+                        let id = cross_pairs.len();
+                        cross_pairs.push((left_fast, right_fast));
+                        cross_map.insert(key, id);
+                        id
+                    };
+                    Ok(FastCondition::Cross {
+                        cross_id,
+                        direction: *direction,
+                        left: left_fast,
+                        right: right_fast,
+                    })
+                }
+                Condition::And(a, b) => {
+                    let a = compile_condition(a, handles, cross_pairs, cross_map)?;
+                    let b = compile_condition(b, handles, cross_pairs, cross_map)?;
+                    Ok(FastCondition::And(Box::new(a), Box::new(b)))
+                }
+                Condition::Or(a, b) => {
+                    let a = compile_condition(a, handles, cross_pairs, cross_map)?;
+                    let b = compile_condition(b, handles, cross_pairs, cross_map)?;
+                    Ok(FastCondition::Or(Box::new(a), Box::new(b)))
+                }
+                Condition::Not(a) => {
+                    let a = compile_condition(a, handles, cross_pairs, cross_map)?;
+                    Ok(FastCondition::Not(Box::new(a)))
+                }
+                _ => Ok(FastCondition::Constant(false)),
+            }
+        }
+
+        let mut compiled_rules = Vec::new();
+        let mut cross_pairs = Vec::new();
+        let mut cross_map = HashMap::new();
+        for r in &program.strategy.rules {
+            let kind = match &r.action {
+                Action::Buy(_) => ActionKind::Entry,
+                Action::Sell(_) | Action::SellAll => ActionKind::Exit,
+            };
+            let cond = compile_condition(&r.condition, &handles, &mut cross_pairs, &mut cross_map)?;
+            compiled_rules.push((r.id.clone(), kind, cond));
+        }
+        let cross_len = cross_pairs.len();
+
         Ok(Self {
             symbol,
             provider,
-            handles,
+            handles: handles.into_values().collect(),
             previous_ts: None,
-            cross_prev: HashMap::new(),
-            program: program.clone(),
+            cross_pairs,
+            cross_prev: vec![(None, None); cross_len],
+            compiled_rules,
         })
     }
     pub fn on_candle(&mut self, c: &Candle) -> Result<LevelFrame, EngineError> {
@@ -180,30 +315,26 @@ impl Engine {
         self.provider.advance_unchecked(c);
         let mut entry = BTreeMap::new();
         let mut exit = BTreeMap::new();
-        for r in &self.program.strategy.rules {
-            let v = self.eval(&r.condition).unwrap_or(false);
-            match &r.action {
-                Action::Buy(_) => {
-                    entry.insert(r.id.clone(), v);
+        for (id, kind, cond) in &self.compiled_rules {
+            let v = self.eval_fast(cond).unwrap_or(false);
+            match kind {
+                ActionKind::Entry => {
+                    entry.insert(id.clone(), v);
                 }
-                Action::Sell(_) | Action::SellAll => {
-                    exit.insert(r.id.clone(), v);
+                ActionKind::Exit => {
+                    exit.insert(id.clone(), v);
                 }
             }
         }
-        let mut keys = Vec::new();
-        for r in &self.program.strategy.rules {
-            Self::cross_keys(&r.condition, &mut keys)
-        }
-        for (a, b) in keys {
-            let x = self.value(&a);
-            let y = self.value(&b);
-            self.cross_prev.insert((a, b), (x, y));
+        for (id, (a, b)) in self.cross_pairs.iter().enumerate() {
+            let x = self.eval_fast_expr(a);
+            let y = self.eval_fast_expr(b);
+            self.cross_prev[id] = (x, y);
         }
         self.previous_ts = Some(c.timestamp);
         let warm = self
             .handles
-            .values()
+            .iter()
             .all(|h| self.provider.get(*h).is_some());
         Ok(LevelFrame {
             symbol: self.symbol.clone(),
@@ -216,44 +347,20 @@ impl Engine {
     pub fn reset(&mut self) {
         self.provider.reset();
         self.previous_ts = None;
-        self.cross_prev.clear()
+        self.cross_prev.fill((None, None));
     }
-    fn cross_keys(c: &Condition, out: &mut Vec<(NumericExpr, NumericExpr)>) {
-        match c {
-            Condition::Cross { left, right, .. } => out.push((left.clone(), right.clone())),
-            Condition::And(a, b) | Condition::Or(a, b) => {
-                Self::cross_keys(a, out);
-                Self::cross_keys(b, out)
-            }
-            Condition::Not(a) => Self::cross_keys(a, out),
-            _ => {}
-        }
-    }
-    fn value(&self, e: &NumericExpr) -> Option<f64> {
+    fn eval_fast_expr(&self, e: &FastExpr) -> Option<f64> {
         match e {
-            NumericExpr::Literal(x) => x.spelling.parse().ok(),
-            NumericExpr::Price(x) => self.provider.price(match x {
-                PriceField::Close => PField::Close,
-                PriceField::Open => PField::Open,
-                PriceField::High => PField::High,
-                PriceField::Low => PField::Low,
-                PriceField::Volume => PField::Volume,
-                PriceField::PrevClose => PField::PrevClose,
-                PriceField::PrevOpen => PField::PrevOpen,
-                PriceField::PrevHigh => PField::PrevHigh,
-                PriceField::PrevLow => PField::PrevLow,
-            }),
-            NumericExpr::Indicator(i) => IndicatorSpec::from_call(i)
-                .ok()
-                .and_then(|s| self.handles.get(&s))
-                .and_then(|h| self.provider.get(*h)),
+            FastExpr::Literal(x) => *x,
+            FastExpr::Price(x) => self.provider.price(*x),
+            FastExpr::Indicator(h) => self.provider.get(*h),
         }
     }
-    fn eval(&self, c: &Condition) -> Option<bool> {
+    fn eval_fast(&self, c: &FastCondition) -> Option<bool> {
         match c {
-            Condition::Compare { left, op, right } => {
-                self.value(left)
-                    .zip(self.value(right))
+            FastCondition::Compare { left, op, right } => {
+                self.eval_fast_expr(left)
+                    .zip(self.eval_fast_expr(right))
                     .map(|(a, b)| match cmp3(a, b) {
                         std::cmp::Ordering::Less => {
                             matches!(op, CompareOp::Lt | CompareOp::Le | CompareOp::Ne)
@@ -266,17 +373,14 @@ impl Engine {
                         }
                     })
             }
-            Condition::Cross {
+            FastCondition::Cross {
+                cross_id,
                 direction,
                 left,
                 right,
             } => {
-                let (a, b) = self
-                    .cross_prev
-                    .get(&(left.clone(), right.clone()))
-                    .copied()
-                    .unwrap_or((None, None));
-                let (x, y) = (self.value(left), self.value(right));
+                let (a, b) = self.cross_prev[*cross_id];
+                let (x, y) = (self.eval_fast_expr(left), self.eval_fast_expr(right));
                 a.zip(b)
                     .zip(x.zip(y))
                     .map(|((a, b), (x, y))| match direction {
@@ -290,18 +394,18 @@ impl Engine {
                         }
                     })
             }
-            Condition::And(a, b) => match (self.eval(a), self.eval(b)) {
+            FastCondition::And(a, b) => match (self.eval_fast(a), self.eval_fast(b)) {
                 (Some(false), _) | (_, Some(false)) => Some(false),
                 (Some(true), Some(true)) => Some(true),
                 _ => None,
             },
-            Condition::Or(a, b) => match (self.eval(a), self.eval(b)) {
+            FastCondition::Or(a, b) => match (self.eval_fast(a), self.eval_fast(b)) {
                 (Some(true), _) | (_, Some(true)) => Some(true),
                 (Some(false), Some(false)) => Some(false),
                 _ => None,
             },
-            Condition::Not(a) => Some(!self.eval(a)?),
-            _ => Some(false),
+            FastCondition::Not(a) => Some(!self.eval_fast(a)?),
+            FastCondition::Constant(b) => Some(*b),
         }
     }
 }
