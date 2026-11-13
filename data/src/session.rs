@@ -68,18 +68,18 @@ pub fn last_complete_bar(now: i64, tf: Tf, _session_end: i64, margin: i64) -> i6
             .single()
             .unwrap()
             .timestamp();
-        return if now >= cutoff {
-            cutoff - 33300
+        let target_date = if now >= cutoff {
+            local.date_naive()
         } else {
-            (local.date_naive() - chrono::Days::new(1))
-                .and_hms_opt(9, 15, 0)
-                .unwrap()
-                .and_local_timezone(Kolkata)
-                .single()
-                .unwrap()
-                .timestamp()
-                - 33300
+            local.date_naive() - chrono::Days::new(1)
         };
+        return target_date
+            .and_hms_opt(9, 15, 0)
+            .unwrap()
+            .and_local_timezone(Kolkata)
+            .single()
+            .unwrap()
+            .timestamp();
     }
     let last = now - margin - step;
     last - last.rem_euclid(step)

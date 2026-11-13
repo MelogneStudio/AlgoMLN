@@ -970,3 +970,37 @@ fn thousands_grouping_and_eta_formatting() {
     assert_eq!(format_eta(600), "10m");
     assert_eq!(format_eta(0), "0m");
 }
+
+#[test]
+fn last_complete_bar_daily_cutoff_regression() {
+    use chrono::TimeZone;
+    use chrono_tz::Asia::Kolkata;
+    let d = NaiveDate::from_ymd_opt(2024, 6, 10).unwrap();
+    // 15:30 IST (before 16:00 cutoff)
+    let before_cutoff = Kolkata
+        .from_local_datetime(&d.and_hms_opt(15, 30, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp();
+    let res_before = last_complete_bar(before_cutoff, Tf::D1, 0, 0);
+    let expected_before = Kolkata
+        .from_local_datetime(&NaiveDate::from_ymd_opt(2024, 6, 9).unwrap().and_hms_opt(9, 15, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp();
+    assert_eq!(res_before, expected_before, "before 16:00 cutoff should return yesterday 09:15 IST");
+
+    // 16:05 IST (after 16:00 cutoff)
+    let after_cutoff = Kolkata
+        .from_local_datetime(&d.and_hms_opt(16, 5, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp();
+    let res_after = last_complete_bar(after_cutoff, Tf::D1, 0, 0);
+    let expected_after = Kolkata
+        .from_local_datetime(&d.and_hms_opt(9, 15, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp();
+    assert_eq!(res_after, expected_after, "after 16:00 cutoff should return today 09:15 IST");
+}
