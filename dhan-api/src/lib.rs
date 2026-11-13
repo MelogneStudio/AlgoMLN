@@ -275,6 +275,8 @@ pub struct DhanClient {
     token: Arc<dyn TokenProvider>,
     pub limiter: Limiter,
     base: String,
+    http: Client,
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 impl DhanClient {
     pub fn new(token: Arc<dyn TokenProvider>) -> Result<Self, ApiError> {
@@ -284,16 +286,30 @@ impl DhanClient {
         token: Arc<dyn TokenProvider>,
         base: impl Into<String>,
     ) -> Result<Self, ApiError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| ApiError::Transport(e.to_string()))?;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| ApiError::Transport(e.to_string()))?;
         Ok(Self {
             token,
             limiter: Limiter::provisional(),
             base: base.into(),
+            http,
+            runtime: Arc::new(runtime),
         })
     }
     pub fn clone_with_base(&self, base: &str) -> Result<Self, ApiError> {
-        let mut c = Self::with_base(self.token.clone(), base)?;
-        c.limiter = self.limiter.clone();
-        Ok(c)
+        Ok(Self {
+            token: self.token.clone(),
+            limiter: self.limiter.clone(),
+            base: base.into(),
+            http: self.http.clone(),
+            runtime: self.runtime.clone(),
+        })
     }
     pub fn intraday(
         &self,
@@ -349,16 +365,9 @@ impl DhanClient {
         let mut attempts = 0;
         loop {
             self.limiter.wait();
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| ApiError::Transport(e.to_string()))?;
-            let response = runtime.block_on(async {
-                let client = Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .map_err(|e| ApiError::Transport(e.to_string()))?;
-                let response = client
+            let response = self.runtime.block_on(async {
+                let response = self
+                    .http
                     .post(url)
                     .headers(headers.clone())
                     .json(body)
@@ -978,5 +987,12 @@ mod tests {
             elapsed >= Duration::from_millis(400),
             "expected at least 400ms for 3 requests, got {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn client_reuses_persistent_runtime_and_http_client() {
+        let client = DhanClient::with_base(Arc::new(TestToken), "http://localhost:12345").unwrap();
+        let cloned = client.clone_with_base("http://localhost:12346").unwrap();
+        assert!(Arc::ptr_eq(&client.runtime, &cloned.runtime));
     }
 }
