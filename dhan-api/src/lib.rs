@@ -100,6 +100,10 @@ struct ApiErrorBody {
     error_code: String,
     #[serde(default, rename = "errorMessage")]
     error_message: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    remarks: Option<String>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct IntradayRequest<'a> {
@@ -148,11 +152,16 @@ struct Columns {
     #[serde(default)]
     volume: Vec<f64>,
     #[serde(default)]
-    timestamp: Vec<serde_json::Number>,
+    timestamp: Option<Vec<serde_json::Number>>,
 }
 impl Columns {
     fn candles(self) -> Result<Vec<Candle>, ApiError> {
-        let n = self.timestamp.len();
+        let Some(timestamp) = self.timestamp else {
+            return Err(ApiError::Malformed(
+                "response missing timestamp column".into(),
+            ));
+        };
+        let n = timestamp.len();
         if [
             self.open.len(),
             self.high.len(),
@@ -170,10 +179,10 @@ impl Columns {
         (0..n)
             .map(|i| {
                 Ok(Candle {
-                    ts: self.timestamp[i]
+                    ts: timestamp[i]
                         .as_i64()
                         .or_else(|| {
-                            self.timestamp[i]
+                            timestamp[i]
                                 .as_f64()
                                 .filter(|x| {
                                     x.is_finite()
@@ -391,7 +400,7 @@ impl DhanClient {
                 Err(e) => {
                     attempts += 1;
                     if attempts >= 3 {
-                        return Err(ApiError::Server(e.to_string()));
+                        return Err(e);
                     }
                     std::thread::sleep(Duration::from_millis(100 * 2u64.pow(attempts)));
                 }
@@ -400,7 +409,18 @@ impl DhanClient {
                         serde_json::from_slice(&bytes).unwrap_or(ApiErrorBody {
                             error_code: String::new(),
                             error_message: String::new(),
+                            status: None,
+                            remarks: None,
                         });
+                    let has_explicit_error = !err.error_code.is_empty()
+                        || err
+                            .status
+                            .as_deref()
+                            .map(|s| {
+                                s.eq_ignore_ascii_case("failure") || s.eq_ignore_ascii_case("error")
+                            })
+                            .unwrap_or(false);
+
                     if err.error_code == "DH-805" {
                         return Err(ApiError::SevereRateLimit(err.error_message));
                     }
@@ -428,26 +448,26 @@ impl DhanClient {
                             message: err.error_message,
                         });
                     }
+                    if status == StatusCode::UNAUTHORIZED || err.error_code.starts_with("DH-10")
+                    {
+                        return Err(ApiError::Auth(format!(
+                            "{} {}",
+                            status, err.error_message
+                        )));
+                    }
+                    if status == StatusCode::FORBIDDEN {
+                        return Err(ApiError::Access(format!(
+                            "HTTP {status} {}",
+                            err.error_message
+                        )));
+                    }
+                    if status == StatusCode::BAD_REQUEST {
+                        return Err(ApiError::BadRequest {
+                            code: err.error_code,
+                            message: err.error_message,
+                        });
+                    }
                     if !status.is_success() {
-                        if status == StatusCode::UNAUTHORIZED || err.error_code.starts_with("DH-10")
-                        {
-                            return Err(ApiError::Auth(format!(
-                                "{} {}",
-                                status, err.error_message
-                            )));
-                        }
-                        if status == StatusCode::FORBIDDEN {
-                            return Err(ApiError::Access(format!(
-                                "HTTP {status} {}",
-                                err.error_message
-                            )));
-                        }
-                        if status == StatusCode::BAD_REQUEST {
-                            return Err(ApiError::BadRequest {
-                                code: err.error_code,
-                                message: err.error_message,
-                            });
-                        }
                         if status.is_server_error() && attempts < 3 {
                             attempts += 1;
                             std::thread::sleep(Duration::from_millis(100 * 2u64.pow(attempts)));
@@ -460,6 +480,19 @@ impl DhanClient {
                             });
                         }
                         return Err(ApiError::Server(format!("HTTP {status}")));
+                    }
+                    if has_explicit_error {
+                        let code = if !err.error_code.is_empty() {
+                            err.error_code
+                        } else {
+                            err.status.unwrap_or_else(|| "FAILURE".into())
+                        };
+                        let message = if !err.error_message.is_empty() {
+                            err.error_message
+                        } else {
+                            err.remarks.unwrap_or_default()
+                        };
+                        return Err(ApiError::DataApi { code, message });
                     }
                     if bytes.is_empty() {
                         return Ok(Vec::new());
@@ -795,6 +828,50 @@ mod tests {
         assert!(matches!(call(&body), Err(ApiError::DataApi { .. })));
         server.join().unwrap();
         let (body, server) = mock(vec![(200, r#"{"open":[1]"#)], "/charts/intraday");
+        assert!(matches!(call(&body), Err(ApiError::Malformed(_))));
+        server.join().unwrap();
+    }
+    #[test]
+    fn mock_http_200_with_error_body_does_not_swallow() {
+        let (body, server) = mock(
+            vec![(
+                200,
+                r#"{"errorCode":"DH-901","errorMessage":"data error on 200"}"#,
+            )],
+            "/charts/intraday",
+        );
+        match call(&body) {
+            Err(ApiError::DataApi { code, message }) => {
+                assert_eq!(code, "DH-901");
+                assert_eq!(message, "data error on 200");
+            }
+            res => panic!("expected DataApi error, got {res:?}"),
+        }
+        server.join().unwrap();
+
+        let (body, server) = mock(
+            vec![(
+                200,
+                r#"{"status":"failure","remarks":"invalid parameters"}"#,
+            )],
+            "/charts/intraday",
+        );
+        match call(&body) {
+            Err(ApiError::DataApi { code, message }) => {
+                assert_eq!(code, "failure");
+                assert_eq!(message, "invalid parameters");
+            }
+            res => panic!("expected DataApi error, got {res:?}"),
+        }
+        server.join().unwrap();
+
+        let (body, server) = mock(
+            vec![(
+                200,
+                r#"{"unexpected":"json"}"#,
+            )],
+            "/charts/intraday",
+        );
         assert!(matches!(call(&body), Err(ApiError::Malformed(_))));
         server.join().unwrap();
     }
