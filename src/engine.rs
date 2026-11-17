@@ -350,28 +350,36 @@ impl Engine {
         self.cross_prev.fill((None, None));
     }
     fn eval_fast_expr(&self, e: &FastExpr) -> Option<f64> {
-        match e {
+        let v = match e {
             FastExpr::Literal(x) => *x,
             FastExpr::Price(x) => self.provider.price(*x),
             FastExpr::Indicator(h) => self.provider.get(*h),
+        }?;
+        if v.is_finite() {
+            Some(v)
+        } else {
+            None
         }
     }
     fn eval_fast(&self, c: &FastCondition) -> Option<bool> {
         match c {
             FastCondition::Compare { left, op, right } => {
-                self.eval_fast_expr(left)
-                    .zip(self.eval_fast_expr(right))
-                    .map(|(a, b)| match cmp3(a, b) {
-                        std::cmp::Ordering::Less => {
-                            matches!(op, CompareOp::Lt | CompareOp::Le | CompareOp::Ne)
-                        }
-                        std::cmp::Ordering::Equal => {
-                            matches!(op, CompareOp::Le | CompareOp::Ge | CompareOp::Eq)
-                        }
-                        std::cmp::Ordering::Greater => {
-                            matches!(op, CompareOp::Gt | CompareOp::Ge | CompareOp::Ne)
-                        }
-                    })
+                let a = self.eval_fast_expr(left)?;
+                let b = self.eval_fast_expr(right)?;
+                if !a.is_finite() || !b.is_finite() {
+                    return None;
+                }
+                Some(match cmp3(a, b) {
+                    std::cmp::Ordering::Less => {
+                        matches!(op, CompareOp::Lt | CompareOp::Le | CompareOp::Ne)
+                    }
+                    std::cmp::Ordering::Equal => {
+                        matches!(op, CompareOp::Le | CompareOp::Ge | CompareOp::Eq)
+                    }
+                    std::cmp::Ordering::Greater => {
+                        matches!(op, CompareOp::Gt | CompareOp::Ge | CompareOp::Ne)
+                    }
+                })
             }
             FastCondition::Cross {
                 cross_id,
@@ -379,20 +387,24 @@ impl Engine {
                 left,
                 right,
             } => {
-                let (a, b) = self.cross_prev[*cross_id];
-                let (x, y) = (self.eval_fast_expr(left), self.eval_fast_expr(right));
-                a.zip(b)
-                    .zip(x.zip(y))
-                    .map(|((a, b), (x, y))| match direction {
-                        CrossDirection::Above => {
-                            cmp3(a, b) != std::cmp::Ordering::Greater
-                                && cmp3(x, y) == std::cmp::Ordering::Greater
-                        }
-                        CrossDirection::Below => {
-                            cmp3(a, b) != std::cmp::Ordering::Less
-                                && cmp3(x, y) == std::cmp::Ordering::Less
-                        }
-                    })
+                let (a, b) = self.cross_prev.get(*cross_id).copied().unwrap_or((None, None));
+                let x = self.eval_fast_expr(left)?;
+                let y = self.eval_fast_expr(right)?;
+                let a = a?;
+                let b = b?;
+                if !a.is_finite() || !b.is_finite() || !x.is_finite() || !y.is_finite() {
+                    return None;
+                }
+                Some(match direction {
+                    CrossDirection::Above => {
+                        cmp3(a, b) != std::cmp::Ordering::Greater
+                            && cmp3(x, y) == std::cmp::Ordering::Greater
+                    }
+                    CrossDirection::Below => {
+                        cmp3(a, b) != std::cmp::Ordering::Less
+                            && cmp3(x, y) == std::cmp::Ordering::Less
+                    }
+                })
             }
             FastCondition::And(a, b) => match (self.eval_fast(a), self.eval_fast(b)) {
                 (Some(false), _) | (_, Some(false)) => Some(false),
@@ -549,6 +561,27 @@ mod tests {
 
         let p_prev = program("TRADE_IN ABC\nWHEN prev_close > 100\nBUY 1\n");
         assert_eq!(p_prev.warmup_bars(), 1);
+    }
+
+    #[test]
+    fn nan_or_non_finite_values_do_not_fire_rules() {
+        let p = program("TRADE_IN ABC\nWHEN close > 100\nBUY 1\nWHEN CROSS_ABOVE(close, sma(5))\nBUY 1\n");
+        let engine = Engine::new(&p, "ABC".into()).unwrap();
+        let expr = FastExpr::Literal(Some(f64::NAN));
+        let cond_gt = FastCondition::Compare {
+            left: expr,
+            op: CompareOp::Gt,
+            right: FastExpr::Literal(Some(100.0)),
+        };
+        assert_eq!(engine.eval_fast(&cond_gt), None);
+
+        let cond_cross = FastCondition::Cross {
+            cross_id: 0,
+            direction: CrossDirection::Above,
+            left: expr,
+            right: FastExpr::Literal(Some(100.0)),
+        };
+        assert_eq!(engine.eval_fast(&cond_cross), None);
     }
 
     proptest::proptest! {
