@@ -239,6 +239,7 @@ struct Pending {
     req: OrderRequest,
     filled: u64,
     state: OrderState,
+    cancel_requested: bool,
 }
 impl Pending {
     fn live(&self) -> bool {
@@ -512,12 +513,12 @@ impl Trader {
         if loss_breached {
             let report_daily_loss = !self.daily_loss_reported;
             self.daily_loss_reported = true;
-            out.cancels.extend(
-                self.orders
-                    .values()
-                    .filter(|o| o.live() && o.req.side == Side::Buy && o.remaining() > 0)
-                    .map(|o| o.req.client_order_id.clone()),
-            );
+            for o in self.orders.values_mut() {
+                if o.live() && !o.cancel_requested && o.req.side == Side::Buy && o.remaining() > 0 {
+                    o.cancel_requested = true;
+                    out.cancels.push(o.req.client_order_id.clone());
+                }
+            }
             let open: Vec<_> = self
                 .positions
                 .iter()
@@ -673,6 +674,7 @@ impl Trader {
                 req: req.clone(),
                 filled: 0,
                 state: OrderState::Submitted,
+                cancel_requested: false,
             },
         );
         out.events.push(TraderEvent::OrderEmitted(req.clone()));

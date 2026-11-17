@@ -1395,9 +1395,11 @@ fn run_internal(
             let out = trader.on_frame(&frame, c, mode);
             events.extend(out.events.clone());
             for id in out.cancels {
-                broker
-                    .cancel(id)
-                    .map_err(|e| SimError::Other(format!("broker cancel: {e:?}")))?;
+                match broker.cancel(id) {
+                    Ok(()) => {}
+                    Err(PortError::UnknownOrder(_)) => {}
+                    Err(e) => return Err(SimError::Other(format!("broker cancel: {e:?}"))),
+                }
             }
             for req in &out.orders {
                 broker
@@ -2175,6 +2177,41 @@ mod tests {
         assert_eq!(result.fills[2].side, Side::Sell);
         assert_eq!(result.fills[2].reason, OrderReason::DailyLossFlatten);
         assert_eq!(result.open_positions.iter().map(|p| p.qty).sum::<i64>(), 0);
+        assert!(result
+            .events
+            .iter()
+            .any(|event| matches!(event, TraderEvent::DailyLossBreached)));
+    }
+
+    #[test]
+    fn multi_symbol_daily_loss_does_not_crash_on_duplicate_cancels() {
+        let source_text =
+            "TRADE_IN ABC, XYZ\nRISK MAX_DAILY_LOSS 0.1%\nWHEN close > 0\nBUY 2\nWHEN close < 95\nSELL 1\n";
+        let program = crate::compile(source_text).unwrap();
+        let tz = FixedOffset::east_opt(19800).unwrap();
+        let d1 = chrono::NaiveDate::from_ymd_opt(2024, 5, 6).unwrap();
+        let ts = |h, m| {
+            tz.from_local_datetime(&d1.and_hms_opt(h, m, 0).unwrap())
+                .single()
+                .unwrap()
+                .timestamp()
+        };
+        // ABC signals and buys; XYZ has active buy order queued when ABC breaches daily loss
+        let source = MemorySource(vec![
+            ("ABC".into(), candle(ts(9, 15), 100.0, 100.0)),
+            ("XYZ".into(), candle(ts(9, 15), 50.0, 50.0)),
+            ("ABC".into(), candle(ts(9, 16), 100.0, 100.0)),
+            ("XYZ".into(), candle(ts(9, 16), 50.0, 50.0)),
+            ("ABC".into(), candle(ts(9, 17), 90.0, 90.0)),
+            ("XYZ".into(), candle(ts(9, 17), 50.0, 50.0)),
+            ("ABC".into(), candle(ts(9, 18), 90.0, 90.0)),
+            ("XYZ".into(), candle(ts(9, 18), 50.0, 50.0)),
+            ("ABC".into(), candle(ts(9, 19), 90.0, 90.0)),
+            ("XYZ".into(), candle(ts(9, 19), 50.0, 50.0)),
+        ]);
+        let mut cfg = config();
+        cfg.initial_cash = 10_000.0;
+        let result = run(&program, &source, cfg, None).unwrap();
         assert!(result
             .events
             .iter()
