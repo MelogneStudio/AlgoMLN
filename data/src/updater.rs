@@ -80,7 +80,7 @@ impl Updater {
         to: NaiveDate,
         do_reconcile: bool,
     ) -> Result<bool, DataError> {
-        let today = chrono::Utc::now().date_naive().to_string();
+        let today = chrono::Utc::now().with_timezone(&Kolkata).date_naive().to_string();
         self.budget_guard(&today)?;
         let run = self.catalog.runs_start()?;
         let mut requests = 0;

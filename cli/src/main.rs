@@ -134,7 +134,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             .get("--to")
             .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
             .transpose()?
-            .unwrap_or_else(|| chrono::Utc::now().date_naive());
+            .unwrap_or_else(|| chrono::Utc::now().with_timezone(&chrono_tz::Asia::Kolkata).date_naive());
         let from_d = opts
             .get("--from")
             .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))

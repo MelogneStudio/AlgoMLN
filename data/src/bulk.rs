@@ -5,6 +5,7 @@ use crate::store::Store;
 use crate::types::Tf;
 use crate::updater::{plan_requests, Updater, DEFAULT_BUDGET_CAP};
 use chrono::NaiveDate;
+use chrono_tz::Asia::Kolkata;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -83,7 +84,7 @@ pub struct BulkDownloader<F: Fn() -> Box<dyn HistoryApi>> {
 
 impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
     fn today(&self) -> String {
-        chrono::Utc::now().date_naive().to_string()
+        chrono::Utc::now().with_timezone(&Kolkata).date_naive().to_string()
     }
 
     /// Resolve the processing order: priority symbols first (in file order),
@@ -212,7 +213,7 @@ impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
                     }
                     Err(e) => {
                         let cat = Catalog::open(&self.catalog_path)?;
-                        let next_retry = chrono::Utc::now().date_naive()
+                        let next_retry = chrono::Utc::now().with_timezone(&Kolkata).date_naive()
                             + chrono::Days::new(self.config.failure_backoff_days);
                         cat.record_failure(
                             id,
@@ -386,7 +387,7 @@ impl<F: Fn() -> Box<dyn HistoryApi> + Sync> BulkDownloader<F> {
                                 }
                                 Err(e) => {
                                     if let Ok(cat) = Catalog::open(&self.catalog_path) {
-                                        let next_retry = chrono::Utc::now().date_naive()
+                                        let next_retry = chrono::Utc::now().with_timezone(&Kolkata).date_naive()
                                             + chrono::Days::new(self.config.failure_backoff_days);
                                         let _ = cat.record_failure(
                                             id,

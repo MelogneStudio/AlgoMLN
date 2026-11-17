@@ -877,7 +877,7 @@ fn bulk_stops_at_soft_cap_and_budget_survives_restart() {
     cat.refresh_instruments(&[scrip("1", "AAA"), scrip("2", "BBB")], 0)
         .unwrap();
     // Pre-seed today's budget so the cap is reached after the first symbol.
-    let today = chrono::Utc::now().date_naive().to_string();
+    let today = chrono::Utc::now().with_timezone(&Kolkata).date_naive().to_string();
     cat.budget_add(&today, 1).unwrap();
     drop(cat);
     let from = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();

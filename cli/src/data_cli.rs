@@ -2,6 +2,7 @@ use algomln_data::{
     Bar, BulkConfig, BulkDownloader, Catalog, Store, Tf, Updater, DEFAULT_BUDGET_CAP,
 };
 use chrono::{Datelike, NaiveDate, Utc};
+use chrono_tz::Asia::Kolkata;
 use dhan_api::{parse_scrip_master, DhanClient, KeychainEnvTokenProvider};
 use std::{
     path::PathBuf,
@@ -70,7 +71,7 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 .get("--to")
                 .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
                 .transpose()?
-                .unwrap_or_else(|| Utc::now().date_naive());
+                .unwrap_or_else(|| Utc::now().with_timezone(&Kolkata).date_naive());
             let from = opts
                 .get("--from")
                 .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
@@ -244,7 +245,8 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             };
             if opts.contains_key("--dry-run") {
                 let report = bulk.dry_run()?;
-                let remaining = cat.budget_used(&Utc::now().date_naive().to_string())?;
+                let today = Utc::now().with_timezone(&Kolkata).date_naive().to_string();
+                let remaining = cat.budget_used(&today)?;
                 let budget_left = budget_cap.saturating_sub(remaining);
                 println!("dry-run: {} symbols", report.symbols_total);
                 let mut total = 0usize;
@@ -264,13 +266,14 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 eprint!("\r{}", p.line());
             })?;
             eprintln!();
+            let today = Utc::now().with_timezone(&Kolkata).date_naive().to_string();
             println!(
                 "bulk finished: {}/{} symbols | requests used {} | failures {} | budget {}/{}",
                 report.symbols_completed,
                 report.symbols_total,
                 report.requests_used,
                 report.failures,
-                cat.budget_used(&Utc::now().date_naive().to_string())?,
+                cat.budget_used(&today)?,
                 budget_cap,
             );
             let fp = cat.catalog_fingerprint()?;
@@ -279,7 +282,7 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 println!("interrupted; progress is saved, rerun to continue");
             }
             if report.budget_reached {
-                let used = cat.budget_used(&Utc::now().date_naive().to_string())?;
+                let used = cat.budget_used(&today)?;
                 return Err(format!(
                     "daily budget reached ({used}/{budget_cap}); rerun tomorrow, progress is saved"
                 )
@@ -294,7 +297,7 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 /// excluded until the daily-close settle time is verified). Weekends roll back
 /// to Friday; exchange holidays are not modelled here.
 fn last_completed_session() -> NaiveDate {
-    let mut d = Utc::now().date_naive() - chrono::Days::new(1);
+    let mut d = Utc::now().with_timezone(&Kolkata).date_naive() - chrono::Days::new(1);
     while matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
         d = d - chrono::Days::new(1);
     }
@@ -359,4 +362,18 @@ fn import_file(
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_last_completed_session_is_trading_day() {
+        let session = last_completed_session();
+        assert!(
+            session.weekday() != chrono::Weekday::Sat && session.weekday() != chrono::Weekday::Sun,
+            "last completed session cannot be Saturday or Sunday"
+        );
+    }
 }
