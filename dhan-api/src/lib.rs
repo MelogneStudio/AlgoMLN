@@ -1,5 +1,6 @@
 pub mod client;
 pub mod error;
+pub mod feed;
 pub mod limiter;
 pub mod scrip;
 pub mod token;
