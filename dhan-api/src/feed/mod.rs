@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod candle;
 pub mod connection;
 pub mod decoder;
 pub mod metrics;
@@ -9,6 +10,7 @@ pub mod source;
 pub mod subscribe;
 
 pub use auth::{build_feed_url, parse_and_validate_token, AuthError, TokenClaims};
+pub use candle::{CandleBuilder, CandleBuilderConfig, ClosedCandle, SessionWindow};
 pub use connection::{FeedConfig, FeedError, LiveSource};
 pub use decoder::{decode, DecodeError, DepthLevel, Header, Packet};
 pub use metrics::ConnectionMetrics;
