@@ -23,7 +23,7 @@ fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
 }
 
 pub struct ReplaySource {
-    reader: Box<dyn BufRead>,
+    reader: Box<dyn BufRead + Send>,
     deduper: Deduper,
     current_time_t: Option<f64>,
     emitted_connected: bool,
@@ -33,7 +33,7 @@ pub struct ReplaySource {
 }
 
 impl ReplaySource {
-    pub fn new(reader: Box<dyn BufRead>) -> Self {
+    pub fn new(reader: Box<dyn BufRead + Send>) -> Self {
         Self {
             reader,
             deduper: Deduper::new(),
@@ -50,7 +50,7 @@ impl ReplaySource {
         Ok(Self::new(Box::new(BufReader::new(file))))
     }
 
-    pub fn from_reader<R: BufRead + 'static>(reader: R) -> Self {
+    pub fn from_reader<R: BufRead + Send + 'static>(reader: R) -> Self {
         Self::new(Box::new(reader))
     }
 

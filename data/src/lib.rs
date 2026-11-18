@@ -2,6 +2,7 @@ pub mod bulk;
 pub mod catalog;
 pub mod error;
 pub mod history;
+pub mod live;
 pub mod session;
 pub mod source;
 pub mod store;
@@ -19,6 +20,7 @@ pub use bulk::{BulkConfig, BulkDownloader, BulkReport, Progress};
 pub use catalog::Catalog;
 pub use error::DataError;
 pub use history::HistoryApi;
+pub use live::LiveCandleSource;
 pub use session::{
     check_overlap, chunk_dates, chunk_dates_limited, complete_intraday, last_complete_bar,
     local_midnight, missing_date_ranges, session_regime_changes, session_shapes, ts_to_ist_date,

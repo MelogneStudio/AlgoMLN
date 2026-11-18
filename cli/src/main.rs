@@ -16,7 +16,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let command = args.next().ok_or("usage: algomln run|data ...")?;
     if command == "--help" || command == "-h" {
-        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps]\nalgomln data <update|status|verify|import|bulk> [options]\nalgomln data bulk --universe nse-eq --tf 1d,1m --from DATE [--to DATE] [--symbols FILE] [--budget N] [--dry-run] --master CSV");
+        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps] [--replay FILE] [--live] [--record FILE]\nalgomln data <update|status|verify|import|bulk> [options]\nalgomln data bulk --universe nse-eq --tf 1d,1m --from DATE [--to DATE] [--symbols FILE] [--budget N] [--dry-run] --master CSV");
         return Ok(());
     }
     if command == "data" {
@@ -36,7 +36,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         if matches!(
             k.as_str(),
-            "--skip-bad" | "--debug-invariants" | "--update" | "--allow-gaps" | "--timings"
+            "--skip-bad" | "--debug-invariants" | "--update" | "--allow-gaps" | "--timings" | "--live"
         ) {
             opts.insert(k, "true".into());
             continue;
@@ -58,6 +58,8 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             "--gap-policy",
             "--csv-tz",
             "--out",
+            "--replay",
+            "--record",
         ]
         .contains(&k.as_str())
         {
@@ -207,12 +209,67 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let mut legacy = FileSource::new(data.clone());
     legacy.csv_tz = opts.get("--csv-tz").cloned();
     legacy.skip_bad = opts.contains_key("--skip-bad");
-    let src: &dyn algomln::sim::CandleSource =
-        if opts.contains_key("--csv-tz") || opts.contains_key("--skip-bad") {
-            &legacy
-        } else {
-            &catalog
-        };
+
+    let live_source_holder;
+    let src: &dyn algomln::sim::CandleSource = if let Some(replay_path) = opts.get("--replay") {
+        let replay = dhan_api::feed::ReplaySource::from_file(replay_path)?;
+        let mut sym_map = std::collections::HashMap::new();
+        let db = data.join("catalog.sqlite");
+        if let Ok(cat) = algomln_data::Catalog::open(&db) {
+            for sym in &symbols {
+                if let Ok((id_str, _)) = cat.resolve(sym) {
+                    let id: i32 = id_str.parse().unwrap_or(0);
+                    let is_fno = cat.instrument(&id_str).is_ok();
+                    sym_map.insert(sym.clone(), (id, is_fno));
+                }
+            }
+        }
+        let mut cat_src = algomln_data::CatalogSource::new(
+            algomln_data::Store::new(&data),
+            data.join("catalog.sqlite"),
+        );
+        cat_src.warmup_bars = warmup_bars;
+        cat_src.allow_gaps = opts.contains_key("--allow-gaps");
+        live_source_holder = Some(
+            algomln_data::LiveCandleSource::new(Box::new(replay), sym_map).with_catalog(cat_src),
+        );
+        live_source_holder.as_ref().unwrap()
+    } else if opts.contains_key("--live") {
+        let token = std::env::var("DHAN_ACCESS_TOKEN")
+            .map_err(|_| "missing DHAN_ACCESS_TOKEN for live feed")?;
+        let mut instruments = Vec::new();
+        let mut sym_map = std::collections::HashMap::new();
+        let db = data.join("catalog.sqlite");
+        if let Ok(cat) = algomln_data::Catalog::open(&db) {
+            for sym in &symbols {
+                if let Ok((id_str, _)) = cat.resolve(sym) {
+                    let id: i32 = id_str.parse().unwrap_or(0);
+                    let is_fno = cat.instrument(&id_str).is_ok();
+                    sym_map.insert(sym.clone(), (id, is_fno));
+                    instruments.push(dhan_api::feed::InstrumentSubscription::nse_eq(&id_str));
+                }
+            }
+        }
+        let mut feed_cfg = dhan_api::feed::FeedConfig::new(token, instruments);
+        if let Some(rec) = opts.get("--record") {
+            feed_cfg = feed_cfg.with_record_path(rec);
+        }
+        let live = dhan_api::feed::LiveSource::connect(feed_cfg)?;
+        let mut cat_src = algomln_data::CatalogSource::new(
+            algomln_data::Store::new(&data),
+            data.join("catalog.sqlite"),
+        );
+        cat_src.warmup_bars = warmup_bars;
+        cat_src.allow_gaps = opts.contains_key("--allow-gaps");
+        live_source_holder = Some(
+            algomln_data::LiveCandleSource::new(Box::new(live), sym_map).with_catalog(cat_src),
+        );
+        live_source_holder.as_ref().unwrap()
+    } else if opts.contains_key("--csv-tz") || opts.contains_key("--skip-bad") {
+        &legacy
+    } else {
+        &catalog
+    };
     let number = |key: &str, default: f64| {
         opts.get(key).map_or(Ok(default), |s| {
             s.parse().map_err(|e| format!("invalid {key}: {e}"))
