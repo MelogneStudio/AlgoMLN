@@ -303,3 +303,22 @@ fn ring_buffer_indicators_long_series_continuity() {
         }
     }
 }
+
+#[test]
+fn rel_vol_period_zero_does_not_panic_and_long_series_updates_consistently() {
+    use super::rel_vol::RelVol;
+    use super::state::Indicator;
+    let mut rv0 = RelVol::new(0);
+    let c = sample(1, 100.0, 50.0);
+    assert_eq!(rv0.update(&c), None);
+
+    let mut rv5 = RelVol::new(5);
+    for i in 1..=5000 {
+        let c = sample(i, 100.0, 100.0);
+        let out = rv5.update(&c);
+        if i > 5 {
+            assert!(out.is_some());
+            assert!((out.unwrap() - 1.0).abs() < 1e-6);
+        }
+    }
+}
