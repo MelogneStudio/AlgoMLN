@@ -79,15 +79,15 @@ pub fn write_results(dir: impl Into<PathBuf>, result: &RunResult) -> Result<(), 
     e.flush()?;
     std::fs::write(
         dir.join("open_positions.json"),
-        serde_json::to_vec_pretty(&result.open_positions).expect("serializable"),
+        to_json_bytes(&result.open_positions)?,
     )?;
     std::fs::write(
         dir.join("events.json"),
-        serde_json::to_vec_pretty(&result.events).expect("serializable"),
+        to_json_bytes(&result.events)?,
     )?;
     std::fs::write(
         dir.join("manifest.json"),
-        serde_json::to_vec_pretty(&result.manifest).expect("serializable"),
+        to_json_bytes(&result.manifest)?,
     )?;
     let start = result
         .manifest
@@ -108,7 +108,7 @@ pub fn write_results(dir: impl Into<PathBuf>, result: &RunResult) -> Result<(), 
     let metrics = build_metrics(result, start_paise, end_paise, max_dd);
     std::fs::write(
         dir.join("metrics.json"),
-        serde_json::to_vec_pretty(&metrics).expect("serializable"),
+        to_json_bytes(&metrics)?,
     )?;
     let mut t = csv::Writer::from_writer(File::create(dir.join("trades.csv"))?);
     csv_record(
@@ -161,6 +161,10 @@ fn csv_record(writer: &mut csv::Writer<File>, fields: Vec<String>) -> Result<(),
 
 fn csv_io_error(error: csv::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+}
+
+fn to_json_bytes<T: serde::Serialize>(val: &T) -> Result<Vec<u8>, std::io::Error> {
+    serde_json::to_vec_pretty(val).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 fn build_metrics(

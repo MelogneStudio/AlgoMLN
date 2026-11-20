@@ -749,3 +749,16 @@ use crate::{
         assert_eq!(f1.stats().skipped_bad.get("ABC").copied(), Some(5));
         assert_eq!(f2.stats().skipped_bad.get("ABC").copied(), None, "f2 stats must be isolated from f1");
     }
+
+    #[test]
+    fn write_results_handles_export_without_panic() {
+        let p = crate::compile("TRADE_IN A\nWHEN close > 0\nBUY 1\n").unwrap();
+        let src = MemorySource(vec![("A".into(), candle(1, 10.0, 10.0))]);
+        let cfg = config();
+        let r = run(&p, &src, cfg, None).unwrap();
+        let temp_dir = std::env::temp_dir().join("algomln_export_test");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let res_write = super::export::write_results(&temp_dir, &r);
+        assert!(res_write.is_ok());
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
