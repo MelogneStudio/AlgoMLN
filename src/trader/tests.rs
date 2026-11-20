@@ -715,3 +715,28 @@ fn fill_without_prior_ack_is_accepted() {
     assert_eq!(t.net_position("ABC"), 5);
     assert_eq!(t.pending_order_count(), 0);
 }
+
+#[test]
+fn gap_up_open_does_not_result_in_negative_cash() {
+    let mut t = trader("TRADE_IN ABC\nWHEN close > 1\nBUY 10\n", 100.0);
+    let out = t.on_frame(
+        &frame(1, &[("rule_1", true)], &[]),
+        &candle(1, 10.0),
+        Mode::Act,
+    );
+    assert_eq!(out.orders.len(), 1);
+    let order_id = &out.orders[0].client_order_id;
+    // Order was 10 shares at ref_price 10.0 (total 100.0 cash)
+    // Fills at 25.0 (gap up to 25.0, where 10 shares would cost 250.0)
+    let events = t.on_order_event(OrderEvent::Filled {
+        id: order_id.clone(),
+        qty: 10,
+        price: 25.0,
+        fees: 0.0,
+    });
+    // With 100.0 cash and 25.0 price, max affordable is 4 shares
+    assert!(events.iter().any(|e| matches!(e, TraderEvent::Fill { qty: 4, .. })));
+    assert_eq!(t.net_position("ABC"), 4);
+    assert!(t.cash_paise() >= 0);
+    assert_eq!(t.cash_paise(), 0);
+}

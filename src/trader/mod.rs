@@ -163,12 +163,19 @@ impl Trader {
                     if !price.is_finite() || price <= 0.0 || !fees.is_finite() || fees < 0.0 {
                         return events;
                     }
+                    let booked_price = paise_to_rupees(rupees_to_paise(price));
+                    let booked_fees = paise_to_rupees(rupees_to_paise(fees));
+                    let booked_price_paise = rupees_to_paise(price);
+                    let booked_fees_paise = rupees_to_paise(fees);
                     let remaining_before = o.remaining();
-                    let q = qty.min(remaining_before);
+                    let mut q = qty.min(remaining_before);
+                    if o.req.side == Side::Buy && booked_price_paise > 0 {
+                        let max_affordable = ((self.cash_paise.saturating_sub(booked_fees_paise)).max(0)
+                            / booked_price_paise) as u64;
+                        q = q.min(max_affordable);
+                    }
                     if q > 0 {
                         o.filled += q;
-                        let booked_price = paise_to_rupees(rupees_to_paise(price));
-                        let booked_fees = paise_to_rupees(rupees_to_paise(fees));
                         fill = Some((
                             o.req.symbol.clone(),
                             o.req.side,
@@ -231,9 +238,11 @@ impl Trader {
                     round_half_even_ratio(old_cost + fill_cost, total.max(1) as i128)
                         .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
                 pos.filled_qty = total;
+                let total_cost = q_i.saturating_mul(p).saturating_add(fees);
                 self.cash_paise = self
                     .cash_paise
-                    .saturating_sub(q_i.saturating_mul(p).saturating_add(fees));
+                    .saturating_sub(total_cost)
+                    .max(0);
             }
             Side::Sell => {
                 let closed = q.min(pos.filled_qty.max(0) as u64);
