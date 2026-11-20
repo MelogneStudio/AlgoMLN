@@ -19,6 +19,10 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         if !k.starts_with("--") {
             return Err(format!("unexpected argument {k}").into());
         }
+        if matches!(k.as_str(), "--dry-run") {
+            opts.insert(k, "true".into());
+            continue;
+        }
         opts.insert(
             k.clone(),
             it.next().ok_or_else(|| format!("missing value for {k}"))?,
