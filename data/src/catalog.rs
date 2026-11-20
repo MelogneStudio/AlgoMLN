@@ -42,29 +42,31 @@ impl Catalog {
                 "catalog schema version {version} is newer than supported version 2"
             )));
         }
-        let (has_instrument, has_is_fno): (bool, bool) = {
-            let mut q = conn.prepare("PRAGMA table_info(instruments)")?;
-            let names = q
-                .query_map([], |r| r.get::<_, String>(1))?
-                .collect::<Result<Vec<_>, _>>()?;
-            (
-                names.iter().any(|x| x == "instrument"),
-                names.iter().any(|x| x == "is_fno"),
-            )
-        };
-        if !has_instrument {
-            conn.execute(
-                "ALTER TABLE instruments ADD COLUMN instrument TEXT NOT NULL DEFAULT 'EQUITY'",
-                [],
-            )?;
+        if version < 2 {
+            let (has_instrument, has_is_fno): (bool, bool) = {
+                let mut q = conn.prepare("PRAGMA table_info(instruments)")?;
+                let names = q
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                (
+                    names.iter().any(|x| x == "instrument"),
+                    names.iter().any(|x| x == "is_fno"),
+                )
+            };
+            if !has_instrument {
+                let _ = conn.execute(
+                    "ALTER TABLE instruments ADD COLUMN instrument TEXT NOT NULL DEFAULT 'EQUITY'",
+                    [],
+                );
+            }
+            if !has_is_fno {
+                let _ = conn.execute(
+                    "ALTER TABLE instruments ADD COLUMN is_fno INTEGER NOT NULL DEFAULT 0",
+                    [],
+                );
+            }
+            let _ = conn.execute_batch("PRAGMA user_version=2;");
         }
-        if !has_is_fno {
-            conn.execute(
-                "ALTER TABLE instruments ADD COLUMN is_fno INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
-        conn.execute_batch("PRAGMA user_version=2;")?;
         Ok(Self { conn })
     }
 

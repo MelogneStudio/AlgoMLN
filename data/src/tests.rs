@@ -1177,3 +1177,24 @@ fn store_path_traversal_is_rejected() {
     }
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn test_concurrent_catalog_open() {
+    let root = temp("concurrent-cat-open");
+    fs::create_dir_all(&root).unwrap();
+    let db = root.join("catalog.sqlite");
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let path = db.clone();
+        handles.push(std::thread::spawn(move || {
+            let cat = Catalog::open(&path);
+            if let Err(e) = cat {
+                panic!("Catalog::open failed: {e}");
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let _ = fs::remove_dir_all(root);
+}
