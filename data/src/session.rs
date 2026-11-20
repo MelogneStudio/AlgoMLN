@@ -183,7 +183,8 @@ pub fn check_overlap(old: &[Bar], new: &[Bar]) -> (&'static str, Vec<i64>) {
         return ("identical", diffs);
     }
     let avg = ratios.iter().sum::<f64>() / ratios.len().max(1) as f64;
-    if ratios.len() == overlap
+    if overlap > 1
+        && ratios.len() == overlap
         && ratios.iter().all(|x| (x - avg).abs() < 1e-6)
         && (avg - 1.0).abs() > 1e-4
     {

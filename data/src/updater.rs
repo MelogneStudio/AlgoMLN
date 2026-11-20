@@ -219,23 +219,8 @@ impl Updater {
                     let (kind, diffs) = check_overlap(&existing_all, &saved);
                     if kind == "corporate_action" {
                         let sid = self.catalog.series(security_id, tf)?;
-                        self.catalog
-                            .conn
-                            .execute("UPDATE series SET needs_refresh=1 WHERE id=?1", [sid])?;
-                        self.store.remove_series_files(security_id, tf)?;
-                        self.catalog
-                            .conn
-                            .execute("DELETE FROM partitions WHERE series_id=?1", [sid])?;
-                        self.catalog
-                            .conn
-                            .execute("DELETE FROM coverage WHERE series_id=?1", [sid])?;
-                        self.catalog
-                            .conn
-                            .execute("DELETE FROM sessions WHERE series_id=?1", [sid])?;
-                        self.catalog.conn.execute(
-                            "UPDATE series SET first_ts=NULL,last_ts=NULL,rows=0 WHERE id=?1",
-                            [sid],
-                        )?;
+                        // Stage all downloads into memory first to guarantee API success before deleting existing data
+                        let mut staged = Vec::new();
                         for (full_from, full_to) in chunks.clone() {
                             self.budget_guard(&today)?;
                             let full = if tf == Tf::D1 {
@@ -263,10 +248,29 @@ impl Updater {
                                     self.margin_seconds,
                                 )
                             };
-                            if complete.is_empty() {
-                                continue;
-                            }
-                            let parts = self.store.write_partitions(security_id, tf, &complete)?;
+                            staged.extend(complete);
+                        }
+
+                        // Staging succeeded without error; now safe to purge old files and catalog entries
+                        self.catalog
+                            .conn
+                            .execute("UPDATE series SET needs_refresh=1 WHERE id=?1", [sid])?;
+                        self.store.remove_series_files(security_id, tf)?;
+                        self.catalog
+                            .conn
+                            .execute("DELETE FROM partitions WHERE series_id=?1", [sid])?;
+                        self.catalog
+                            .conn
+                            .execute("DELETE FROM coverage WHERE series_id=?1", [sid])?;
+                        self.catalog
+                            .conn
+                            .execute("DELETE FROM sessions WHERE series_id=?1", [sid])?;
+                        self.catalog.conn.execute(
+                            "UPDATE series SET first_ts=NULL,last_ts=NULL,rows=0 WHERE id=?1",
+                            [sid],
+                        )?;
+                        if !staged.is_empty() {
+                            let parts = self.store.write_partitions(security_id, tf, &staged)?;
                             for p in parts {
                                 self.catalog.record_partition(sid, &self.store, &p)?;
                             }

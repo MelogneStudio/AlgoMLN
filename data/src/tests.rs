@@ -252,6 +252,11 @@ fn overlap_classifies_split_ratio_and_revision() {
     let revision = vec![bar(60, 101.0), bar(120, 200.0)];
     assert_eq!(check_overlap(&a, &revision).0, "revised");
     assert_eq!(check_overlap(&a, &a).0, "identical");
+
+    // CRIT-01 regression: single-bar overlap price change must be "revised", never "corporate_action"
+    let single_a = vec![bar(60, 100.0)];
+    let single_rev = vec![bar(60, 100.05)];
+    assert_eq!(check_overlap(&single_a, &single_rev).0, "revised");
 }
 
 #[test]
