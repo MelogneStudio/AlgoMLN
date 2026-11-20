@@ -157,6 +157,10 @@ fn test_mock_websocket_flow() {
     let rec_content = std::fs::read_to_string(&record_path).unwrap();
     assert!(rec_content.contains(r#""hex": "02100001450b00009a99a244"#));
 
+    // Verify metrics synchronized to LiveSource
+    let m = source.metrics();
+    assert_eq!(*m.packets_by_code.get(&2).unwrap_or(&0), 1);
+
     source.stop();
     let _ = std::fs::remove_dir_all(record_dir);
 }

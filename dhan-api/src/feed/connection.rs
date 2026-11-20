@@ -283,6 +283,8 @@ async fn run_feed_loop(
             Arc::clone(&config.clock),
         );
         let mut ltt_detector = LttDetector::new(config.ltt_detector_config.clone());
+        let mut ticker = tokio::time::interval(Duration::from_millis(1000));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             if shutdown.load(Ordering::SeqCst) {
@@ -486,7 +488,7 @@ async fn run_feed_loop(
                         _ => {}
                     }
                 }
-                _ = sleep(Duration::from_millis(1000)) => {
+                _ = ticker.tick() => {
                     // Update shared metrics
                     if let Ok(mut lock) = shared_metrics.try_lock() {
                         *lock = metrics.clone();
