@@ -114,17 +114,26 @@ impl LttDetector {
             }
         };
 
-        // Handle locking and flipping
+        // Handle locking and debounced flipping
         if let Some(locked) = self.locked_convention {
-            if convention != locked {
-                eprintln!(
-                    "WARNING: LTT convention flipped from {} to {}! (recv_utc={}, raw_ltt={})",
-                    locked, convention, recv_utc, raw_ltt
-                );
-                self.convention_flips += 1;
-                self.locked_convention = Some(convention);
-                self.candidate_convention = Some(convention);
-                self.consecutive_matches = 1;
+            if convention == locked {
+                self.candidate_convention = Some(locked);
+                self.consecutive_matches = self.config.consecutive_ticks_to_lock;
+            } else {
+                if self.candidate_convention == Some(convention) {
+                    self.consecutive_matches += 1;
+                    if self.consecutive_matches >= self.config.consecutive_ticks_to_lock {
+                        eprintln!(
+                            "WARNING: LTT convention flipped from {} to {}! (recv_utc={}, raw_ltt={})",
+                            locked, convention, recv_utc, raw_ltt
+                        );
+                        self.convention_flips += 1;
+                        self.locked_convention = Some(convention);
+                    }
+                } else {
+                    self.candidate_convention = Some(convention);
+                    self.consecutive_matches = 1;
+                }
             }
         } else {
             if self.candidate_convention == Some(convention) {
@@ -344,13 +353,24 @@ mod tests {
         assert_eq!(detector.locked_convention, Some(LttConvention::IstShifted));
         assert_eq!(detector.convention_flips, 0);
 
-        // Now Dhan flips convention to true UTC
+        // Now Dhan flips convention to true UTC.
+        // Isolated tick 1: does NOT flip locked convention yet
         let utc_ltt = (base_utc + 10) as i32;
-        let res = detector.detect(utc_ltt, base_utc + 10);
+        detector.detect(utc_ltt, base_utc + 10);
+        assert_eq!(detector.locked_convention, Some(LttConvention::IstShifted));
+        assert_eq!(detector.convention_flips, 0);
+
+        // Tick 2: still pending confirmation
+        detector.detect(utc_ltt + 1, base_utc + 11);
+        assert_eq!(detector.locked_convention, Some(LttConvention::IstShifted));
+        assert_eq!(detector.convention_flips, 0);
+
+        // Tick 3: reaches consecutive_ticks_to_lock (3) -> confirms flip!
+        let res = detector.detect(utc_ltt + 2, base_utc + 12);
         assert_eq!(
             res,
             LttDetectionResult::Valid {
-                time_utc: base_utc + 10,
+                time_utc: base_utc + 12,
                 convention: LttConvention::Utc,
             }
         );
