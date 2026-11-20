@@ -1,4 +1,5 @@
 use crate::feed::auth::{build_feed_url, parse_and_validate_token, AuthError};
+use crate::feed::candle::SessionWindow;
 use crate::feed::decoder::{decode, Packet};
 use crate::feed::metrics::ConnectionMetrics;
 use crate::feed::normalize::{
@@ -7,13 +8,14 @@ use crate::feed::normalize::{
 use crate::feed::record::RecordWriter;
 use crate::feed::source::{FeedEvent, TickSource};
 use crate::feed::subscribe::{batch_subscriptions, InstrumentSubscription, RequestCode, SubscriptionError};
+use crate::feed::watchdog::{FeedClock, FeedWatchdog, SystemFeedClock, WatchdogAction};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::time::sleep;
 use tokio_tungstenite::connect_async;
@@ -33,6 +35,8 @@ pub struct FeedConfig {
     pub record_path: Option<PathBuf>,
     pub planned_session_duration: Option<Duration>,
     pub watchdog_timeout: Duration,
+    pub session_window: SessionWindow,
+    pub clock: Arc<dyn FeedClock>,
     pub initial_backoff: Duration,
     pub max_backoff: Duration,
     pub max_reconnect_attempts: Option<usize>,
@@ -49,6 +53,8 @@ impl FeedConfig {
             record_path: None,
             planned_session_duration: None,
             watchdog_timeout: DEFAULT_WATCHDOG_TIMEOUT,
+            session_window: SessionWindow::for_instrument(true),
+            clock: Arc::new(SystemFeedClock),
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
             max_reconnect_attempts: None,
@@ -58,6 +64,21 @@ impl FeedConfig {
 
     pub fn with_record_path<P: AsRef<Path>>(mut self, path: P) -> Self {
         self.record_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn FeedClock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    pub fn with_session_window(mut self, window: SessionWindow) -> Self {
+        self.session_window = window;
+        self
+    }
+
+    pub fn with_is_fno(mut self, is_fno: bool) -> Self {
+        self.session_window = SessionWindow::for_instrument(is_fno);
         self
     }
 }
@@ -219,7 +240,11 @@ async fn run_feed_loop(
             continue;
         }
 
-        let mut last_activity = Instant::now();
+        let mut watchdog = FeedWatchdog::new(
+            config.session_window,
+            config.watchdog_timeout,
+            Arc::clone(&config.clock),
+        );
         let mut ltt_detector = LttDetector::new(config.ltt_detector_config.clone());
 
         loop {
@@ -243,7 +268,7 @@ async fn run_feed_loop(
                         }
                     };
 
-                    last_activity = Instant::now();
+                    watchdog.record_activity();
 
                     match msg {
                         Message::Ping(data) => {
@@ -396,9 +421,9 @@ async fn run_feed_loop(
                     }
                 }
                 _ = sleep(Duration::from_millis(1000)) => {
-                    // Watchdog check: 40s no activity -> reconnect
-                    if last_activity.elapsed() > config.watchdog_timeout {
-                        eprintln!("watchdog timeout (no ping/message for 40s); reconnecting...");
+                    // Watchdog check: only arms inside trading window, timeout triggers reconnect
+                    if let WatchdogAction::TriggeredTimeout { elapsed_secs, timeout_secs } = watchdog.check_now() {
+                        eprintln!("watchdog timeout (no activity for {elapsed_secs}s >= {timeout_secs}s inside trading window); reconnecting...");
                         break;
                     }
                 }

@@ -8,6 +8,7 @@ pub mod record;
 pub mod replay;
 pub mod source;
 pub mod subscribe;
+pub mod watchdog;
 
 pub use auth::{build_feed_url, parse_and_validate_token, AuthError, TokenClaims};
 pub use candle::{CandleBuilder, CandleBuilderConfig, ClosedCandle, SessionWindow};
@@ -24,4 +25,7 @@ pub use source::{FeedEvent, TickSource};
 pub use subscribe::{
     batch_subscriptions, InstrumentSubscription, RequestCode, SubscribeMessage,
     SubscriptionError,
+};
+pub use watchdog::{
+    FeedClock, FeedWatchdog, ManualFeedClock, SystemFeedClock, WatchdogAction,
 };
