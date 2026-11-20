@@ -151,8 +151,14 @@ impl Trader {
                 | OrderEvent::Filled {
                     qty, price, fees, ..
                 } => {
-                    if !matches!(o.state, OrderState::Acked | OrderState::PartialFill) {
+                    if !matches!(
+                        o.state,
+                        OrderState::Submitted | OrderState::Acked | OrderState::PartialFill
+                    ) {
                         return events;
+                    }
+                    if o.state == OrderState::Submitted && o.req.side == Side::Buy {
+                        self.accepted_buys_today += 1;
                     }
                     if !price.is_finite() || price <= 0.0 || !fees.is_finite() || fees < 0.0 {
                         return events;

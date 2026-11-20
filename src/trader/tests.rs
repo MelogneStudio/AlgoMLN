@@ -693,3 +693,25 @@ fn positions_limit_reserves_symbols_and_exit_rules_use_remaining_net() {
     );
     assert_eq!(t.net_position("ABC"), 2);
 }
+
+#[test]
+fn fill_without_prior_ack_is_accepted() {
+    let mut t = trader("TRADE_IN ABC\nWHEN close > 1\nBUY 5\n", 100.0);
+    let out = t.on_frame(
+        &frame(1, &[("rule_1", true)], &[]),
+        &candle(1, 10.0),
+        Mode::Act,
+    );
+    assert_eq!(out.orders.len(), 1);
+    let order_id = &out.orders[0].client_order_id;
+    // Deliver Filled directly without sending Acked first
+    let events = t.on_order_event(OrderEvent::Filled {
+        id: order_id.clone(),
+        qty: 5,
+        price: 10.0,
+        fees: 0.0,
+    });
+    assert!(events.iter().any(|e| matches!(e, TraderEvent::Fill { qty: 5, .. })));
+    assert_eq!(t.net_position("ABC"), 5);
+    assert_eq!(t.pending_order_count(), 0);
+}
