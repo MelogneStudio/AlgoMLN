@@ -150,12 +150,19 @@ fn condition(c: &Condition, span: crate::source::Span, d: &mut Vec<Diagnostic>) 
         }
     }
 }
+pub const MAX_INDICATOR_LOOKBACK: u32 = 100_000;
+
 fn validate_expr(e: &NumericExpr, d: &mut Vec<Diagnostic>) {
     if let NumericExpr::Indicator(i) = e {
         if i.period == 0 {
             d.push(diag(
                 "VAL_INDICATOR_PERIOD",
                 "indicator period must be positive",
+            ));
+        } else if i.period > MAX_INDICATOR_LOOKBACK {
+            d.push(diag(
+                "VAL_INDICATOR_PERIOD_TOO_LARGE",
+                "indicator period exceeds maximum lookback of 100,000",
             ));
         }
         if matches!(
@@ -231,5 +238,10 @@ mod tests {
                     .unwrap();
             assert_eq!(percent_valid(&literal), x.starts_with("0."), "{x}");
         }
+    }
+    #[test]
+    fn indicator_lookback_exceeding_max_is_rejected() {
+        let err = crate::compile("TRADE_IN ABC\nWHEN sma(100001) > 10\nBUY 1\n").unwrap_err();
+        assert_eq!(err.code(), "VAL_INDICATOR_PERIOD_TOO_LARGE");
     }
 }
