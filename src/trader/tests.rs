@@ -740,3 +740,13 @@ fn gap_up_open_does_not_result_in_negative_cash() {
     assert!(t.cash_paise() >= 0);
     assert_eq!(t.cash_paise(), 0);
 }
+
+#[test]
+fn naked_sell_does_not_credit_cash() {
+    let mut t = trader("TRADE_IN ABC\nWHEN close > 1\nBUY 5\n", 100.0);
+    let initial_cash = t.cash_paise();
+    // Simulate receiving a Sell fill directly when position is flat
+    t.apply_fill("ABC", Side::Sell, 10, 5000, 0);
+    assert_eq!(t.net_position("ABC"), 0);
+    assert_eq!(t.cash_paise(), initial_cash);
+}

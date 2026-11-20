@@ -262,9 +262,13 @@ impl Trader {
                 if pos.filled_qty == 0 {
                     pos.avg_entry_paise = 0;
                 }
-                self.cash_paise = self
-                    .cash_paise
-                    .saturating_add(q_i.saturating_mul(p).saturating_sub(fees));
+                if closed_i > 0 {
+                    self.cash_paise = self
+                        .cash_paise
+                        .saturating_add(closed_i.saturating_mul(p).saturating_sub(fees));
+                } else if fees > 0 {
+                    self.cash_paise = self.cash_paise.saturating_sub(fees).max(0);
+                }
             }
         }
     }
