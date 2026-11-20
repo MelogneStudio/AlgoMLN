@@ -92,8 +92,10 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let code = std::fs::read_to_string(&strategy)?;
     let program = algomln::compile(&code).map_err(|e| format!("strategy compile failed: {e}"))?;
     let to = date("--to")?.map(|t| t.saturating_add(86_399));
+    let from = date("--from")?;
+    validate_date_range(from, to)?;
     let range = DateRange {
-        from: date("--from")?,
+        from,
         to,
     };
     let symbols: Vec<String> = opts
@@ -142,6 +144,9 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
             .transpose()?
             .unwrap_or(to_d - chrono::Days::new(365 * 5));
+        if from_d > to_d {
+            return Err("from date cannot be after to date".into());
+        }
 
         let data_tf = algomln_data::Tf::parse(tf.as_str()).unwrap();
         let mut symbols_with_gaps = Vec::new();
@@ -384,4 +389,39 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         println!("  output writing:    {:?}", out_time);
     }
     Ok(())
+}
+
+fn validate_date_range(from: Option<i64>, to: Option<i64>) -> Result<(), String> {
+    if let (Some(f), Some(t)) = (from, to) {
+        if f > t {
+            return Err("from date cannot be after to date".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inverted_date_range_is_rejected() {
+        // from: 2024-05-10 00:00:00 IST (ts: 1715281200)
+        // to:   2024-05-01 23:59:59 IST (ts: 1714589999)
+        let from = Some(1715281200);
+        let to = Some(1714589999);
+        let res = validate_date_range(from, to);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "from date cannot be after to date");
+    }
+
+    #[test]
+    fn test_valid_date_range_is_accepted() {
+        let from = Some(1714500000);
+        let to = Some(1715281200);
+        assert!(validate_date_range(from, to).is_ok());
+        assert!(validate_date_range(None, to).is_ok());
+        assert!(validate_date_range(from, None).is_ok());
+        assert!(validate_date_range(None, None).is_ok());
+    }
 }

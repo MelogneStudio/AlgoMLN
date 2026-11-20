@@ -81,6 +81,9 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
                 .transpose()?
                 .unwrap_or(to - chrono::Days::new(365 * 5));
+            if from > to {
+                return Err("from date cannot be after to date".into());
+            }
             let (client, base) = client()?;
             let mut did_work = false;
             for symbol in symbols.split(',').map(str::trim).filter(|x| !x.is_empty()) {
@@ -175,6 +178,9 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
                 .transpose()?
                 .ok_or("data bulk requires --from <YYYY-MM-DD>")?;
+            if from > to {
+                return Err("from date cannot be after to date".into());
+            }
             let budget_cap = opts
                 .get("--budget")
                 .map(|x| x.parse::<u64>())
