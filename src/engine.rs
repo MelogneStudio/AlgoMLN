@@ -142,6 +142,7 @@ enum FastCondition {
     And(Box<FastCondition>, Box<FastCondition>),
     Or(Box<FastCondition>, Box<FastCondition>),
     Not(Box<FastCondition>),
+    #[allow(dead_code)]
     Constant(bool),
 }
 
@@ -274,7 +275,12 @@ impl Engine {
                     let a = compile_condition(a, handles, cross_pairs, cross_map)?;
                     Ok(FastCondition::Not(Box::new(a)))
                 }
-                _ => Ok(FastCondition::Constant(false)),
+                Condition::InPosition => {
+                    Err(EngineError::InvalidProgram("in_position() is not supported by the engine"))
+                }
+                Condition::Between { .. } => {
+                    Err(EngineError::InvalidProgram("between() is not supported by the engine"))
+                }
             }
         }
 
@@ -582,6 +588,17 @@ mod tests {
             right: FastExpr::Literal(Some(100.0)),
         };
         assert_eq!(engine.eval_fast(&cond_cross), None);
+    }
+
+    #[test]
+    fn unsupported_condition_predicates_fail_engine_compilation() {
+        let mut strategy = program("TRADE_IN ABC\nWHEN close > 100\nBUY 1\n").strategy;
+        strategy.rules[0].condition = Condition::InPosition;
+        let p = Program::new(strategy);
+        match Engine::new(&p, "ABC".into()) {
+            Err(EngineError::InvalidProgram(_)) => {}
+            _ => panic!("expected InvalidProgram error"),
+        }
     }
 
     proptest::proptest! {
