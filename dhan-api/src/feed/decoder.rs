@@ -36,7 +36,7 @@ pub enum Packet {
         ltq: i16,
         ltt: i32,
         atp: f32,
-        volume: i32,
+        volume: u32,
         sell_qty: i32,
         buy_qty: i32,
         open: f32,
@@ -49,7 +49,7 @@ pub enum Packet {
         ltq: i16,
         ltt: i32,
         atp: f32,
-        volume: i32,
+        volume: u32,
         sell_qty: i32,
         buy_qty: i32,
         oi: i32,
@@ -91,6 +91,16 @@ fn read_i16(buf: &[u8], offset: usize) -> i16 {
 #[inline]
 fn read_i32(buf: &[u8], offset: usize) -> i32 {
     i32::from_le_bytes([
+        buf[offset],
+        buf[offset + 1],
+        buf[offset + 2],
+        buf[offset + 3],
+    ])
+}
+
+#[inline]
+fn read_u32(buf: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
         buf[offset],
         buf[offset + 1],
         buf[offset + 2],
@@ -181,7 +191,7 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Packet), DecodeError> {
             let ltq = read_i16(buf, 12);
             let ltt = read_i32(buf, 14);
             let atp = read_f32(buf, 18);
-            let volume = read_i32(buf, 22);
+            let volume = read_u32(buf, 22);
             let sell_qty = read_i32(buf, 26);
             let buy_qty = read_i32(buf, 30);
             let open = read_f32(buf, 34);
@@ -214,7 +224,7 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Packet), DecodeError> {
             let ltq = read_i16(buf, 12);
             let ltt = read_i32(buf, 14);
             let atp = read_f32(buf, 18);
-            let volume = read_i32(buf, 22);
+            let volume = read_u32(buf, 22);
             let sell_qty = read_i32(buf, 26);
             let buy_qty = read_i32(buf, 30);
             let oi = read_i32(buf, 34);
@@ -385,6 +395,24 @@ mod tests {
                 assert!((close - 505.0).abs() < 1e-4);
                 assert!((high - 510.0).abs() < 1e-4);
                 assert!((low - 488.0).abs() < 1e-4);
+            }
+            _ => panic!("expected Quote"),
+        }
+    }
+
+    #[test]
+    fn test_volume_overflow_beyond_i32_max() {
+        let mut buf = vec![0u8; 50];
+        buf[0] = 4;
+        buf[1..3].copy_from_slice(&50i16.to_le_bytes());
+        buf[3] = 1;
+        buf[4..8].copy_from_slice(&1001i32.to_le_bytes());
+        let large_vol: u32 = 2_500_000_000;
+        buf[22..26].copy_from_slice(&large_vol.to_le_bytes());
+        let (_, pkt) = decode(&buf).expect("decode quote");
+        match pkt {
+            Packet::Quote { volume, .. } => {
+                assert_eq!(volume, 2_500_000_000);
             }
             _ => panic!("expected Quote"),
         }
