@@ -199,7 +199,19 @@ pub struct FileSource {
     pub csv_tz: Option<String>,
     pub skip_bad: bool,
     pub gap_policy: GapPolicy,
-    stats: Arc<Mutex<SourceStats>>,
+    pub(crate) stats: Arc<Mutex<SourceStats>>,
+}
+
+impl Clone for FileSource {
+    fn clone(&self) -> Self {
+        Self {
+            dir: self.dir.clone(),
+            csv_tz: self.csv_tz.clone(),
+            skip_bad: self.skip_bad,
+            gap_policy: self.gap_policy,
+            stats: Arc::new(Mutex::new(SourceStats::default())),
+        }
+    }
 }
 
 impl FileSource {

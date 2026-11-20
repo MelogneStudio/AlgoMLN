@@ -737,3 +737,15 @@ use crate::{
         assert_eq!(r.trades[0].avg_exit, 20.0);
         assert_eq!(r.trades[0].net_pnl, 40.0);
     }
+
+    #[test]
+    fn filesource_clone_has_isolated_stats() {
+        let f1 = FileSource::new("some_dir");
+        let f2 = f1.clone();
+        // Mutate f1's stats
+        if let Ok(mut stats) = f1.stats.lock() {
+            stats.skipped_bad.insert("ABC".into(), 5);
+        }
+        assert_eq!(f1.stats().skipped_bad.get("ABC").copied(), Some(5));
+        assert_eq!(f2.stats().skipped_bad.get("ABC").copied(), None, "f2 stats must be isolated from f1");
+    }
