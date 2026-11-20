@@ -201,12 +201,14 @@ impl Updater {
                         continue;
                     }
                     let existing_all: Vec<Bar> = if let Ok(sid) = self.catalog.series(security_id, tf) {
+                        let min_ts = saved.iter().map(|b| b.ts).min().unwrap_or(0);
+                        let max_ts = saved.iter().map(|b| b.ts).max().unwrap_or(0);
                         let mut q = self
                             .catalog
                             .conn
-                            .prepare("SELECT path FROM partitions WHERE series_id=?1")?;
+                            .prepare("SELECT path FROM partitions WHERE series_id=?1 AND last_ts >= ?2 AND first_ts <= ?3")?;
                         let paths = q
-                            .query_map([sid], |r| r.get::<_, String>(0))?
+                            .query_map(rusqlite::params![sid, min_ts, max_ts], |r| r.get::<_, String>(0))?
                             .collect::<Result<Vec<_>, _>>()?;
                         let mut all = Vec::new();
                         for rel in paths {
