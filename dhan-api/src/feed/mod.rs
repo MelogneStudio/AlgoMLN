@@ -24,7 +24,8 @@ pub use replay::ReplaySource;
 pub use source::{FeedEvent, TickSource};
 pub use subscribe::{
     batch_subscriptions, InstrumentSubscription, RequestCode, SubscribeMessage,
-    SubscriptionError,
+    SubscriptionError, REQUEST_CODE_DISCONNECT, REQUEST_CODE_FULL, REQUEST_CODE_QUOTE,
+    REQUEST_CODE_TICKER,
 };
 pub use watchdog::{
     FeedClock, FeedWatchdog, ManualFeedClock, SystemFeedClock, WatchdogAction,

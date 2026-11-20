@@ -89,6 +89,11 @@ impl FeedConfig {
         self.channel_capacity = capacity;
         self
     }
+
+    pub fn with_request_code(mut self, code: RequestCode) -> Self {
+        self.request_code = code;
+        self
+    }
 }
 
 #[derive(Debug, Error)]
@@ -208,6 +213,7 @@ async fn run_feed_loop(
     let mut deduper = Deduper::new();
     let mut metrics = ConnectionMetrics::new();
     let mut reconnect_attempt: usize = 0;
+    let mut seen_code_counts: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
     let mut recorder = config
         .record_path
         .as_ref()
@@ -315,6 +321,27 @@ async fn run_feed_loop(
                             if let Some(r) = recorder.as_mut() {
                                 if let Err(e) = r.record_frame(now_f64, &bytes) {
                                     eprintln!("WARNING: failed to write frame to record file: {e}");
+                                }
+                            }
+
+                            if !bytes.is_empty() {
+                                let code = bytes[0];
+                                let count = seen_code_counts.entry(code).or_insert(0);
+                                if *count < 20 {
+                                    *count += 1;
+                                    let preview_len = bytes.len().min(16);
+                                    let mut hex_preview = String::with_capacity(preview_len * 2);
+                                    for b in &bytes[..preview_len] {
+                                        use std::fmt::Write;
+                                        let _ = write!(hex_preview, "{:02x}", b);
+                                    }
+                                    eprintln!(
+                                        "[RAW FRAME] code: {}, len: {}, hex16: {} (sample {}/20)",
+                                        code,
+                                        bytes.len(),
+                                        hex_preview,
+                                        *count
+                                    );
                                 }
                             }
 

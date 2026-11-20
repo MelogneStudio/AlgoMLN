@@ -16,7 +16,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let command = args.next().ok_or("usage: algomln run|data ...")?;
     if command == "--help" || command == "-h" {
-        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps] [--replay FILE] [--live] [--record FILE]\nalgomln data <update|status|verify|import|bulk> [options]\nalgomln data bulk --universe nse-eq --tf 1d,1m --from DATE [--to DATE] [--symbols FILE] [--budget N] [--dry-run] --master CSV");
+        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps] [--replay FILE] [--live] [--record FILE] [--mode ticker|quote]\nalgomln data <update|status|verify|import|bulk> [options]\nalgomln data bulk --universe nse-eq --tf 1d,1m --from DATE [--to DATE] [--symbols FILE] [--budget N] [--dry-run] --master CSV");
         return Ok(());
     }
     if command == "data" {
@@ -60,6 +60,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             "--out",
             "--replay",
             "--record",
+            "--mode",
         ]
         .contains(&k.as_str())
         {
@@ -255,7 +256,13 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        let mut feed_cfg = dhan_api::feed::FeedConfig::new(token, instruments);
+        let mode = match opts.get("--mode").map(String::as_str).unwrap_or("ticker") {
+            "ticker" => dhan_api::feed::RequestCode::Ticker,
+            "quote" => dhan_api::feed::RequestCode::Quote,
+            other => return Err(format!("invalid --mode '{other}': expected 'ticker' or 'quote'").into()),
+        };
+        let mut feed_cfg = dhan_api::feed::FeedConfig::new(token, instruments)
+            .with_request_code(mode);
         if let Some(rec) = opts.get("--record") {
             feed_cfg = feed_cfg.with_record_path(rec);
         }

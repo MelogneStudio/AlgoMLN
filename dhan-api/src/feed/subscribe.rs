@@ -4,12 +4,19 @@ use thiserror::Error;
 pub const MAX_INSTRUMENTS_PER_MESSAGE: usize = 100;
 pub const MAX_INSTRUMENTS_PER_CONNECTION: usize = 5000;
 
+pub const REQUEST_CODE_TICKER: u8 = 15;
+/// Unverified Dhan request code for Quote mode (believed to be 17; change here if needed).
+pub const REQUEST_CODE_QUOTE: u8 = 17;
+pub const REQUEST_CODE_FULL: u8 = 21;
+pub const REQUEST_CODE_DISCONNECT: u8 = 12;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum RequestCode {
-    Ticker = 15,
-    Quote = 17,
-    Full = 21,
-    Disconnect = 12,
+    Ticker = REQUEST_CODE_TICKER,
+    Quote = REQUEST_CODE_QUOTE,
+    Full = REQUEST_CODE_FULL,
+    Disconnect = REQUEST_CODE_DISCONNECT,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
