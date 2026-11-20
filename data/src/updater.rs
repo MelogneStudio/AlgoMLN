@@ -180,7 +180,7 @@ impl Updater {
                         bars.into_iter()
                             .filter(|b| {
                                 let session_date =
-                                    DateTime::<Utc>::from_timestamp(b.ts - 33_300, 0)
+                                    DateTime::<Utc>::from_timestamp(b.ts, 0)
                                         .unwrap_or(DateTime::UNIX_EPOCH)
                                         .with_timezone(&Kolkata)
                                         .date_naive();

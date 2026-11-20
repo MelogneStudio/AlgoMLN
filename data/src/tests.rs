@@ -403,6 +403,70 @@ fn historical_daily_bars_are_not_filtered_by_current_day_cutoff() {
 }
 
 #[test]
+fn daily_candle_with_midnight_timestamp_preserves_session_date() {
+    let root = temp("daily-midnight");
+    let db = root.join("catalog.sqlite");
+    let d = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+    // Midnight UTC: 2020-01-02 00:00:00 UTC (05:30:00 IST)
+    let ts = d
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    let mut cat = Catalog::open(&db).unwrap();
+    cat.refresh_instruments(
+        &[Scrip {
+            security_id: "6".into(),
+            symbol: "MIDNIGHT".into(),
+            lot_size: 1,
+            tick_size_paise: 5,
+            instrument: "EQUITY".into(),
+            is_fno: false,
+        }],
+        0,
+    )
+    .unwrap();
+    drop(cat);
+    struct DailyMidnightFake(i64);
+    impl HistoryApi for DailyMidnightFake {
+        fn intraday(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<Bar>, DataError> {
+            Ok(Vec::new())
+        }
+        fn daily(
+            &self,
+            _: &str,
+            _: &str,
+            _: NaiveDate,
+            _: NaiveDate,
+        ) -> Result<Vec<Bar>, DataError> {
+            Ok(vec![bar(self.0, 100.)])
+        }
+    }
+    let mut updater = Updater {
+        client: Box::new(DailyMidnightFake(ts)),
+        catalog: Catalog::open(&db).unwrap(),
+        store: Store::new(&root),
+        max_retries: 0,
+        margin_seconds: 0,
+        reference_symbol_id: None,
+        budget_cap: DEFAULT_BUDGET_CAP,
+    };
+    updater.update("6", Tf::D1, "EQUITY", d, d).unwrap();
+    assert_eq!(
+        updater.catalog.covered_dates("6", Tf::D1, d, d).unwrap(),
+        vec![d]
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn progress_filter_handles_normal_and_short_sessions() {
     let d = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
     let open = d
