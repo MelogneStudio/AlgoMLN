@@ -1147,3 +1147,28 @@ fn catalog_schema_composite_indexes_exist() {
     assert!(indexes.contains(&"idx_quality_series".to_string()));
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn store_path_traversal_is_rejected() {
+    let root = temp("store-path-traversal");
+    let store = Store::new(&root);
+    let bar = Bar {
+        ts: 1704081000,
+        open: 100.0,
+        high: 105.0,
+        low: 95.0,
+        close: 100.0,
+        volume: 100.0,
+    };
+    for bad_id in &["../evil", "foo/bar", "evil\\traversal", "..", ".hidden", ""] {
+        assert!(
+            store.write_partitions(bad_id, Tf::M1, &[bar.clone()]).is_err(),
+            "write_partitions must reject bad id: {bad_id}"
+        );
+        assert!(
+            store.remove_series_files(bad_id, Tf::M1).is_err(),
+            "remove_series_files must reject bad id: {bad_id}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}

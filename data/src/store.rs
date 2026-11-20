@@ -28,6 +28,18 @@ impl Store {
         Self { root: root.into() }
     }
 
+    pub fn validate_id(id: &str) -> Result<(), DataError> {
+        if id.is_empty()
+            || id.contains('/')
+            || id.contains('\\')
+            || id.contains("..")
+            || id.starts_with('.')
+        {
+            return Err(DataError::Invalid(format!("invalid security_id: {id:?}")));
+        }
+        Ok(())
+    }
+
     fn partition(&self, id: &str, tf: Tf, ts: i64) -> PathBuf {
         let dt = DateTime::<Utc>::from_timestamp(ts, 0)
             .unwrap_or(DateTime::UNIX_EPOCH)
@@ -50,6 +62,7 @@ impl Store {
         tf: Tf,
         bars: &[Bar],
     ) -> Result<Vec<PartitionMeta>, DataError> {
+        Self::validate_id(id)?;
         let mut groups: BTreeMap<PathBuf, Vec<Bar>> = BTreeMap::new();
         for b in bars {
             groups
@@ -223,6 +236,7 @@ impl Store {
     }
 
     pub fn remove_series_files(&self, id: &str, tf: Tf) -> Result<(), DataError> {
+        Self::validate_id(id)?;
         let dir = self.root.join("candles").join(id).join(tf.as_str());
         if dir.exists() {
             fs::remove_dir_all(dir)?;
