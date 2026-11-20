@@ -425,3 +425,16 @@ fn client_reuses_persistent_runtime_and_http_client() {
     let cloned = client.clone_with_base("http://localhost:12346").unwrap();
     assert!(Arc::ptr_eq(&client.runtime, &cloned.runtime));
 }
+
+#[test]
+fn test_token_provider_trims_whitespace_and_newlines() {
+    let var_name = "TEST_DHAN_TRIM_TOKEN";
+    std::env::set_var(var_name, "  valid_token_value_here\r\n\t ");
+    let provider = EnvTokenProvider {
+        variable: var_name.into(),
+    };
+    let token = provider.access_token().expect("token must be retrieved");
+    assert_eq!(token, "valid_token_value_here");
+    assert!(reqwest::header::HeaderValue::from_str(&token).is_ok());
+    std::env::remove_var(var_name);
+}

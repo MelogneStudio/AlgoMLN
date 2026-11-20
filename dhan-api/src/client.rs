@@ -213,7 +213,7 @@ impl DhanClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             HeaderName::from_static("access-token"),
-            HeaderValue::from_str(&token).map_err(|e| ApiError::Auth(e.to_string()))?,
+            HeaderValue::from_str(token.trim()).map_err(|e| ApiError::Auth(e.to_string()))?,
         );
         let mut attempts = 0;
         loop {

@@ -39,24 +39,29 @@ impl TokenProvider for KeychainEnvTokenProvider {
     fn access_token(&self) -> Result<String, ApiError> {
         if let Ok(entry) = keyring::Entry::new(&self.service, &self.account) {
             if let Ok(token) = entry.get_password() {
-                if !token.is_empty() {
-                    return Ok(token);
+                let trimmed = token.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed);
                 }
             }
         }
-        env::var(&self.variable).map_err(|_| {
-            ApiError::Auth("Dhan token missing from OS keychain and DHAN_ACCESS_TOKEN".into())
-        })
+        env::var(&self.variable)
+            .map(|s| s.trim().to_string())
+            .map_err(|_| {
+                ApiError::Auth("Dhan token missing from OS keychain and DHAN_ACCESS_TOKEN".into())
+            })
     }
 }
 
 impl TokenProvider for EnvTokenProvider {
     fn access_token(&self) -> Result<String, ApiError> {
-        env::var(&self.variable).map_err(|_| {
-            ApiError::Auth(
-                "missing access token; set DHAN_ACCESS_TOKEN or configure an OS keychain provider"
-                    .into(),
-            )
-        })
+        env::var(&self.variable)
+            .map(|s| s.trim().to_string())
+            .map_err(|_| {
+                ApiError::Auth(
+                    "missing access token; set DHAN_ACCESS_TOKEN or configure an OS keychain provider"
+                        .into(),
+                )
+            })
     }
 }
