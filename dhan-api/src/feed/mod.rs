@@ -15,7 +15,8 @@ pub use connection::{FeedConfig, FeedError, LiveSource};
 pub use decoder::{decode, DecodeError, DepthLevel, Header, Packet};
 pub use metrics::ConnectionMetrics;
 pub use normalize::{
-    ltp_to_paise, ltt_to_utc_seconds, Deduper, Tick, IST_OFFSET_SECONDS,
+    ltp_to_paise, ltt_to_utc_seconds, Deduper, LttConvention, LttDetectionResult, LttDetector,
+    LttDetectorConfig, Tick, IST_OFFSET_SECONDS,
 };
 pub use record::RecordWriter;
 pub use replay::ReplaySource;

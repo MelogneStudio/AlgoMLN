@@ -39,9 +39,10 @@ fn test_golden_capture_replay() {
         events.push(ev);
     }
 
-    assert_eq!(tick_count, 1244);
+    assert_eq!(tick_count, 1243);
+    assert_eq!(source.stale_ticks(), 3);
     assert_eq!(prev_close_count, 3);
-    assert_eq!(source.dropped_duplicates, 50);
+    assert_eq!(source.dropped_duplicates, 48);
     assert_eq!(source.decode_errors, 0);
     assert_eq!(source.total_frames, 1297);
 

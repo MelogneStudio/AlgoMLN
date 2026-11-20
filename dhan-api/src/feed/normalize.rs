@@ -1,6 +1,158 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const IST_OFFSET_SECONDS: i64 = 19_800;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LttConvention {
+    Utc,
+    IstShifted,
+}
+
+impl std::fmt::Display for LttConvention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Utc => write!(f, "UTC"),
+            Self::IstShifted => write!(f, "IST-shifted"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LttDetectionResult {
+    /// Fresh tick with detected convention and normalized UTC epoch timestamp.
+    Valid {
+        time_utc: i64,
+        convention: LttConvention,
+    },
+    /// ltt <= 0 means no trade time.
+    NoTradeTime,
+    /// Neither UTC nor IST-shifted matched within tolerance.
+    Stale {
+        raw_ltt: i64,
+        recv_utc: i64,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct LttDetectorConfig {
+    pub tolerance_seconds: i64,
+    pub consecutive_ticks_to_lock: usize,
+}
+
+impl Default for LttDetectorConfig {
+    fn default() -> Self {
+        Self {
+            tolerance_seconds: 60,
+            consecutive_ticks_to_lock: 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LttDetector {
+    pub config: LttDetectorConfig,
+    pub locked_convention: Option<LttConvention>,
+    pub candidate_convention: Option<LttConvention>,
+    pub consecutive_matches: usize,
+    pub stale_count: usize,
+    pub no_trade_time_count: usize,
+    pub valid_count: usize,
+    pub convention_flips: usize,
+}
+
+impl Default for LttDetector {
+    fn default() -> Self {
+        Self::new(LttDetectorConfig::default())
+    }
+}
+
+impl LttDetector {
+    pub fn new(config: LttDetectorConfig) -> Self {
+        Self {
+            config,
+            locked_convention: None,
+            candidate_convention: None,
+            consecutive_matches: 0,
+            stale_count: 0,
+            no_trade_time_count: 0,
+            valid_count: 0,
+            convention_flips: 0,
+        }
+    }
+
+    pub fn with_tolerance(tolerance_seconds: i64) -> Self {
+        Self::new(LttDetectorConfig {
+            tolerance_seconds,
+            consecutive_ticks_to_lock: 3,
+        })
+    }
+
+    pub fn detect(&mut self, ltt: i32, recv_utc: i64) -> LttDetectionResult {
+        if ltt <= 0 {
+            self.no_trade_time_count += 1;
+            return LttDetectionResult::NoTradeTime;
+        }
+
+        let raw_ltt = ltt as i64;
+        let diff_utc = (recv_utc - raw_ltt).abs();
+        let diff_ist = (recv_utc - (raw_ltt - IST_OFFSET_SECONDS)).abs();
+
+        let matched = if diff_utc < self.config.tolerance_seconds {
+            Some(LttConvention::Utc)
+        } else if diff_ist < self.config.tolerance_seconds {
+            Some(LttConvention::IstShifted)
+        } else {
+            None
+        };
+
+        let convention = match matched {
+            Some(c) => c,
+            None => {
+                self.stale_count += 1;
+                return LttDetectionResult::Stale { raw_ltt, recv_utc };
+            }
+        };
+
+        // Handle locking and flipping
+        if let Some(locked) = self.locked_convention {
+            if convention != locked {
+                eprintln!(
+                    "WARNING: LTT convention flipped from {} to {}! (recv_utc={}, raw_ltt={})",
+                    locked, convention, recv_utc, raw_ltt
+                );
+                self.convention_flips += 1;
+                self.locked_convention = Some(convention);
+                self.candidate_convention = Some(convention);
+                self.consecutive_matches = 1;
+            }
+        } else {
+            if self.candidate_convention == Some(convention) {
+                self.consecutive_matches += 1;
+                if self.consecutive_matches >= self.config.consecutive_ticks_to_lock {
+                    self.locked_convention = Some(convention);
+                }
+            } else {
+                self.candidate_convention = Some(convention);
+                self.consecutive_matches = 1;
+                if self.config.consecutive_ticks_to_lock <= 1 {
+                    self.locked_convention = Some(convention);
+                }
+            }
+        }
+
+        let time_utc = match convention {
+            LttConvention::Utc => raw_ltt,
+            LttConvention::IstShifted => raw_ltt - IST_OFFSET_SECONDS,
+        };
+
+        self.valid_count += 1;
+        LttDetectionResult::Valid {
+            time_utc,
+            convention,
+        }
+    }
+}
 
 /// Corrects Dhan's LTT (IST wall-clock encoded as an epoch) to true UTC epoch seconds.
 /// True UTC epoch is `ltt - 19800`.
@@ -97,5 +249,136 @@ mod tests {
         // Different security ID does not collide
         assert!(deduper.accept(2886, 1700000001, 130100));
         assert!(!deduper.accept(2886, 1700000001, 130100));
+    }
+
+    #[test]
+    fn test_ltt_detector_utc_convention() {
+        let mut detector = LttDetector::default();
+        let recv_utc = 1795145959; // 2026-11-20 09:09:19 IST in true UTC
+        let raw_ltt = 1795145959; // matches UTC exactly
+
+        let res = detector.detect(raw_ltt as i32, recv_utc);
+        assert_eq!(
+            res,
+            LttDetectionResult::Valid {
+                time_utc: 1795145959,
+                convention: LttConvention::Utc,
+            }
+        );
+        assert_eq!(detector.valid_count, 1);
+        assert_eq!(detector.stale_count, 0);
+        assert_eq!(detector.no_trade_time_count, 0);
+    }
+
+    #[test]
+    fn test_ltt_detector_ist_shifted_convention() {
+        let mut detector = LttDetector::default();
+        let recv_utc = 1794978910; // 2026-11-18 14:55:10 IST in true UTC
+        let raw_ltt = 1794978910 + IST_OFFSET_SECONDS; // 1794998710 (IST wall-clock encoded as epoch)
+
+        let res = detector.detect(raw_ltt as i32, recv_utc);
+        assert_eq!(
+            res,
+            LttDetectionResult::Valid {
+                time_utc: 1794978910,
+                convention: LttConvention::IstShifted,
+            }
+        );
+        assert_eq!(detector.valid_count, 1);
+        assert_eq!(detector.stale_count, 0);
+    }
+
+    #[test]
+    fn test_ltt_detector_stale_ltt() {
+        let mut detector = LttDetector::default();
+        let recv_utc = 1795145400; // 2026-11-20 morning
+        let raw_ltt = 1795084192; // stale LTT from previous session (Nov 19)
+
+        let res = detector.detect(raw_ltt as i32, recv_utc);
+        assert_eq!(
+            res,
+            LttDetectionResult::Stale {
+                raw_ltt: 1795084192,
+                recv_utc: 1795145400,
+            }
+        );
+        assert_eq!(detector.stale_count, 1);
+        assert_eq!(detector.valid_count, 0);
+    }
+
+    #[test]
+    fn test_ltt_detector_zero_and_negative_ltt() {
+        let mut detector = LttDetector::default();
+        assert_eq!(detector.detect(0, 1795145000), LttDetectionResult::NoTradeTime);
+        assert_eq!(detector.detect(-5, 1795145000), LttDetectionResult::NoTradeTime);
+        assert_eq!(detector.no_trade_time_count, 2);
+        assert_eq!(detector.valid_count, 0);
+    }
+
+    #[test]
+    fn test_ltt_detector_locking_and_flip_warning() {
+        let mut detector = LttDetector::new(LttDetectorConfig {
+            tolerance_seconds: 60,
+            consecutive_ticks_to_lock: 3,
+        });
+
+        let base_utc = 1794978910;
+        let ist_shifted_ltt = (base_utc + IST_OFFSET_SECONDS) as i32;
+
+        // Tick 1 (IST-shifted)
+        assert_eq!(
+            detector.detect(ist_shifted_ltt, base_utc),
+            LttDetectionResult::Valid {
+                time_utc: base_utc,
+                convention: LttConvention::IstShifted,
+            }
+        );
+        assert_eq!(detector.locked_convention, None);
+
+        // Tick 2 (IST-shifted)
+        detector.detect(ist_shifted_ltt + 1, base_utc + 1);
+        assert_eq!(detector.locked_convention, None);
+
+        // Tick 3 (IST-shifted) -> locks!
+        detector.detect(ist_shifted_ltt + 2, base_utc + 2);
+        assert_eq!(detector.locked_convention, Some(LttConvention::IstShifted));
+        assert_eq!(detector.convention_flips, 0);
+
+        // Now Dhan flips convention to true UTC
+        let utc_ltt = (base_utc + 10) as i32;
+        let res = detector.detect(utc_ltt, base_utc + 10);
+        assert_eq!(
+            res,
+            LttDetectionResult::Valid {
+                time_utc: base_utc + 10,
+                convention: LttConvention::Utc,
+            }
+        );
+        assert_eq!(detector.convention_flips, 1);
+        assert_eq!(detector.locked_convention, Some(LttConvention::Utc));
+    }
+
+    #[test]
+    fn test_ltt_detector_configurable_tolerance() {
+        let mut tight = LttDetector::with_tolerance(10);
+        let now = 1795145000;
+        // 15 seconds drift -> stale with 10s tolerance
+        assert_eq!(
+            tight.detect((now - 15) as i32, now),
+            LttDetectionResult::Stale {
+                raw_ltt: now - 15,
+                recv_utc: now
+            }
+        );
+
+        let mut loose = LttDetector::with_tolerance(60);
+        // 15 seconds drift -> valid with 60s tolerance
+        assert_eq!(
+            loose.detect((now - 15) as i32, now),
+            LttDetectionResult::Valid {
+                time_utc: now - 15,
+                convention: LttConvention::Utc
+            }
+        );
     }
 }

@@ -108,8 +108,8 @@ fn test_golden_capture_candle_builder() {
     // 1. Bar counts: Exactly 20 continuous 1m bars from 14:55 to 15:14
     assert_eq!(candles1.len(), 20, "expected 20 1m candles, got {}", candles1.len());
 
-    // 2. Dropped off-session ticks after 15:28: 2 ticks post-deduplication (auction replay + fresh auction tick)
-    assert_eq!(off_session1, 2, "expected 2 deduplicated off-session auction ticks");
+    // 2. Dropped off-session ticks after 15:28: 1 fresh tick post-deduplication (the auction replay tick with stale LTT 15:14 is dropped by LTT detector as stale)
+    assert_eq!(off_session1, 1, "expected 1 deduplicated off-session auction tick");
 
     // 3. Late ticks: 0
     assert_eq!(late1, 0, "expected 0 late ticks");

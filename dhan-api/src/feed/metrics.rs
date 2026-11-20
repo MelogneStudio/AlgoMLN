@@ -1,3 +1,4 @@
+use crate::feed::normalize::LttConvention;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]
@@ -8,8 +9,13 @@ pub struct ConnectionMetrics {
     pub deduped_ticks: u64,
     pub late_ticks: u64,
     pub dropped_ticks: u64,
+    pub stale_ticks: u64,
+    pub zero_ltt_ticks: u64,
     pub reconnects: u64,
+    pub detected_convention: Option<LttConvention>,
     pub last_packet_recv_time: Option<f64>,
+    pub last_ltt: Option<i64>,
+    pub last_recv_minus_ltt: Option<f64>,
     pub latencies_sec: Vec<f64>, // receive_time - corrected_ltt
 }
 

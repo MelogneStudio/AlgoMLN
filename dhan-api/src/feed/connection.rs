@@ -1,7 +1,9 @@
 use crate::feed::auth::{build_feed_url, parse_and_validate_token, AuthError};
 use crate::feed::decoder::{decode, Packet};
 use crate::feed::metrics::ConnectionMetrics;
-use crate::feed::normalize::{ltp_to_paise, ltt_to_utc_seconds, Deduper, Tick};
+use crate::feed::normalize::{
+    ltp_to_paise, Deduper, LttDetectionResult, LttDetector, LttDetectorConfig, Tick,
+};
 use crate::feed::record::RecordWriter;
 use crate::feed::source::{FeedEvent, TickSource};
 use crate::feed::subscribe::{batch_subscriptions, InstrumentSubscription, RequestCode, SubscriptionError};
@@ -34,6 +36,7 @@ pub struct FeedConfig {
     pub initial_backoff: Duration,
     pub max_backoff: Duration,
     pub max_reconnect_attempts: Option<usize>,
+    pub ltt_detector_config: LttDetectorConfig,
 }
 
 impl FeedConfig {
@@ -49,6 +52,7 @@ impl FeedConfig {
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
             max_backoff: DEFAULT_MAX_BACKOFF,
             max_reconnect_attempts: None,
+            ltt_detector_config: LttDetectorConfig::default(),
         }
     }
 
@@ -216,6 +220,7 @@ async fn run_feed_loop(
         }
 
         let mut last_activity = Instant::now();
+        let mut ltt_detector = LttDetector::new(config.ltt_detector_config.clone());
 
         loop {
             if shutdown.load(Ordering::SeqCst) {
@@ -268,9 +273,27 @@ async fn run_feed_loop(
 
                             match packet {
                                 Packet::Ticker { ltp, ltt } => {
-                                    let time_utc = ltt_to_utc_seconds(ltt);
+                                    let ltt_res = ltt_detector.detect(ltt, now_f64 as i64);
+                                    let time_utc = match ltt_res {
+                                        LttDetectionResult::Valid { time_utc, convention } => {
+                                            metrics.detected_convention = Some(convention);
+                                            metrics.last_ltt = Some(time_utc);
+                                            metrics.last_recv_minus_ltt = Some(now_f64 - time_utc as f64);
+                                            metrics.record_latency(now_f64, time_utc);
+                                            time_utc
+                                        }
+                                        LttDetectionResult::NoTradeTime => {
+                                            metrics.zero_ltt_ticks += 1;
+                                            continue;
+                                        }
+                                        LttDetectionResult::Stale { raw_ltt, .. } => {
+                                            metrics.stale_ticks += 1;
+                                            metrics.last_ltt = Some(raw_ltt);
+                                            metrics.last_recv_minus_ltt = Some(now_f64 - raw_ltt as f64);
+                                            continue;
+                                        }
+                                    };
                                     let price_paise = ltp_to_paise(ltp);
-                                    metrics.record_latency(now_f64, time_utc);
 
                                     if !deduper.accept(header.security_id, time_utc, price_paise) {
                                         metrics.deduped_ticks += 1;
@@ -293,9 +316,27 @@ async fn run_feed_loop(
                                     }
                                 }
                                 Packet::Quote { ltp, ltt, volume, .. } | Packet::Full { ltp, ltt, volume, .. } => {
-                                    let time_utc = ltt_to_utc_seconds(ltt);
+                                    let ltt_res = ltt_detector.detect(ltt, now_f64 as i64);
+                                    let time_utc = match ltt_res {
+                                        LttDetectionResult::Valid { time_utc, convention } => {
+                                            metrics.detected_convention = Some(convention);
+                                            metrics.last_ltt = Some(time_utc);
+                                            metrics.last_recv_minus_ltt = Some(now_f64 - time_utc as f64);
+                                            metrics.record_latency(now_f64, time_utc);
+                                            time_utc
+                                        }
+                                        LttDetectionResult::NoTradeTime => {
+                                            metrics.zero_ltt_ticks += 1;
+                                            continue;
+                                        }
+                                        LttDetectionResult::Stale { raw_ltt, .. } => {
+                                            metrics.stale_ticks += 1;
+                                            metrics.last_ltt = Some(raw_ltt);
+                                            metrics.last_recv_minus_ltt = Some(now_f64 - raw_ltt as f64);
+                                            continue;
+                                        }
+                                    };
                                     let price_paise = ltp_to_paise(ltp);
-                                    metrics.record_latency(now_f64, time_utc);
 
                                     if !deduper.accept(header.security_id, time_utc, price_paise) {
                                         metrics.deduped_ticks += 1;

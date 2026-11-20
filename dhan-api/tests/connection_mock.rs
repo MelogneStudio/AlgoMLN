@@ -81,11 +81,13 @@ fn test_mock_websocket_flow() {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             // 3. Server sends ticker packet
-            // Security 2885, segment 1, LTP 1300.8, LTT 1700000000
-            let ticker_pkt: [u8; 16] = [
+            // Security 2885, segment 1, LTP 1300.8, fresh LTT
+            let now_ltt = chrono::Utc::now().timestamp() as u32;
+            let mut ticker_pkt: [u8; 16] = [
                 0x02, 0x10, 0x00, 0x01, 0x45, 0x0B, 0x00, 0x00,
-                0x9A, 0x99, 0xA2, 0x44, 0x00, 0xF1, 0x53, 0x65,
+                0x9A, 0x99, 0xA2, 0x44, 0x00, 0x00, 0x00, 0x00,
             ];
+            ticker_pkt[12..16].copy_from_slice(&now_ltt.to_le_bytes());
             ws.send(Message::Binary(ticker_pkt.to_vec())).await.unwrap();
 
             // 4. Close connection to trigger client reconnect
@@ -153,7 +155,7 @@ fn test_mock_websocket_flow() {
     // Verify recording file exists and has recorded the frames
     assert!(record_path.exists());
     let rec_content = std::fs::read_to_string(&record_path).unwrap();
-    assert!(rec_content.contains(r#""hex": "02100001450b00009a99a24400f15365""#));
+    assert!(rec_content.contains(r#""hex": "02100001450b00009a99a244"#));
 
     source.stop();
     let _ = std::fs::remove_dir_all(record_dir);

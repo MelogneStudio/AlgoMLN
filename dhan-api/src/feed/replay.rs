@@ -1,5 +1,7 @@
 use crate::feed::decoder::{decode, Packet};
-use crate::feed::normalize::{ltp_to_paise, ltt_to_utc_seconds, Deduper, Tick};
+use crate::feed::normalize::{
+    ltp_to_paise, Deduper, LttConvention, LttDetectionResult, LttDetector, Tick,
+};
 use crate::feed::source::{FeedEvent, TickSource};
 use serde::Deserialize;
 use std::fs::File;
@@ -30,6 +32,7 @@ pub struct ReplaySource {
     pub total_frames: usize,
     pub dropped_duplicates: usize,
     pub decode_errors: usize,
+    pub ltt_detector: LttDetector,
 }
 
 impl ReplaySource {
@@ -42,6 +45,7 @@ impl ReplaySource {
             total_frames: 0,
             dropped_duplicates: 0,
             decode_errors: 0,
+            ltt_detector: LttDetector::default(),
         }
     }
 
@@ -56,6 +60,20 @@ impl ReplaySource {
 
     pub fn current_time_seconds(&self) -> Option<f64> {
         self.current_time_t
+    }
+
+    pub fn stale_ticks(&self) -> usize {
+        self.ltt_detector.stale_count
+    }
+
+    pub fn zero_ltt_ticks(&self) -> usize {
+        self.ltt_detector.no_trade_time_count
+    }
+
+    pub fn detected_convention(&self) -> Option<LttConvention> {
+        self.ltt_detector
+            .locked_convention
+            .or(self.ltt_detector.candidate_convention)
     }
 }
 
@@ -109,9 +127,15 @@ impl TickSource for ReplaySource {
                         }
                     };
 
+                    let recv_utc = frame.t as i64;
                     match packet {
                         Packet::Ticker { ltp, ltt } => {
-                            let time_utc = ltt_to_utc_seconds(ltt);
+                            let time_utc = match self.ltt_detector.detect(ltt, recv_utc) {
+                                LttDetectionResult::Valid { time_utc, .. } => time_utc,
+                                LttDetectionResult::NoTradeTime | LttDetectionResult::Stale { .. } => {
+                                    continue;
+                                }
+                            };
                             let price_paise = ltp_to_paise(ltp);
                             if !self.deduper.accept(header.security_id, time_utc, price_paise) {
                                 self.dropped_duplicates += 1;
@@ -131,7 +155,12 @@ impl TickSource for ReplaySource {
                             volume,
                             ..
                         } => {
-                            let time_utc = ltt_to_utc_seconds(ltt);
+                            let time_utc = match self.ltt_detector.detect(ltt, recv_utc) {
+                                LttDetectionResult::Valid { time_utc, .. } => time_utc,
+                                LttDetectionResult::NoTradeTime | LttDetectionResult::Stale { .. } => {
+                                    continue;
+                                }
+                            };
                             let price_paise = ltp_to_paise(ltp);
                             if !self.deduper.accept(header.security_id, time_utc, price_paise) {
                                 self.dropped_duplicates += 1;
@@ -151,7 +180,12 @@ impl TickSource for ReplaySource {
                             volume,
                             ..
                         } => {
-                            let time_utc = ltt_to_utc_seconds(ltt);
+                            let time_utc = match self.ltt_detector.detect(ltt, recv_utc) {
+                                LttDetectionResult::Valid { time_utc, .. } => time_utc,
+                                LttDetectionResult::NoTradeTime | LttDetectionResult::Stale { .. } => {
+                                    continue;
+                                }
+                            };
                             let price_paise = ltp_to_paise(ltp);
                             if !self.deduper.accept(header.security_id, time_utc, price_paise) {
                                 self.dropped_duplicates += 1;
@@ -196,12 +230,18 @@ mod tests {
 
     #[test]
     fn test_replay_source_mock() {
-        let jsonl = r#"{"t": 1700000000.5, "hex": "02100001450b00009a99a24400f15365"}
-{"t": 1700000001.0, "hex": "02100001450b00009a99a24400f15365"}
-{"t": 1700000001.5, "hex": "06100001450b00009a19a84400000000"}
-{"t": 1700000002.0, "hex": "02100001450b00000000aa4401f15365"}
-"#;
-        let mut source = ReplaySource::from_reader(Cursor::new(jsonl.as_bytes()));
+        let t1 = 1700000000.5 - 19800.0;
+        let t2 = 1700000001.0 - 19800.0;
+        let t3 = 1700000001.5 - 19800.0;
+        let t4 = 1700000002.0 - 19800.0;
+        let jsonl = format!(
+            r#"{{"t": {t1}, "hex": "02100001450b00009a99a24400f15365"}}
+{{"t": {t2}, "hex": "02100001450b00009a99a24400f15365"}}
+{{"t": {t3}, "hex": "06100001450b00009a19a84400000000"}}
+{{"t": {t4}, "hex": "02100001450b00000000aa4401f15365"}}
+"#
+        );
+        let mut source = ReplaySource::from_reader(Cursor::new(jsonl.into_bytes()));
 
         // First event is Connected
         assert_eq!(source.next(), Some(FeedEvent::Connected));
@@ -213,7 +253,7 @@ mod tests {
                 assert_eq!(t.security_id, 2885);
                 assert_eq!(t.price_paise, 130080);
                 assert_eq!(t.time_utc, 1700000000 - 19800);
-                assert_eq!(t.recv_ns, 1700000000500000000);
+                assert_eq!(t.recv_ns, (t1 * 1_000_000_000.0f64).round() as u64);
             }
             _ => panic!("expected tick"),
         }
