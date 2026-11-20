@@ -25,6 +25,7 @@ pub const DEFAULT_FEED_URL: &str = "wss://api-feed.dhan.co";
 pub const DEFAULT_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(40);
 pub const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 pub const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(30);
+pub const DEFAULT_FEED_CHANNEL_CAPACITY: usize = 10_000;
 
 #[derive(Clone, Debug)]
 pub struct FeedConfig {
@@ -41,6 +42,7 @@ pub struct FeedConfig {
     pub max_backoff: Duration,
     pub max_reconnect_attempts: Option<usize>,
     pub ltt_detector_config: LttDetectorConfig,
+    pub channel_capacity: usize,
 }
 
 impl FeedConfig {
@@ -59,6 +61,7 @@ impl FeedConfig {
             max_backoff: DEFAULT_MAX_BACKOFF,
             max_reconnect_attempts: None,
             ltt_detector_config: LttDetectorConfig::default(),
+            channel_capacity: DEFAULT_FEED_CHANNEL_CAPACITY,
         }
     }
 
@@ -81,6 +84,11 @@ impl FeedConfig {
         self.session_window = SessionWindow::for_instrument(is_fno);
         self
     }
+
+    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
+        self.channel_capacity = capacity;
+        self
+    }
 }
 
 #[derive(Debug, Error)]
@@ -97,6 +105,8 @@ pub struct LiveSource {
     rx: Receiver<FeedEvent>,
     shutdown: Arc<AtomicBool>,
     _worker: Option<std::thread::JoinHandle<()>>,
+    metrics: Arc<std::sync::Mutex<ConnectionMetrics>>,
+    channel_capacity: usize,
 }
 
 impl LiveSource {
@@ -119,9 +129,13 @@ impl LiveSource {
         // Validate instrument batching before connecting
         let _ = batch_subscriptions(config.request_code, &config.instruments)?;
 
-        let (tx, rx) = sync_channel::<FeedEvent>(10_000);
+        let channel_capacity = config.channel_capacity;
+        let (tx, rx) = sync_channel::<FeedEvent>(channel_capacity);
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = Arc::clone(&shutdown);
+
+        let metrics = Arc::new(std::sync::Mutex::new(ConnectionMetrics::new()));
+        let metrics_clone = Arc::clone(&metrics);
 
         let handle = std::thread::Builder::new()
             .name("dhan-feed-worker".into())
@@ -138,7 +152,7 @@ impl LiveSource {
                     }
                 };
 
-                rt.block_on(run_feed_loop(config, claims.client_id, tx, shutdown_clone));
+                rt.block_on(run_feed_loop(config, claims.client_id, tx, shutdown_clone, metrics_clone));
             })
             .map_err(|e| FeedError::Connection(e.to_string()))?;
 
@@ -146,11 +160,25 @@ impl LiveSource {
             rx,
             shutdown,
             _worker: Some(handle),
+            metrics,
+            channel_capacity,
         })
     }
 
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    pub fn channel_capacity(&self) -> usize {
+        self.channel_capacity
+    }
+
+    pub fn metrics(&self) -> ConnectionMetrics {
+        self.metrics.lock().unwrap().clone()
+    }
+
+    pub fn dropped_ticks(&self) -> u64 {
+        self.metrics.lock().unwrap().dropped_ticks
     }
 }
 
@@ -175,6 +203,7 @@ async fn run_feed_loop(
     client_id: String,
     tx: SyncSender<FeedEvent>,
     shutdown: Arc<AtomicBool>,
+    shared_metrics: Arc<std::sync::Mutex<ConnectionMetrics>>,
 ) {
     let mut deduper = Deduper::new();
     let mut metrics = ConnectionMetrics::new();
@@ -183,6 +212,8 @@ async fn run_feed_loop(
         .record_path
         .as_ref()
         .and_then(|p| RecordWriter::open(p).ok());
+    let mut last_drop_log = std::time::Instant::now() - Duration::from_secs(10);
+    let mut last_status_line = std::time::Instant::now();
 
     let subscribe_batches = match batch_subscriptions(config.request_code, &config.instruments) {
         Ok(b) => b,
@@ -332,12 +363,14 @@ async fn run_feed_loop(
                                         volume: None,
                                         recv_ns,
                                     });
-                                    match tx.try_send(tick) {
-                                        Ok(()) => {}
-                                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                                            metrics.dropped_ticks += 1;
-                                        }
-                                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                                    if !send_event_with_backpressure(
+                                        &tx,
+                                        tick,
+                                        config.channel_capacity,
+                                        &mut metrics,
+                                        &mut last_drop_log,
+                                    ) {
+                                        return;
                                     }
                                 }
                                 Packet::Quote { ltp, ltt, volume, .. } | Packet::Full { ltp, ltt, volume, .. } => {
@@ -375,12 +408,14 @@ async fn run_feed_loop(
                                         volume: Some(volume as i64),
                                         recv_ns,
                                     });
-                                    match tx.try_send(tick) {
-                                        Ok(()) => {}
-                                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                                            metrics.dropped_ticks += 1;
-                                        }
-                                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                                    if !send_event_with_backpressure(
+                                        &tx,
+                                        tick,
+                                        config.channel_capacity,
+                                        &mut metrics,
+                                        &mut last_drop_log,
+                                    ) {
+                                        return;
                                     }
                                 }
                                 Packet::PrevClose { close, oi } => {
@@ -389,12 +424,14 @@ async fn run_feed_loop(
                                         price_paise: ltp_to_paise(close),
                                         oi,
                                     };
-                                    match tx.try_send(ev) {
-                                        Ok(()) => {}
-                                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                                            metrics.dropped_ticks += 1;
-                                        }
-                                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                                    if !send_event_with_backpressure(
+                                        &tx,
+                                        ev,
+                                        config.channel_capacity,
+                                        &mut metrics,
+                                        &mut last_drop_log,
+                                    ) {
+                                        return;
                                     }
                                 }
                                 Packet::Disconnect { reason } => {
@@ -421,6 +458,17 @@ async fn run_feed_loop(
                     }
                 }
                 _ = sleep(Duration::from_millis(1000)) => {
+                    // Update shared metrics
+                    if let Ok(mut lock) = shared_metrics.try_lock() {
+                        *lock = metrics.clone();
+                    }
+
+                    // 1-minute periodic status line
+                    if last_status_line.elapsed() >= Duration::from_secs(60) {
+                        eprintln!("{}", metrics.status_line());
+                        last_status_line = std::time::Instant::now();
+                    }
+
                     // Watchdog check: only arms inside trading window, timeout triggers reconnect
                     if let WatchdogAction::TriggeredTimeout { elapsed_secs, timeout_secs } = watchdog.check_now() {
                         eprintln!("watchdog timeout (no activity for {elapsed_secs}s >= {timeout_secs}s inside trading window); reconnecting...");
@@ -432,8 +480,37 @@ async fn run_feed_loop(
 
         let _ = tx.send(FeedEvent::Disconnected { reason: None });
         metrics.reconnects += 1;
+        if let Ok(mut lock) = shared_metrics.try_lock() {
+            *lock = metrics.clone();
+        }
         reconnect_attempt += 1;
         let delay = (config.initial_backoff * (1 << (reconnect_attempt - 1).min(5))).min(config.max_backoff);
         sleep(delay).await;
+    }
+}
+
+#[inline]
+fn send_event_with_backpressure(
+    tx: &SyncSender<FeedEvent>,
+    event: FeedEvent,
+    capacity: usize,
+    metrics: &mut ConnectionMetrics,
+    last_drop_log: &mut std::time::Instant,
+) -> bool {
+    match tx.try_send(event) {
+        Ok(()) => true,
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            metrics.dropped_ticks += 1;
+            let now = std::time::Instant::now();
+            if now.duration_since(*last_drop_log) >= Duration::from_secs(5) {
+                eprintln!(
+                    "WARNING: feed channel full ({capacity}/{capacity} queued), dropping ticks due to backpressure (total dropped: {})",
+                    metrics.dropped_ticks
+                );
+                *last_drop_log = now;
+            }
+            true
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
     }
 }

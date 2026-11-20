@@ -47,4 +47,36 @@ impl ConnectionMetrics {
         let max = *sorted.last().unwrap();
         Some((p50, max))
     }
+
+    pub fn status_line(&self) -> String {
+        let mut codes: Vec<_> = self.packets_by_code.iter().collect();
+        codes.sort_by_key(|(k, _)| *k);
+        let codes_str: Vec<String> = codes
+            .into_iter()
+            .map(|(k, v)| format!("code_{k}={v}"))
+            .collect();
+        let ltt_str = match self.last_ltt {
+            Some(ltt) => format!("{ltt}"),
+            None => "none".to_string(),
+        };
+        let recv_minus_ltt_str = match self.last_recv_minus_ltt {
+            Some(diff) => format!("{diff:.3}s"),
+            None => "none".to_string(),
+        };
+        let conv_str = match self.detected_convention {
+            Some(c) => format!("{c:?}"),
+            None => "unknown".to_string(),
+        };
+        format!(
+            "FEED STATUS | packets: [{}] | last_ltt: {} | recv-ltt: {} | convention: {} | stale: {} | zero_ltt: {} | drops: {} | reconnects: {}",
+            codes_str.join(", "),
+            ltt_str,
+            recv_minus_ltt_str,
+            conv_str,
+            self.stale_ticks,
+            self.zero_ltt_ticks,
+            self.dropped_ticks,
+            self.reconnects,
+        )
+    }
 }
