@@ -100,7 +100,10 @@ impl SimBroker {
             } else {
                 tick_units.floor()
             };
-            let price_paise = (units as i64).saturating_mul(tick_paise);
+            let units = if raw_price > 0.0 { units.max(1.0) } else { units };
+            let price_paise = (units as i64)
+                .saturating_mul(tick_paise)
+                .max(if raw_price > 0.0 { tick_paise } else { 0 });
             let price = crate::trader::paise_to_rupees(price_paise);
             p.notional_filled_paise += qty as i128 * price_paise as i128;
             let target_fee_paise = if self.fees.bps == 0.0

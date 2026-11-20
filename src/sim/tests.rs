@@ -692,3 +692,30 @@ use crate::{
         assert!(r.timings.engine_indicators >= std::time::Duration::ZERO);
         assert!(r.timings.trader >= std::time::Duration::ZERO);
     }
+
+    #[test]
+    fn sub_tick_penny_stock_sell_fill_does_not_floor_to_zero() {
+        let mut b = SimBroker::new(vec!["PENNY".into()]);
+        b.tick_size_paise = 5; // 5 paise tick size (0.05 rupees)
+        let req = OrderRequest {
+            client_order_id: "penny_sell".into(),
+            symbol: "PENNY".into(),
+            side: Side::Sell,
+            qty: 100,
+            reason: OrderReason::Rule("r".into()),
+            ref_price: 0.02, // 2 paise (sub-tick)
+            decided_at: 1,
+        };
+        b.submit(&req).unwrap();
+        let c = candle(2, 0.02, 0.02);
+        b.on_candle_open(&BTreeMap::from([("PENNY".into(), c)]));
+        let events = b.drain_events();
+        let fill = events.iter().find_map(|e| match e {
+            OrderEvent::Filled { price, .. } => Some(*price),
+            _ => None,
+        });
+        assert!(fill.is_some());
+        let fill_price = fill.unwrap();
+        assert!(fill_price > 0.0, "fill price must be positive, got {fill_price}");
+        assert_eq!(fill_price, 0.05, "sub-tick price should clamp to minimum tick");
+    }
