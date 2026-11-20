@@ -7,6 +7,7 @@ pub struct ConnectionMetrics {
     pub unknown_codes: u64,
     pub deduped_ticks: u64,
     pub late_ticks: u64,
+    pub dropped_ticks: u64,
     pub reconnects: u64,
     pub last_packet_recv_time: Option<f64>,
     pub latencies_sec: Vec<f64>, // receive_time - corrected_ltt
@@ -24,7 +25,9 @@ impl ConnectionMetrics {
 
     pub fn record_latency(&mut self, recv_t: f64, time_utc: i64) {
         let lat = recv_t - time_utc as f64;
-        self.latencies_sec.push(lat);
+        if self.latencies_sec.len() < 10_000 {
+            self.latencies_sec.push(lat);
+        }
     }
 
     pub fn latency_stats(&self) -> Option<(f64, f64)> {

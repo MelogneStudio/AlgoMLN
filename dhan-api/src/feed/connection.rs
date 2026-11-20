@@ -277,13 +277,20 @@ async fn run_feed_loop(
                                         continue;
                                     }
 
-                                    let _ = tx.send(FeedEvent::Tick(Tick {
+                                    let tick = FeedEvent::Tick(Tick {
                                         security_id: header.security_id,
                                         price_paise,
                                         time_utc,
                                         volume: None,
                                         recv_ns,
-                                    }));
+                                    });
+                                    match tx.try_send(tick) {
+                                        Ok(()) => {}
+                                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                            metrics.dropped_ticks += 1;
+                                        }
+                                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                                    }
                                 }
                                 Packet::Quote { ltp, ltt, volume, .. } | Packet::Full { ltp, ltt, volume, .. } => {
                                     let time_utc = ltt_to_utc_seconds(ltt);
@@ -295,20 +302,34 @@ async fn run_feed_loop(
                                         continue;
                                     }
 
-                                    let _ = tx.send(FeedEvent::Tick(Tick {
+                                    let tick = FeedEvent::Tick(Tick {
                                         security_id: header.security_id,
                                         price_paise,
                                         time_utc,
                                         volume: Some(volume as i64),
                                         recv_ns,
-                                    }));
+                                    });
+                                    match tx.try_send(tick) {
+                                        Ok(()) => {}
+                                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                            metrics.dropped_ticks += 1;
+                                        }
+                                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                                    }
                                 }
                                 Packet::PrevClose { close, oi } => {
-                                    let _ = tx.send(FeedEvent::PrevClose {
+                                    let ev = FeedEvent::PrevClose {
                                         security_id: header.security_id,
                                         price_paise: ltp_to_paise(close),
                                         oi,
-                                    });
+                                    };
+                                    match tx.try_send(ev) {
+                                        Ok(()) => {}
+                                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                            metrics.dropped_ticks += 1;
+                                        }
+                                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                                    }
                                 }
                                 Packet::Disconnect { reason } => {
                                     eprintln!("received feed disconnect code: {reason}");
