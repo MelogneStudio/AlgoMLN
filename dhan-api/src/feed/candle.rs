@@ -103,6 +103,8 @@ pub struct CandleBuilder {
     disconnected: bool,
     pub off_session_ticks: Vec<Tick>,
     pub late_ticks: usize,
+    pub zero_ltt_ticks: usize,
+    pub stale_ticks: usize,
     closed_queue: VecDeque<ClosedCandle>,
 }
 
@@ -119,6 +121,8 @@ impl CandleBuilder {
             disconnected: false,
             off_session_ticks: Vec::new(),
             late_ticks: 0,
+            zero_ltt_ticks: 0,
+            stale_ticks: 0,
             closed_queue: VecDeque::new(),
         }
     }
@@ -195,8 +199,13 @@ impl CandleBuilder {
         // Fill any empty minutes within session that have elapsed up to clock - 60 - grace
         if let (Some(last_close), Some(mut last_min)) = (self.last_closed_close, self.last_closed_minute) {
             let max_closeable_min = ((self.current_clock_utc - grace_secs) / 60) * 60 - 60;
+            let last_day = (last_min + 19800).div_euclid(86400);
             while last_min < max_closeable_min {
                 let next_min = last_min + 60;
+                // Never flat fill across different IST calendar dates
+                if (next_min + 19800).div_euclid(86400) != last_day {
+                    break;
+                }
                 // Only fill if inside trading session
                 if self.config.session_window.is_in_session(next_min) {
                     let filled_candle = ClosedCandle {
@@ -223,6 +232,10 @@ impl CandleBuilder {
 
     fn fill_gaps_up_to(&mut self, target_bar_start: i64) {
         if let (Some(last_close), Some(mut last_min)) = (self.last_closed_close, self.last_closed_minute) {
+            // Never flat fill across different IST calendar dates
+            if (last_min + 19800).div_euclid(86400) != (target_bar_start + 19800).div_euclid(86400) {
+                return;
+            }
             while last_min + 60 < target_bar_start {
                 let next_min = last_min + 60;
                 if self.config.session_window.is_in_session(next_min) {
@@ -247,6 +260,12 @@ impl CandleBuilder {
 
     /// Process a normalized tick.
     pub fn handle_tick(&mut self, tick: &Tick) {
+        // Drop any ticks with invalid timestamp
+        if tick.time_utc <= 0 {
+            self.zero_ltt_ticks += 1;
+            return;
+        }
+
         // 1. Check if tick is off-session (e.g. auction prints after 15:28 / pre-open)
         if !self.config.session_window.is_in_session(tick.time_utc) {
             self.off_session_ticks.push(*tick);

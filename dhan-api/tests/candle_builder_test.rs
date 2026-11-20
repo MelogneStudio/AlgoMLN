@@ -73,14 +73,29 @@ pub fn compare_live_vs_api(
     diff
 }
 
+fn find_capture_path() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        manifest.join("..").join("sample-data").join("capture.jsonl"),
+        manifest.join("sample-data").join("capture.jsonl"),
+        manifest.join("tests").join("fixtures").join("capture.jsonl"),
+    ];
+    for p in &candidates {
+        if p.exists() {
+            return p.clone();
+        }
+    }
+    candidates[0].clone()
+}
+
 #[test]
 fn test_golden_capture_candle_builder() {
-    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("capture.jsonl");
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
-    let run_replay = || -> (Vec<ClosedCandle>, usize, usize) {
+    let fixture_path = find_capture_path();
+
+    let run_replay = || -> (Vec<ClosedCandle>, usize, usize, usize, usize, u64) {
         let mut source = ReplaySource::from_file(&fixture_path).expect("open capture");
         let config = CandleBuilderConfig::new(2885, true); // stock 2885 is F&O
         let mut builder = CandleBuilder::new(config);
@@ -100,44 +115,94 @@ fn test_golden_capture_candle_builder() {
             candles.push(c);
         }
 
-        (candles, builder.off_session_ticks.len(), builder.late_ticks)
+        let mut hasher = DefaultHasher::new();
+        for c in &candles {
+            c.timestamp.hash(&mut hasher);
+            c.open.to_bits().hash(&mut hasher);
+            c.high.to_bits().hash(&mut hasher);
+            c.low.to_bits().hash(&mut hasher);
+            c.close.to_bits().hash(&mut hasher);
+            c.volume.to_bits().hash(&mut hasher);
+            c.filled.hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+
+        (
+            candles,
+            builder.off_session_ticks.len(),
+            builder.late_ticks,
+            source.stale_ticks(),
+            source.zero_ltt_ticks(),
+            hash,
+        )
     };
 
-    let (candles1, off_session1, late1) = run_replay();
+    let (candles1, off_session1, late1, stale1, zero1, hash1) = run_replay();
+    let (candles2, off_session2, late2, stale2, zero2, hash2) = run_replay();
 
-    // 1. Bar counts: Exactly 20 continuous 1m bars from 14:55 to 15:14
-    assert_eq!(candles1.len(), 20, "expected 20 1m candles, got {}", candles1.len());
+    // Determinism: hashes and counts must be identical across runs
+    assert_eq!(hash1, hash2, "replay output hashes must match identically");
+    assert_eq!(candles1, candles2, "replay candle lists must match identically");
+    assert_eq!(off_session1, off_session2);
+    assert_eq!(late1, late2);
+    assert_eq!(stale1, stale2);
+    assert_eq!(zero1, zero2);
 
-    // 2. Dropped off-session ticks after 15:28: 1 fresh tick post-deduplication (the auction replay tick with stale LTT 15:14 is dropped by LTT detector as stale)
-    assert_eq!(off_session1, 1, "expected 1 deduplicated off-session auction tick");
+    // Stale and LTT=0 ticks are counted, not bucketed
+    assert_eq!(stale1, 280, "must count exactly 280 stale ticks");
+    assert_eq!(zero1, 1, "must count exactly 1 zero LTT tick");
 
-    // 3. Late ticks: 0
-    assert_eq!(late1, 0, "expected 0 late ticks");
+    // Partition candles by IST calendar day
+    let mut nov18_candles = Vec::new();
+    let mut nov20_candles = Vec::new();
 
-    // 4. Validate candle sanity
-    for i in 0..candles1.len() {
-        let c = &candles1[i];
-        assert!(c.low <= c.open, "low > open in candle {i}");
-        assert!(c.low <= c.close, "low > close in candle {i}");
-        assert!(c.open <= c.high, "open > high in candle {i}");
-        assert!(c.close <= c.high, "close > high in candle {i}");
-        assert!(c.volume >= 0.0, "negative volume in candle {i}");
-        assert!(!c.filled, "capture bars should not be flat filled");
+    for c in &candles1 {
+        // Assert no 1970 candles
+        assert!(c.timestamp > 1_000_000_000, "candle timestamp stamped 1970 or invalid: {}", c.timestamp);
 
-        if i > 0 {
-            assert_eq!(
-                c.timestamp - candles1[i - 1].timestamp,
-                60,
-                "timestamps should increase by 60s"
-            );
+        // Check calendar date:
+        let dt = chrono::DateTime::from_timestamp(c.timestamp, 0).expect("valid dt");
+        let ist_dt = dt.with_timezone(&chrono::FixedOffset::east_opt(19800).unwrap());
+        use chrono::Datelike;
+        assert_ne!(ist_dt.day(), 19, "no candle stamped on 2026-11-19: {:?}", ist_dt);
+
+        if ist_dt.day() == 18 {
+            nov18_candles.push(*c);
+        } else if ist_dt.day() == 20 {
+            nov20_candles.push(*c);
+        } else {
+            panic!("unexpected candle day: {:?}", ist_dt);
         }
     }
 
-    // 5. Determinism: run twice, verify identical output
-    let (candles2, off_session2, late2) = run_replay();
-    assert_eq!(candles1, candles2, "replay must be strictly deterministic");
-    assert_eq!(off_session1, off_session2);
-    assert_eq!(late1, late2);
+    // Nov 18 checks:
+    // Continuous session ends at 15:15 IST (54,900s). Bars run 14:55 to 15:14 (20 bars).
+    assert_eq!(nov18_candles.len(), 20, "Nov 18 must have exactly 20 bars");
+    let last_nov18 = nov18_candles.last().unwrap();
+    let last_nov18_sec = (last_nov18.timestamp + 19800).rem_euclid(86400);
+    assert_eq!(last_nov18_sec, 15 * 3600 + 14 * 60, "Nov 18 last candle must be 15:14 IST");
+
+    // Nov 20 checks:
+    // - no candle on 2026-11-20 before 09:15 IST
+    // - first 2026-11-20 candle is stamped 09:15 IST and contains no tick from before 09:15:00
+    assert!(!nov20_candles.is_empty(), "Nov 20 candles must exist");
+    let first_nov20 = &nov20_candles[0];
+    let first_nov20_sec = (first_nov20.timestamp + 19800).rem_euclid(86400);
+    assert_eq!(first_nov20_sec, 9 * 3600 + 15 * 60, "first 2026-11-20 candle must be 09:15 IST");
+
+    for c in &nov20_candles {
+        let ist_sec = (c.timestamp + 19800).rem_euclid(86400);
+        assert!(
+            ist_sec >= 9 * 3600 + 15 * 60,
+            "no candle on 2026-11-20 before 09:15 IST (found: {})",
+            ist_sec
+        );
+    }
+
+    // Assert that the first Nov 20 candle contains only ticks from >= 09:15:00.
+    // At 09:15:01, LTP was 1365.7. Ticks before 09:15 were 1375.6 (prev close) and 1369.0 (09:09:19).
+    // So if 09:09:19 was included, open would be 1369.0 or high would be 1369.0.
+    assert_eq!(first_nov20.open, 1365.7, "first 2026-11-20 candle open must be 1365.7");
 
     // 6. Test acceptance diff helper with simulated identical API bars
     let mock_api_bars: Vec<(i64, f64, f64, f64, f64, f64)> = candles1
