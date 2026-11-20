@@ -1,4 +1,4 @@
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use serde_json::Value;
 use thiserror::Error;
@@ -52,7 +52,7 @@ pub fn parse_and_validate_token(token: &str, now: i64) -> Result<TokenClaims, Au
             while padded.len() % 4 != 0 {
                 padded.push('=');
             }
-            URL_SAFE_NO_PAD.decode(padded.as_bytes())
+            URL_SAFE.decode(padded.as_bytes())
         })
         .map_err(|e| AuthError::Base64(e.to_string()))?;
 
@@ -156,5 +156,21 @@ mod tests {
             parse_and_validate_token(&bad_json, 1000).unwrap_err(),
             AuthError::Json(_)
         ));
+    }
+
+    #[test]
+    fn test_padded_base64_jwt_payload() {
+        use base64::engine::general_purpose::URL_SAFE;
+        let header = r#"{"alg":"HS256","typ":"JWT"}"#;
+        // Payload length chosen so base64 requires padding
+        let payload = r#"{"dhanClientId":"1000000003","exp":1750000000}"#;
+        let token = format!(
+            "{}.{}.sig",
+            URL_SAFE.encode(header.as_bytes()),
+            URL_SAFE.encode(payload.as_bytes())
+        );
+        assert!(token.contains('='));
+        let claims = parse_and_validate_token(&token, 1700000000).expect("padded token must validate");
+        assert_eq!(claims.client_id, "1000000003");
     }
 }
