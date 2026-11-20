@@ -150,6 +150,7 @@ pub struct Engine {
     symbol: Symbol,
     provider: PrecomputedProvider,
     handles: Vec<IndicatorHandle>,
+    has_prev_price: bool,
     previous_ts: Option<i64>,
     cross_pairs: Vec<(FastExpr, FastExpr)>,
     cross_prev: Vec<(Option<f64>, Option<f64>)>,
@@ -195,6 +196,7 @@ impl Engine {
         fn compile_expr(
             e: &NumericExpr,
             handles: &HashMap<IndicatorSpec, IndicatorHandle>,
+            has_prev: &mut bool,
         ) -> Result<FastExpr, EngineError> {
             match e {
                 NumericExpr::Literal(x) => Ok(FastExpr::Literal(x.spelling.parse().ok())),
@@ -205,10 +207,22 @@ impl Engine {
                         PriceField::High => PField::High,
                         PriceField::Low => PField::Low,
                         PriceField::Volume => PField::Volume,
-                        PriceField::PrevClose => PField::PrevClose,
-                        PriceField::PrevOpen => PField::PrevOpen,
-                        PriceField::PrevHigh => PField::PrevHigh,
-                        PriceField::PrevLow => PField::PrevLow,
+                        PriceField::PrevClose => {
+                            *has_prev = true;
+                            PField::PrevClose
+                        }
+                        PriceField::PrevOpen => {
+                            *has_prev = true;
+                            PField::PrevOpen
+                        }
+                        PriceField::PrevHigh => {
+                            *has_prev = true;
+                            PField::PrevHigh
+                        }
+                        PriceField::PrevLow => {
+                            *has_prev = true;
+                            PField::PrevLow
+                        }
                     };
                     Ok(FastExpr::Price(field))
                 }
@@ -227,11 +241,12 @@ impl Engine {
             handles: &HashMap<IndicatorSpec, IndicatorHandle>,
             cross_pairs: &mut Vec<(FastExpr, FastExpr)>,
             cross_map: &mut HashMap<(NumericExpr, NumericExpr), usize>,
+            has_prev: &mut bool,
         ) -> Result<FastCondition, EngineError> {
             match c {
                 Condition::Compare { left, op, right } => {
-                    let left = compile_expr(left, handles)?;
-                    let right = compile_expr(right, handles)?;
+                    let left = compile_expr(left, handles, has_prev)?;
+                    let right = compile_expr(right, handles, has_prev)?;
                     Ok(FastCondition::Compare {
                         left,
                         op: *op,
@@ -243,8 +258,8 @@ impl Engine {
                     left,
                     right,
                 } => {
-                    let left_fast = compile_expr(left, handles)?;
-                    let right_fast = compile_expr(right, handles)?;
+                    let left_fast = compile_expr(left, handles, has_prev)?;
+                    let right_fast = compile_expr(right, handles, has_prev)?;
                     let key = (left.clone(), right.clone());
                     let cross_id = if let Some(&id) = cross_map.get(&key) {
                         id
@@ -262,17 +277,17 @@ impl Engine {
                     })
                 }
                 Condition::And(a, b) => {
-                    let a = compile_condition(a, handles, cross_pairs, cross_map)?;
-                    let b = compile_condition(b, handles, cross_pairs, cross_map)?;
+                    let a = compile_condition(a, handles, cross_pairs, cross_map, has_prev)?;
+                    let b = compile_condition(b, handles, cross_pairs, cross_map, has_prev)?;
                     Ok(FastCondition::And(Box::new(a), Box::new(b)))
                 }
                 Condition::Or(a, b) => {
-                    let a = compile_condition(a, handles, cross_pairs, cross_map)?;
-                    let b = compile_condition(b, handles, cross_pairs, cross_map)?;
+                    let a = compile_condition(a, handles, cross_pairs, cross_map, has_prev)?;
+                    let b = compile_condition(b, handles, cross_pairs, cross_map, has_prev)?;
                     Ok(FastCondition::Or(Box::new(a), Box::new(b)))
                 }
                 Condition::Not(a) => {
-                    let a = compile_condition(a, handles, cross_pairs, cross_map)?;
+                    let a = compile_condition(a, handles, cross_pairs, cross_map, has_prev)?;
                     Ok(FastCondition::Not(Box::new(a)))
                 }
                 Condition::InPosition => {
@@ -287,12 +302,19 @@ impl Engine {
         let mut compiled_rules = Vec::new();
         let mut cross_pairs = Vec::new();
         let mut cross_map = HashMap::new();
+        let mut has_prev_price = false;
         for r in &program.strategy.rules {
             let kind = match &r.action {
                 Action::Buy(_) => ActionKind::Entry,
                 Action::Sell(_) | Action::SellAll => ActionKind::Exit,
             };
-            let cond = compile_condition(&r.condition, &handles, &mut cross_pairs, &mut cross_map)?;
+            let cond = compile_condition(
+                &r.condition,
+                &handles,
+                &mut cross_pairs,
+                &mut cross_map,
+                &mut has_prev_price,
+            )?;
             compiled_rules.push((r.id.clone(), kind, cond));
         }
         let cross_len = cross_pairs.len();
@@ -301,6 +323,7 @@ impl Engine {
             symbol,
             provider,
             handles: handles.into_values().collect(),
+            has_prev_price,
             previous_ts: None,
             cross_pairs,
             cross_prev: vec![(None, None); cross_len],
@@ -338,10 +361,11 @@ impl Engine {
             self.cross_prev[id] = (x, y);
         }
         self.previous_ts = Some(c.timestamp);
-        let warm = self
-            .handles
-            .iter()
-            .all(|h| self.provider.get(*h).is_some());
+        let warm = (!self.has_prev_price || self.provider.price(PField::PrevClose).is_some())
+            && self
+                .handles
+                .iter()
+                .all(|h| self.provider.get(*h).is_some());
         Ok(LevelFrame {
             symbol: self.symbol.clone(),
             candle_ts: c.timestamp,
@@ -567,6 +591,15 @@ mod tests {
 
         let p_prev = program("TRADE_IN ABC\nWHEN prev_close > 100\nBUY 1\n");
         assert_eq!(p_prev.warmup_bars(), 1);
+    }
+
+    #[test]
+    fn prev_price_fields_require_two_candles_to_warm() {
+        let p = program("TRADE_IN ABC\nWHEN prev_close > 100\nBUY 1\n");
+        let frames = evaluate_series(&p, "ABC".into(), &[candle(1, 101.0), candle(2, 102.0)]).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert!(!frames[0].warm, "candle 1 must not be warm when prev_close is used");
+        assert!(frames[1].warm, "candle 2 must be warm once prev_close is available");
     }
 
     #[test]
