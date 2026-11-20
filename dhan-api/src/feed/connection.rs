@@ -313,7 +313,9 @@ async fn run_feed_loop(
                             let recv_ns = (now_f64 * 1_000_000_000.0).round() as u64;
 
                             if let Some(r) = recorder.as_mut() {
-                                let _ = r.record_frame(now_f64, &bytes);
+                                if let Err(e) = r.record_frame(now_f64, &bytes) {
+                                    eprintln!("WARNING: failed to write frame to record file: {e}");
+                                }
                             }
 
                             let (header, packet) = match decode(&bytes) {
