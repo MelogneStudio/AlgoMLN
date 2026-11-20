@@ -694,34 +694,38 @@ fn derive_trades(fills: &[Fill]) -> Vec<Trade> {
                 lot.qty -= q;
                 lot.cost_paise -= entry_cost;
                 lot.entry_fees_paise -= entry_fee;
-                if lot.qty == 0 && lot.closed_qty > 0 {
+                if q > 0 {
+                    let net_pnl = exit_value - entry_cost - entry_fee - exit_fee;
+                    let total_fees = entry_fee + exit_fee;
                     trades.push(Trade {
                         symbol: f.symbol.clone(),
                         entry_ts: lot.entry_ts,
                         exit_ts: f.ts,
-                        qty: lot.closed_qty,
+                        qty: q,
                         avg_entry: crate::trader::paise_to_rupees(round_half_even_i128(
-                            lot.closed_entry_cost_paise,
-                            lot.closed_qty as i128,
+                            entry_cost,
+                            q as i128,
                         ) as i64),
                         avg_entry_paise: round_half_even_i128(
-                            lot.closed_entry_cost_paise,
-                            lot.closed_qty as i128,
+                            entry_cost,
+                            q as i128,
                         ) as i64,
                         avg_exit: crate::trader::paise_to_rupees(round_half_even_i128(
-                            lot.closed_exit_value_paise,
-                            lot.closed_qty as i128,
+                            exit_value,
+                            q as i128,
                         ) as i64),
                         avg_exit_paise: round_half_even_i128(
-                            lot.closed_exit_value_paise,
-                            lot.closed_qty as i128,
+                            exit_value,
+                            q as i128,
                         ) as i64,
-                        fees: crate::trader::paise_to_rupees(lot.closed_fees_paise as i64),
-                        fees_paise: lot.closed_fees_paise as i64,
-                        net_pnl: crate::trader::paise_to_rupees(lot.closed_pnl_paise as i64),
-                        net_pnl_paise: lot.closed_pnl_paise as i64,
+                        fees: crate::trader::paise_to_rupees(total_fees as i64),
+                        fees_paise: total_fees as i64,
+                        net_pnl: crate::trader::paise_to_rupees(net_pnl as i64),
+                        net_pnl_paise: net_pnl as i64,
                         exit_reason: f.reason.clone(),
                     });
+                }
+                if lot.qty == 0 {
                     *lot = Lot::default();
                 }
             }

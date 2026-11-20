@@ -719,3 +719,21 @@ use crate::{
         assert!(fill_price > 0.0, "fill price must be positive, got {fill_price}");
         assert_eq!(fill_price, 0.05, "sub-tick price should clamp to minimum tick");
     }
+
+    #[test]
+    fn partial_exit_records_trade_in_trades_list() {
+        let p = crate::compile("TRADE_IN A\nWHEN close == 10\nBUY 10\nWHEN close == 20\nSELL 4\n").unwrap();
+        let src = MemorySource(vec![
+            ("A".into(), candle(1, 10.0, 10.0)),
+            ("A".into(), candle(2, 10.0, 20.0)),
+            ("A".into(), candle(3, 20.0, 20.0)),
+        ]);
+        let mut cfg = config();
+        cfg.initial_cash = 1000.0;
+        let r = run(&p, &src, cfg, None).unwrap();
+        assert_eq!(r.trades.len(), 1, "partial exit of 4 shares must be recorded in trades");
+        assert_eq!(r.trades[0].qty, 4);
+        assert_eq!(r.trades[0].avg_entry, 10.0);
+        assert_eq!(r.trades[0].avg_exit, 20.0);
+        assert_eq!(r.trades[0].net_pnl, 40.0);
+    }
