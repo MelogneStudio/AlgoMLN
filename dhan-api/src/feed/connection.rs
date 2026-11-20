@@ -27,7 +27,7 @@ pub const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 pub const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 pub const DEFAULT_FEED_CHANNEL_CAPACITY: usize = 10_000;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FeedConfig {
     pub base_url: String,
     pub token: String,
@@ -43,6 +43,27 @@ pub struct FeedConfig {
     pub max_reconnect_attempts: Option<usize>,
     pub ltt_detector_config: LttDetectorConfig,
     pub channel_capacity: usize,
+}
+
+impl std::fmt::Debug for FeedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeedConfig")
+            .field("base_url", &self.base_url)
+            .field("token", &"[REDACTED]")
+            .field("instruments", &self.instruments)
+            .field("request_code", &self.request_code)
+            .field("record_path", &self.record_path)
+            .field("planned_session_duration", &self.planned_session_duration)
+            .field("watchdog_timeout", &self.watchdog_timeout)
+            .field("session_window", &self.session_window)
+            .field("clock", &self.clock)
+            .field("initial_backoff", &self.initial_backoff)
+            .field("max_backoff", &self.max_backoff)
+            .field("max_reconnect_attempts", &self.max_reconnect_attempts)
+            .field("ltt_detector_config", &self.ltt_detector_config)
+            .field("channel_capacity", &self.channel_capacity)
+            .finish()
+    }
 }
 
 impl FeedConfig {
@@ -467,7 +488,7 @@ async fn run_feed_loop(
                                 }
                                 Packet::Disconnect { reason } => {
                                     eprintln!("received feed disconnect code: {reason}");
-                                    let _ = tx.send(FeedEvent::Disconnected { reason: Some(reason) });
+                                    let _ = tx.try_send(FeedEvent::Disconnected { reason: Some(reason) });
                                     if reason == 805 {
                                         // Spec: Code 805 means more than 5 connections exist, so do not retry in a loop
                                         eprintln!("fatal error: Dhan code 805 (connection limit exceeded)");
@@ -509,7 +530,7 @@ async fn run_feed_loop(
             }
         }
 
-        let _ = tx.send(FeedEvent::Disconnected { reason: None });
+        let _ = tx.try_send(FeedEvent::Disconnected { reason: None });
         metrics.reconnects += 1;
         if let Ok(mut lock) = shared_metrics.try_lock() {
             *lock = metrics.clone();

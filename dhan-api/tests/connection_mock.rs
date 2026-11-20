@@ -164,3 +164,20 @@ fn test_mock_websocket_flow() {
     source.stop();
     let _ = std::fs::remove_dir_all(record_dir);
 }
+
+#[test]
+fn test_feed_config_debug_redacts_token() {
+    let secret = "super_secret_jwt_token_12345";
+    let config = FeedConfig::new(secret, vec![InstrumentSubscription::nse_eq("2885")]);
+    let debug_str = format!("{config:?}");
+
+    assert!(
+        debug_str.contains("token: \"[REDACTED]\""),
+        "debug output must redact token, got: {debug_str}"
+    );
+    assert!(
+        !debug_str.contains("super_secret"),
+        "debug output must never contain raw token string"
+    );
+}
+
