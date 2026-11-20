@@ -206,3 +206,53 @@ fn test_clock_based_closing_and_flat_fill() {
     assert_eq!(filled_0917.close, 1005.0);
     assert!(filled_0917.filled);
 }
+
+#[test]
+fn test_tick_arrival_skipping_minutes_emits_carry_forward_flat_candles() {
+    let config = CandleBuilderConfig::new(2885, true);
+    let mut builder = CandleBuilder::new(config);
+
+    let min_0915 = 1700000000 - ((1700000000 + 19800) % 86400) + 33300;
+
+    // Tick at 09:15:10, price 1005.0
+    let tick1 = Tick {
+        security_id: 2885,
+        price_paise: 100500,
+        time_utc: min_0915 + 10,
+        volume: None,
+        recv_ns: 0,
+    };
+    builder.handle_event(&FeedEvent::Tick(tick1), min_0915 + 10);
+
+    // No ticks during 09:16 or 09:17.
+    // Next tick arrives directly at 09:18:15 with price 1010.0
+    let tick2 = Tick {
+        security_id: 2885,
+        price_paise: 101000,
+        time_utc: min_0915 + 195,
+        volume: None,
+        recv_ns: 0,
+    };
+    builder.handle_event(&FeedEvent::Tick(tick2), min_0915 + 195);
+
+    // Closed candle 1: 09:15 (closed by minute change)
+    let c1 = builder.pop_candle().expect("09:15 candle must be closed");
+    assert_eq!(c1.timestamp, min_0915);
+    assert_eq!(c1.close, 1005.0);
+    assert!(!c1.filled);
+
+    // Closed candle 2: 09:16 (flat fill gap)
+    let c2 = builder.pop_candle().expect("09:16 flat filled candle must be emitted");
+    assert_eq!(c2.timestamp, min_0915 + 60);
+    assert_eq!(c2.close, 1005.0);
+    assert!(c2.filled);
+
+    // Closed candle 3: 09:17 (flat fill gap)
+    let c3 = builder.pop_candle().expect("09:17 flat filled candle must be emitted");
+    assert_eq!(c3.timestamp, min_0915 + 120);
+    assert_eq!(c3.close, 1005.0);
+    assert!(c3.filled);
+
+    // 09:18 is currently building, not closed yet
+    assert!(builder.pop_candle().is_none());
+}

@@ -221,6 +221,30 @@ impl CandleBuilder {
         }
     }
 
+    fn fill_gaps_up_to(&mut self, target_bar_start: i64) {
+        if let (Some(last_close), Some(mut last_min)) = (self.last_closed_close, self.last_closed_minute) {
+            while last_min + 60 < target_bar_start {
+                let next_min = last_min + 60;
+                if self.config.session_window.is_in_session(next_min) {
+                    self.closed_queue.push_back(ClosedCandle {
+                        timestamp: next_min,
+                        open: last_close,
+                        high: last_close,
+                        low: last_close,
+                        close: last_close,
+                        volume: 0.0,
+                        security_id: self.config.security_id,
+                        filled: true,
+                        gap: self.disconnected,
+                        partial_volume: false,
+                    });
+                }
+                last_min = next_min;
+            }
+            self.last_closed_minute = Some(last_min);
+        }
+    }
+
     /// Process a normalized tick.
     pub fn handle_tick(&mut self, tick: &Tick) {
         // 1. Check if tick is off-session (e.g. auction prints after 15:28 / pre-open)
@@ -289,6 +313,8 @@ impl CandleBuilder {
                 self.last_closed_minute = Some(closed.timestamp);
                 self.closed_queue.push_back(closed);
 
+                self.fill_gaps_up_to(bar_start_ts);
+
                 self.current_bar = Some(BuildingBar {
                     start_ts: bar_start_ts,
                     security_id: tick.security_id,
@@ -303,29 +329,7 @@ impl CandleBuilder {
                 });
             }
             None => {
-                // If there were empty minutes between last_closed_minute and bar_start_ts,
-                // fill them with carry-forward flat candles
-                if let (Some(last_close), Some(mut last_min)) = (self.last_closed_close, self.last_closed_minute) {
-                    while last_min + 60 < bar_start_ts {
-                        let next_min = last_min + 60;
-                        if self.config.session_window.is_in_session(next_min) {
-                            self.closed_queue.push_back(ClosedCandle {
-                                timestamp: next_min,
-                                open: last_close,
-                                high: last_close,
-                                low: last_close,
-                                close: last_close,
-                                volume: 0.0,
-                                security_id: self.config.security_id,
-                                filled: true,
-                                gap: self.disconnected,
-                                partial_volume: false,
-                            });
-                        }
-                        last_min = next_min;
-                    }
-                    self.last_closed_minute = Some(last_min);
-                }
+                self.fill_gaps_up_to(bar_start_ts);
 
                 self.current_bar = Some(BuildingBar {
                     start_ts: bar_start_ts,
