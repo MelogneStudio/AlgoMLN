@@ -321,3 +321,79 @@ fn test_tick_arrival_skipping_minutes_emits_carry_forward_flat_candles() {
     // 09:18 is currently building, not closed yet
     assert!(builder.pop_candle().is_none());
 }
+
+#[test]
+fn test_multi_day_session_rollover_and_gap_fill() {
+    let config = CandleBuilderConfig::new(2885, true); // F&O: 09:15 to 15:15 IST
+    let mut builder = CandleBuilder::new(config);
+
+    // Day 1 base: 2026-11-18
+    // 09:15 IST = 03:45 UTC
+    let day1_0915_utc = 1794973500i64;
+    let day1_1514_utc = day1_0915_utc + (15 * 60 + 14 - (9 * 60 + 15)) * 60; // 15:14 IST
+
+    // Day 1: tick at 15:14:10 IST
+    let tick_d1 = Tick {
+        security_id: 2885,
+        price_paise: 100000,
+        time_utc: day1_1514_utc + 10,
+        volume: None,
+        recv_ns: 0,
+    };
+    builder.handle_event(&FeedEvent::Tick(tick_d1), day1_1514_utc + 10);
+
+    // Advance clock past 15:15 IST (session close)
+    let day1_1516_utc = day1_1514_utc + 120;
+    builder.advance_clock(day1_1516_utc);
+
+    let c_d1 = builder.pop_candle().expect("15:14 candle must close");
+    assert_eq!(c_d1.timestamp, day1_1514_utc);
+    assert_eq!(c_d1.close, 1000.0);
+    assert!(builder.pop_candle().is_none());
+
+    // Advance into after-hours / overnight: no candles created
+    builder.advance_clock(day1_1516_utc + 3600);
+    assert!(builder.pop_candle().is_none());
+
+    // Day 2 base: 2026-11-19 (+86400s)
+    let day2_0845_utc = day1_0915_utc + 86400 - 1800; // 08:45 IST
+    builder.advance_clock(day2_0845_utc);
+    assert!(builder.pop_candle().is_none());
+
+    // In pre-open, prev_close is updated for Day 2
+    builder.set_prev_close(1050.0);
+
+    // First tick on Day 2 arrives late at 09:18:15 IST (skip 09:15, 09:16, 09:17)
+    let day2_0915_utc = day1_0915_utc + 86400;
+    let day2_0918_utc = day2_0915_utc + 180;
+    let tick_d2 = Tick {
+        security_id: 2885,
+        price_paise: 105500,
+        time_utc: day2_0918_utc + 15,
+        volume: None,
+        recv_ns: 0,
+    };
+    builder.handle_event(&FeedEvent::Tick(tick_d2), day2_0918_utc + 15);
+
+    // 09:15 flat fill at prev_close (1050.0)
+    let c2_1 = builder.pop_candle().expect("09:15 flat fill candle on day 2");
+    assert_eq!(c2_1.timestamp, day2_0915_utc);
+    assert_eq!(c2_1.close, 1050.0);
+    assert!(c2_1.filled);
+
+    // 09:16 flat fill at prev_close (1050.0)
+    let c2_2 = builder.pop_candle().expect("09:16 flat fill candle on day 2");
+    assert_eq!(c2_2.timestamp, day2_0915_utc + 60);
+    assert_eq!(c2_2.close, 1050.0);
+    assert!(c2_2.filled);
+
+    // 09:17 flat fill at prev_close (1050.0)
+    let c2_3 = builder.pop_candle().expect("09:17 flat fill candle on day 2");
+    assert_eq!(c2_3.timestamp, day2_0915_utc + 120);
+    assert_eq!(c2_3.close, 1050.0);
+    assert!(c2_3.filled);
+
+    // 09:18 is building, no more candles
+    assert!(builder.pop_candle().is_none());
+}
+

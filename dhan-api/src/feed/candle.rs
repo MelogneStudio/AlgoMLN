@@ -1,4 +1,4 @@
-use crate::feed::normalize::Tick;
+use crate::feed::normalize::{Tick, IST_OFFSET_SECONDS};
 use crate::feed::source::FeedEvent;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -34,13 +34,13 @@ impl SessionWindow {
 
     #[inline]
     pub fn is_in_session(&self, time_utc: i64) -> bool {
-        let ist_sec = (time_utc + 19800).rem_euclid(86400);
+        let ist_sec = (time_utc + IST_OFFSET_SECONDS).rem_euclid(86400);
         ist_sec >= self.start_ist_sec && ist_sec < self.end_ist_sec
     }
 
     #[inline]
     pub fn is_after_session(&self, time_utc: i64) -> bool {
-        let ist_sec = (time_utc + 19800).rem_euclid(86400);
+        let ist_sec = (time_utc + IST_OFFSET_SECONDS).rem_euclid(86400);
         ist_sec >= self.end_ist_sec
     }
 }
@@ -128,7 +128,7 @@ impl CandleBuilder {
     }
 
     pub fn set_prev_close(&mut self, prev_close: f64) {
-        if self.last_closed_close.is_none() {
+        if self.current_bar.is_none() {
             self.last_closed_close = Some(prev_close);
         }
     }
@@ -199,11 +199,22 @@ impl CandleBuilder {
         // Fill any empty minutes within session that have elapsed up to clock - 60 - grace
         if let (Some(last_close), Some(mut last_min)) = (self.last_closed_close, self.last_closed_minute) {
             let max_closeable_min = ((self.current_clock_utc - grace_secs) / 60) * 60 - 60;
-            let last_day = (last_min + 19800).div_euclid(86400);
+            let last_day = (last_min + IST_OFFSET_SECONDS).div_euclid(86400);
+            let current_day = (self.current_clock_utc + IST_OFFSET_SECONDS).div_euclid(86400);
+
+            if current_day > last_day {
+                let session_start_utc = (current_day * 86400 - IST_OFFSET_SECONDS) + self.config.session_window.start_ist_sec;
+                if self.current_clock_utc >= session_start_utc {
+                    last_min = session_start_utc - 60;
+                    self.last_closed_minute = Some(last_min);
+                }
+            }
+
+            let active_day = (last_min + IST_OFFSET_SECONDS).div_euclid(86400);
             while last_min < max_closeable_min {
                 let next_min = last_min + 60;
                 // Never flat fill across different IST calendar dates
-                if (next_min + 19800).div_euclid(86400) != last_day {
+                if (next_min + IST_OFFSET_SECONDS).div_euclid(86400) != active_day {
                     break;
                 }
                 // Only fill if inside trading session
@@ -232,10 +243,16 @@ impl CandleBuilder {
 
     fn fill_gaps_up_to(&mut self, target_bar_start: i64) {
         if let (Some(last_close), Some(mut last_min)) = (self.last_closed_close, self.last_closed_minute) {
-            // Never flat fill across different IST calendar dates
-            if (last_min + 19800).div_euclid(86400) != (target_bar_start + 19800).div_euclid(86400) {
+            let last_day = (last_min + IST_OFFSET_SECONDS).div_euclid(86400);
+            let target_day = (target_bar_start + IST_OFFSET_SECONDS).div_euclid(86400);
+
+            if target_day > last_day {
+                let session_start_utc = (target_day * 86400 - IST_OFFSET_SECONDS) + self.config.session_window.start_ist_sec;
+                last_min = session_start_utc - 60;
+            } else if target_day < last_day {
                 return;
             }
+
             while last_min + 60 < target_bar_start {
                 let next_min = last_min + 60;
                 if self.config.session_window.is_in_session(next_min) {
