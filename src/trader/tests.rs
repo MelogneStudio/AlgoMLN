@@ -750,3 +750,40 @@ fn naked_sell_does_not_credit_cash() {
     assert_eq!(t.net_position("ABC"), 0);
     assert_eq!(t.cash_paise(), initial_cash);
 }
+
+#[test]
+fn daily_loss_flatten_emits_order_for_unreserved_position_when_partial_exit_pending() {
+    let mut t = trader(
+        "TRADE_IN ABC\nRISK MAX_DAILY_LOSS 1%\nWHEN close > 1\nBUY 10\nWHEN close < 5\nSELL 2\n",
+        100.0,
+    );
+    let buy = t
+        .on_frame(&frame(1, &[("rule_1", true)], &[]), &candle(1, 5.0), Mode::Act)
+        .orders
+        .remove(0);
+    fill_buy(&mut t, &buy.client_order_id, 10, 5.0);
+    assert_eq!(t.net_position("ABC"), 10);
+
+    let sell = t
+        .on_frame(
+            &frame(2, &[("rule_1", false)], &[("rule_2", true)]),
+            &candle(2, 4.0),
+            Mode::Act,
+        )
+        .orders
+        .remove(0);
+    assert_eq!(sell.qty, 2);
+    assert_eq!(t.net_position("ABC"), 8);
+
+    t.realized_loss_today_paise = 200; // 2.0 rupees loss breaches 1% limit (1.0 rupee on 100.0 cash)
+    assert!(t.daily_loss_breached());
+
+    let breach = t.on_frame(
+        &frame(3, &[("rule_1", false)], &[("rule_2", false)]),
+        &candle(3, 4.0),
+        Mode::Act,
+    );
+    assert_eq!(breach.orders.len(), 1);
+    assert_eq!(breach.orders[0].qty, 8);
+    assert_eq!(breach.orders[0].reason, OrderReason::DailyLossFlatten);
+}

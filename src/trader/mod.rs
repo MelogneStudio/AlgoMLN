@@ -319,23 +319,21 @@ impl Trader {
             }
             let open: Vec<_> = self
                 .positions
-                .iter()
-                .filter(|(_, position)| position.filled_qty > 0)
-                .map(|(symbol, position)| (symbol.clone(), position.filled_qty as u64))
+                .keys()
+                .map(|symbol| (symbol.clone(), self.net_position(symbol) as u64))
+                .filter(|(_, qty)| *qty > 0)
                 .collect();
             for (symbol, qty) in open {
-                if !self.has_pending_exit(&symbol) {
-                    if let Some((price, decided_at)) = self.last_prices.get(&symbol).copied() {
-                        self.emit_at(
-                            &mut out,
-                            &symbol,
-                            Side::Sell,
-                            qty,
-                            OrderReason::DailyLossFlatten,
-                            price,
-                            decided_at,
-                        );
-                    }
+                if let Some((price, decided_at)) = self.last_prices.get(&symbol).copied() {
+                    self.emit_at(
+                        &mut out,
+                        &symbol,
+                        Side::Sell,
+                        qty,
+                        OrderReason::DailyLossFlatten,
+                        price,
+                        decided_at,
+                    );
                 }
             }
             for (id, is_entry) in fires {
