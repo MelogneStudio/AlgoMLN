@@ -6,11 +6,12 @@ use crate::{
 };
 
 pub fn parse(tokens: &[Token]) -> Result<Strategy, FrontendError> {
-    Parser { t: tokens, i: 0 }.strategy()
+    Parser { t: tokens, i: 0, depth: 0 }.strategy()
 }
 struct Parser<'a> {
     t: &'a [Token],
     i: usize,
+    depth: usize,
 }
 impl<'a> Parser<'a> {
     fn k(&self) -> &TokenKind {
@@ -38,7 +39,7 @@ impl<'a> Parser<'a> {
         depth
     }
     fn check_depth(&self) -> Result<(), FrontendError> {
-        if self.nesting() > 128 {
+        if self.nesting() + self.depth > 128 {
             let p = self.span();
             Err(FrontendError::Parse {
                 code: "PARSE_DEPTH",
@@ -395,7 +396,19 @@ impl<'a> Parser<'a> {
             while self.take_word("NOT") {
                 count += 1;
             }
+            if self.depth + count + self.nesting() > 128 {
+                let p = self.span();
+                return Err(FrontendError::Parse {
+                    code: "PARSE_DEPTH",
+                    message: "nesting exceeds 128 levels".into(),
+                    line: p.line,
+                    column: p.column,
+                    span: p,
+                });
+            }
+            self.depth += count;
             let mut c = self.not()?;
+            self.depth -= count;
             for _ in 0..count {
                 c = Condition::Not(Box::new(c));
             }
@@ -680,5 +693,14 @@ mod tests {
             Err(_) => true,
             Ok(t) => parse(&t).is_err(),
         }
+    }
+
+    #[test]
+    fn not_nesting_depth_limit_enforced() {
+        let nots = "NOT ".repeat(200);
+        let src = format!("TRADE_IN ABC\nWHEN {nots}(close > 10)\nBUY 1\n");
+        let t = lex(&src).unwrap();
+        let err = parse(&t).unwrap_err();
+        assert_eq!(err.code(), "PARSE_DEPTH");
     }
 }
