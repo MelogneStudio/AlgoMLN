@@ -1,5 +1,6 @@
 use algomln::sim::{self, DateRange, FeeModel, FileSource, GapPolicy, RunConfig, Timeframe};
 mod data_cli;
+mod index_cli;
 use chrono::{FixedOffset, NaiveDate, TimeZone};
 use std::{collections::BTreeMap, env, path::PathBuf, process::ExitCode};
 
@@ -14,17 +15,20 @@ fn main() -> ExitCode {
 }
 fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    let command = args.next().ok_or("usage: algomln run|data ...")?;
+    let command = args.next().ok_or("usage: algomln run|data|index ...")?;
     if command == "--help" || command == "-h" {
-        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps] [--replay FILE] [--live] [--record FILE] [--mode ticker|quote]\nalgomln data <update|status|verify|import|bulk> [options]\nalgomln data bulk --universe nse-eq --tf 1d,1m --from DATE [--to DATE] [--symbols FILE] [--budget N] [--dry-run] --master CSV");
+        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps] [--allow-unresolved] [--replay FILE] [--live] [--record FILE] [--mode ticker|quote]\nalgomln data <update|status|verify|import|bulk> [options]\nalgomln index <list|show|refresh> [options]");
         return Ok(());
     }
     if command == "data" {
         return data_cli::main_entry(args.collect());
     }
+    if command == "index" {
+        return index_cli::main_entry(args.collect());
+    }
     if command != "run" {
         return Err(
-            "usage: algomln run <file.algomln> ... | algomln data <update|status|verify|import|bulk>"
+            "usage: algomln run <file.algomln> ... | algomln data <update|status|verify|import|bulk> | algomln index <list|show|refresh>"
                 .into(),
         );
     }

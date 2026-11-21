@@ -19,7 +19,7 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         if !k.starts_with("--") {
             return Err(format!("unexpected argument {k}").into());
         }
-        if matches!(k.as_str(), "--dry-run") {
+        if matches!(k.as_str(), "--dry-run" | "--allow-unresolved") {
             opts.insert(k, "true".into());
             continue;
         }
@@ -66,9 +66,58 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 fno_count
             );
             cat.refresh_instruments(&rows, Utc::now().timestamp())?;
-            let symbols = opts
-                .get("--symbols")
-                .ok_or("data update requires --symbols A,B")?;
+
+            let allow_unresolved = opts.contains_key("--allow-unresolved");
+            let indices_cache = root.join("indices");
+            let registry = algomln_data::IndexRegistry::load_with_cache_dir(Some(indices_cache));
+            let resolver = algomln_data::TradeInResolver::new(&registry);
+
+            let trade_in = if let Some(idx) = opts.get("--index") {
+                algomln::ast::TradeIn::Index(idx.clone())
+            } else if let Some(strat_path) = opts.get("--strategy") {
+                let code = std::fs::read_to_string(strat_path)?;
+                let prog = algomln::compile(&code)
+                    .map_err(|e| format!("failed to compile strategy {strat_path}: {e}"))?;
+                prog.strategy().trade_in.clone()
+            } else if let Some(syms) = opts.get("--symbols") {
+                if let Some(rest) = syms.strip_prefix("INDEX ").or_else(|| syms.strip_prefix("index ")) {
+                    algomln::ast::TradeIn::Index(rest.trim().to_string())
+                } else if let Some(idx) = algomln_data::IndexAlias::from_keyword(syms) {
+                    algomln::ast::TradeIn::Index(idx.dsl_keyword().to_string())
+                } else {
+                    algomln::ast::TradeIn::Symbols(
+                        syms.split(',')
+                            .map(str::trim)
+                            .filter(|x| !x.is_empty())
+                            .map(str::to_owned)
+                            .collect(),
+                    )
+                }
+            } else {
+                return Err("data update requires --symbols A,B or --index <alias> or --strategy <file>".into());
+            };
+
+            let (resolved_instruments, report) = resolver
+                .resolve_catalog(&trade_in, &cat, allow_unresolved)
+                .map_err(|e| format!("{e}"))?;
+
+            for idx_rep in &report.indices {
+                let skipped_str = if idx_rep.unresolved_symbols.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (skipped: {})", idx_rep.unresolved_symbols.join(", "))
+                };
+                println!(
+                    "index {}: as_of {}, {} constituents, {} resolved{}",
+                    idx_rep.alias,
+                    idx_rep.as_of,
+                    idx_rep.constituent_count,
+                    idx_rep.resolved_count,
+                    skipped_str
+                );
+            }
+
+            let symbols: Vec<String> = resolved_instruments.into_iter().map(|s| s.symbol).collect();
             let tf = Tf::parse(opts.get("--tf").map(String::as_str).unwrap_or("1m"))
                 .ok_or("invalid timeframe")?;
             let to = opts
@@ -86,7 +135,7 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             }
             let (client, base) = client()?;
             let mut did_work = false;
-            for symbol in symbols.split(',').map(str::trim).filter(|x| !x.is_empty()) {
+            for symbol in &symbols {
                 let (id, _) = cat.resolve(symbol)?;
                 let instrument = cat.instrument(&id)?;
                 let reference_id = cat
@@ -109,9 +158,9 @@ pub fn main_entry(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 did_work |= updater.update(&id, tf, &instrument, from, to)?;
             }
             if did_work {
-                println!("updated {} for {}", tf.as_str(), symbols)
+                println!("updated {} for {} symbol(s)", tf.as_str(), symbols.len())
             } else {
-                println!("already up to date: {} {}", symbols, tf.as_str())
+                println!("already up to date: {} symbol(s) {}", symbols.len(), tf.as_str())
             }
         }
         "import" => {
