@@ -1,5 +1,6 @@
 pub mod refresh;
 pub mod registry;
+pub mod resolver;
 
 #[cfg(test)]
 mod tests;
@@ -10,4 +11,8 @@ pub use refresh::{
 };
 pub use registry::{
     default_indices_cache_dir, IndexAlias, IndexCacheFile, IndexEntry, IndexMetadata, IndexRegistry,
+};
+pub use resolver::{
+    IndexResolutionReport, ResolutionReport, ResolveError, ResolvedSymbol, TradeInResolver,
+    ERR_UNKNOWN_INDEX, ERR_UNKNOWN_SYMBOL, ERR_UNRESOLVED_CONSTITUENT,
 };

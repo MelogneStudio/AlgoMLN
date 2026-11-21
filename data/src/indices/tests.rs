@@ -225,6 +225,129 @@ fn refresh_success_updates_cache_and_in_memory_registry() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+#[test]
+fn resolve_trade_in_index_and_symbols_success() {
+    let registry = IndexRegistry::load_with_cache_dir(None);
+    let resolver = TradeInResolver::new(&registry);
+
+    let scrips = vec![
+        dhan_api::Scrip {
+            security_id: "1333".into(),
+            symbol: "HDFCBANK".into(),
+            lot_size: 1,
+            tick_size_paise: 5,
+            instrument: "EQUITY".into(),
+            is_fno: true,
+        },
+        dhan_api::Scrip {
+            security_id: "4963".into(),
+            symbol: "ICICIBANK".into(),
+            lot_size: 1,
+            tick_size_paise: 5,
+            instrument: "EQUITY".into(),
+            is_fno: true,
+        },
+        dhan_api::Scrip {
+            security_id: "2885".into(),
+            symbol: "RELIANCE".into(),
+            lot_size: 1,
+            tick_size_paise: 5,
+            instrument: "EQUITY".into(),
+            is_fno: true,
+        },
+    ];
+
+    // Symbols test
+    let trade_in_syms = algomln::ast::TradeIn::Symbols(vec!["RELIANCE".into(), "HDFCBANK".into()]);
+    let (resolved, report) = resolver.resolve_scrips(&trade_in_syms, &scrips, false).unwrap();
+    assert_eq!(resolved.len(), 2);
+    // Must be sorted by symbol
+    assert_eq!(resolved[0].symbol, "HDFCBANK");
+    assert_eq!(resolved[1].symbol, "RELIANCE");
+    assert_eq!(report.total_resolved, 2);
+    assert!(report.indices.is_empty());
+
+    // Index test with allow_unresolved = true (since scrips only has 2 bank stocks)
+    let trade_in_idx = algomln::ast::TradeIn::Index("NIFTY_BANK".into());
+    let (resolved_idx, report_idx) = resolver.resolve_scrips(&trade_in_idx, &scrips, true).unwrap();
+    assert_eq!(resolved_idx.len(), 2);
+    assert_eq!(resolved_idx[0].symbol, "HDFCBANK");
+    assert_eq!(resolved_idx[1].symbol, "ICICIBANK");
+    assert_eq!(report_idx.indices.len(), 1);
+    assert_eq!(report_idx.indices[0].alias, "NIFTY_BANK");
+    assert_eq!(report_idx.indices[0].resolved_count, 2);
+    assert!(!report_idx.indices[0].unresolved_symbols.is_empty());
+}
+
+#[test]
+fn bare_symbol_matching_index_fails_with_hint() {
+    let registry = IndexRegistry::load_with_cache_dir(None);
+    let resolver = TradeInResolver::new(&registry);
+    let scrips: Vec<dhan_api::Scrip> = vec![];
+
+    let trade_in = algomln::ast::TradeIn::Symbols(vec!["NIFTY50".into()]);
+    let err = resolver.resolve_scrips(&trade_in, &scrips, false).unwrap_err();
+
+    match err {
+        ResolveError::UnknownSymbol { code, name, hint } => {
+            assert_eq!(code, ERR_UNKNOWN_SYMBOL);
+            assert_eq!(name, "NIFTY50");
+            assert!(
+                hint.contains("did you mean 'INDEX NIFTY_50'?"),
+                "hint was: {hint}"
+            );
+        }
+        other => panic!("expected UnknownSymbol error with hint, got {other:?}"),
+    }
+
+    // Completely unknown symbol gets no hint
+    let trade_in_unknown = algomln::ast::TradeIn::Symbols(vec!["NONEXISTENT123".into()]);
+    let err2 = resolver.resolve_scrips(&trade_in_unknown, &scrips, false).unwrap_err();
+    match err2 {
+        ResolveError::UnknownSymbol { code, name, hint } => {
+            assert_eq!(code, ERR_UNKNOWN_SYMBOL);
+            assert_eq!(name, "NONEXISTENT123");
+            assert!(hint.is_empty(), "expected empty hint, got: {hint}");
+        }
+        other => panic!("expected UnknownSymbol error without hint, got {other:?}"),
+    }
+}
+
+#[test]
+fn unresolved_constituent_fails_by_default_and_lists_symbols() {
+    let registry = IndexRegistry::load_with_cache_dir(None);
+    let resolver = TradeInResolver::new(&registry);
+
+    // Only one symbol present for NIFTY 50
+    let scrips = vec![dhan_api::Scrip {
+        security_id: "2885".into(),
+        symbol: "RELIANCE".into(),
+        lot_size: 1,
+        tick_size_paise: 5,
+        instrument: "EQUITY".into(),
+        is_fno: true,
+    }];
+
+    let trade_in = algomln::ast::TradeIn::Index("NIFTY_50".into());
+    let err = resolver.resolve_scrips(&trade_in, &scrips, false).unwrap_err();
+
+    match err {
+        ResolveError::UnresolvedConstituents {
+            code,
+            index,
+            count,
+            symbols,
+        } => {
+            assert_eq!(code, ERR_UNRESOLVED_CONSTITUENT);
+            assert_eq!(index, "NIFTY_50");
+            assert_eq!(count, symbols.len());
+            assert!(count >= 40);
+            assert!(symbols.contains(&"TCS".to_string()));
+        }
+        other => panic!("expected UnresolvedConstituents error, got {other:?}"),
+    }
+}
+
 fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
     let mut dir = std::env::temp_dir();
     dir.push(format!("algomln_test_{}_{}", prefix, std::process::id()));

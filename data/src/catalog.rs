@@ -145,6 +145,22 @@ impl Catalog {
             .map_err(|_| DataError::Invalid(format!("unknown symbol {}", s)))
     }
 
+    pub fn resolve_full(&self, s: &str) -> Result<crate::indices::ResolvedSymbol, DataError> {
+        self.conn
+            .query_row(
+                "SELECT security_id, symbol, lot_size, tick_size_paise, is_fno FROM instruments WHERE symbol=?1",
+                [s.trim().to_ascii_uppercase()],
+                |r| Ok(crate::indices::ResolvedSymbol {
+                    security_id: r.get(0)?,
+                    symbol: r.get(1)?,
+                    lot_size: r.get(2)?,
+                    tick_size_paise: r.get(3)?,
+                    is_fno: r.get::<_, i64>(4)? != 0,
+                }),
+            )
+            .map_err(|_| DataError::Invalid(format!("unknown symbol {}", s)))
+    }
+
     pub fn series_for_import(&self, id: &str, tf: Tf) -> Result<i64, DataError> {
         self.ensure_series(id, tf)
     }
