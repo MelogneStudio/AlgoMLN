@@ -22,10 +22,11 @@ pub use catalog::Catalog;
 pub use error::DataError;
 pub use history::HistoryApi;
 pub use indices::{
-    default_indices_cache_dir, parse_symbols_from_csv, refresh_all_indices, refresh_index,
-    write_cache_atomic, IndexAlias, IndexCacheFile, IndexEntry, IndexMetadata, IndexResolutionReport,
-    IndexRegistry, RefreshError, RefreshOutcome, ResolutionReport, ResolveError, ResolvedSymbol,
-    TradeInResolver, ERR_UNKNOWN_INDEX, ERR_UNKNOWN_SYMBOL, ERR_UNRESOLVED_CONSTITUENT,
+    default_indices_cache_dir, format_run_fingerprint, parse_symbols_from_csv, refresh_all_indices,
+    refresh_index, write_cache_atomic, IndexAlias, IndexCacheFile, IndexEntry, IndexMetadata,
+    IndexResolutionReport, IndexRegistry, RefreshError, RefreshOutcome, ResolutionReport,
+    ResolveError, ResolvedSymbol, TradeInResolver, ERR_UNKNOWN_INDEX, ERR_UNKNOWN_SYMBOL,
+    ERR_UNRESOLVED_CONSTITUENT,
 };
 pub use live::LiveCandleSource;
 pub use session::{

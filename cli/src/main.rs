@@ -36,7 +36,13 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         if matches!(
             k.as_str(),
-            "--skip-bad" | "--debug-invariants" | "--update" | "--allow-gaps" | "--timings" | "--live"
+            "--skip-bad"
+                | "--debug-invariants"
+                | "--update"
+                | "--allow-gaps"
+                | "--timings"
+                | "--live"
+                | "--allow-unresolved"
         ) {
             opts.insert(k, "true".into());
             continue;
@@ -99,16 +105,62 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         from,
         to,
     };
-    let symbols: Vec<String> = opts
-        .get("--symbols")
-        .map(|s| {
+    let db_path = data.join("catalog.sqlite");
+    if opts.contains_key("--update") {
+        let master = opts
+            .get("--master")
+            .ok_or("--update requires --master <api-scrip-master-detailed.csv>")?;
+        let rows = dhan_api::parse_scrip_master(std::fs::File::open(master)?)?;
+        let fno_count = rows.iter().filter(|r| r.is_fno).count();
+        println!(
+            "scrip master: {} equities ({} F&O-eligible)",
+            rows.len(),
+            fno_count
+        );
+        let mut cat = algomln_data::Catalog::open(&db_path)?;
+        cat.refresh_instruments(&rows, chrono::Utc::now().timestamp())?;
+    }
+
+    let trade_in = match opts.get("--symbols") {
+        Some(s) => algomln::ast::TradeIn::Symbols(
             s.split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_else(|| program.symbols().into_iter().map(str::to_owned).collect());
+                .collect(),
+        ),
+        None => program.strategy().trade_in.clone(),
+    };
+
+    let allow_unresolved = opts.contains_key("--allow-unresolved");
+    let indices_cache = data.join("indices");
+    let registry = algomln_data::IndexRegistry::load_with_cache_dir(Some(indices_cache));
+    let resolver = algomln_data::TradeInResolver::new(&registry);
+
+    let (resolved_instruments, resolution_report) = {
+        let cat = algomln_data::Catalog::open(&db_path)?;
+        resolver
+            .resolve_catalog(&trade_in, &cat, allow_unresolved)
+            .map_err(|e| format!("{e}"))?
+    };
+
+    for idx_rep in &resolution_report.indices {
+        let skipped_str = if idx_rep.unresolved_symbols.is_empty() {
+            String::new()
+        } else {
+            format!(" (skipped: {})", idx_rep.unresolved_symbols.join(", "))
+        };
+        println!(
+            "index {}: as_of {}, {} constituents, {} resolved{}",
+            idx_rep.alias,
+            idx_rep.as_of,
+            idx_rep.constituent_count,
+            idx_rep.resolved_count,
+            skipped_str
+        );
+    }
+
+    let symbols: Vec<String> = resolved_instruments.into_iter().map(|s| s.symbol).collect();
     let warmup_bars = opts
         .get("--warmup-bars")
         .map_or(Ok(program.warmup_bars()), |s| {
@@ -122,19 +174,8 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     catalog.allow_gaps = opts.contains_key("--allow-gaps");
 
     if opts.contains_key("--update") {
-        let master = opts
-            .get("--master")
-            .ok_or("--update requires --master <api-scrip-master-detailed.csv>")?;
-        let rows = dhan_api::parse_scrip_master(std::fs::File::open(master)?)?;
-        let fno_count = rows.iter().filter(|r| r.is_fno).count();
-        println!(
-            "scrip master: {} equities ({} F&O-eligible)",
-            rows.len(),
-            fno_count
-        );
         let db = data.join("catalog.sqlite");
-        let mut cat = algomln_data::Catalog::open(&db)?;
-        cat.refresh_instruments(&rows, chrono::Utc::now().timestamp())?;
+        let cat = algomln_data::Catalog::open(&db)?;
         let to_d = opts
             .get("--to")
             .map(|x| NaiveDate::parse_from_str(x, "%Y-%m-%d"))
@@ -338,7 +379,8 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         debug_invariants: opts.contains_key("--debug-invariants"),
     };
     let fp_start = src.fingerprint(&symbols, config.timeframe, config.range);
-    println!("dataset fingerprint: {fp_start}");
+    let run_fp_start = algomln_data::format_run_fingerprint(&fp_start, &resolution_report);
+    println!("dataset fingerprint: {run_fp_start}");
     if let Ok(info) = catalog.resolved_info(&symbols, config.timeframe, config.range) {
         let from_str = info
             .resolved_from
@@ -373,11 +415,19 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let range = config.range;
     let mut result = sim::run(&program, src, config, Some(symbols.clone()))?;
     let fp_end = src.fingerprint(&symbols, tf, range);
-    println!("dataset fingerprint (end): {fp_end}");
+    let run_fp_end = algomln_data::format_run_fingerprint(&fp_end, &resolution_report);
+    println!("dataset fingerprint (end): {run_fp_end}");
     if fp_start != fp_end {
         eprintln!("WARNING: dataset fingerprint changed mid-run! (data update detected)");
         if let Some(obj) = result.manifest.as_object_mut() {
             obj.insert("fingerprint_changed".into(), serde_json::Value::Bool(true));
+        }
+    }
+    if let Some(obj) = result.manifest.as_object_mut() {
+        obj.insert("run_fingerprint".into(), serde_json::Value::String(run_fp_start));
+        obj.insert("resolved_symbols".into(), serde_json::to_value(&symbols)?);
+        if !resolution_report.indices.is_empty() {
+            obj.insert("indices".into(), serde_json::to_value(&resolution_report.indices)?);
         }
     }
     let out_start = std::time::Instant::now();

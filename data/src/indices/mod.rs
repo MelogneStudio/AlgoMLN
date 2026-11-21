@@ -13,6 +13,6 @@ pub use registry::{
     default_indices_cache_dir, IndexAlias, IndexCacheFile, IndexEntry, IndexMetadata, IndexRegistry,
 };
 pub use resolver::{
-    IndexResolutionReport, ResolutionReport, ResolveError, ResolvedSymbol, TradeInResolver,
-    ERR_UNKNOWN_INDEX, ERR_UNKNOWN_SYMBOL, ERR_UNRESOLVED_CONSTITUENT,
+    format_run_fingerprint, IndexResolutionReport, ResolutionReport, ResolveError, ResolvedSymbol,
+    TradeInResolver, ERR_UNKNOWN_INDEX, ERR_UNKNOWN_SYMBOL, ERR_UNRESOLVED_CONSTITUENT,
 };

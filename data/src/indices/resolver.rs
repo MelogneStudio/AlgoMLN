@@ -66,6 +66,25 @@ pub enum ResolveError {
     },
 }
 
+/// Formats the user-facing run fingerprint combining the dataset content hash
+/// with the as_of dates of any used indices.
+pub fn format_run_fingerprint(
+    dataset_fp: &algomln::sim::Fingerprint,
+    report: &ResolutionReport,
+) -> String {
+    if report.indices.is_empty() {
+        format!("{dataset_fp}")
+    } else {
+        let indices_part = report
+            .indices
+            .iter()
+            .map(|idx| format!("{}@{}", idx.alias, idx.as_of))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{dataset_fp} [{indices_part}]")
+    }
+}
+
 /// Resolves `TRADE_IN` AST node (either `TradeIn::Index` or `TradeIn::Symbols`)
 /// against an index registry and scrip master (via `Catalog` or scrips slice).
 pub struct TradeInResolver<'a> {

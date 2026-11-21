@@ -1,4 +1,6 @@
 use super::*;
+use algomln::sim::CandleSource;
+use crate::{Bar, Catalog, CatalogSource, Store, Tf};
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -346,6 +348,223 @@ fn unresolved_constituent_fails_by_default_and_lists_symbols() {
         }
         other => panic!("expected UnresolvedConstituents error, got {other:?}"),
     }
+}
+
+#[test]
+fn fingerprint_changes_after_refresh_and_as_of_update() {
+    let temp_dir = tempfile_dir("fp_test");
+    let db = temp_dir.join("catalog.sqlite");
+    let mut cat = Catalog::open(&db).unwrap();
+
+    let scrips = vec![
+        dhan_api::Scrip {
+            security_id: "1".into(),
+            symbol: "SYM1".into(),
+            lot_size: 1,
+            tick_size_paise: 5,
+            instrument: "EQUITY".into(),
+            is_fno: true,
+        },
+        dhan_api::Scrip {
+            security_id: "2".into(),
+            symbol: "SYM2".into(),
+            lot_size: 1,
+            tick_size_paise: 5,
+            instrument: "EQUITY".into(),
+            is_fno: false,
+        },
+    ];
+    cat.refresh_instruments(&scrips, 0).unwrap();
+
+    let store = Store::new(&temp_dir);
+    let bar1 = Bar { ts: 1000, open: 10.0, high: 11.0, low: 9.0, close: 10.5, volume: 100.0 };
+    let bar2 = Bar { ts: 1000, open: 20.0, high: 21.0, low: 19.0, close: 20.5, volume: 200.0 };
+    let parts1 = store.write_partitions("1", Tf::M1, &[bar1]).unwrap();
+    let parts2 = store.write_partitions("2", Tf::M1, &[bar2]).unwrap();
+    let sid1 = cat.series_for_import("1", Tf::M1).unwrap();
+    let sid2 = cat.series_for_import("2", Tf::M1).unwrap();
+    for p in &parts1 { cat.record_partition(sid1, &store, p).unwrap(); }
+    for p in &parts2 { cat.record_partition(sid2, &store, p).unwrap(); }
+
+    let cat_src = CatalogSource::new(store, &db);
+
+    let symbols = vec!["SYM1".to_string(), "SYM2".to_string()];
+    let tf = algomln::sim::Timeframe::M1;
+    let range = algomln::sim::DateRange { from: None, to: None };
+
+    let ds_fp = cat_src.fingerprint(&symbols, tf, range);
+
+    // Initial resolution report with date 2026-01-01
+    let rep1 = ResolutionReport {
+        indices: vec![IndexResolutionReport {
+            alias: "NIFTY_BANK".into(),
+            display_name: "NIFTY BANK".into(),
+            as_of: "2026-01-01".into(),
+            constituent_count: 2,
+            resolved_count: 2,
+            unresolved_symbols: vec![],
+        }],
+        total_resolved: 2,
+        allow_unresolved: false,
+    };
+    let run_fp1 = format_run_fingerprint(&ds_fp, &rep1);
+
+    // After refresh: as_of date updates to 2026-01-02
+    let rep2 = ResolutionReport {
+        indices: vec![IndexResolutionReport {
+            alias: "NIFTY_BANK".into(),
+            display_name: "NIFTY BANK".into(),
+            as_of: "2026-01-02".into(),
+            constituent_count: 2,
+            resolved_count: 2,
+            unresolved_symbols: vec![],
+        }],
+        total_resolved: 2,
+        allow_unresolved: false,
+    };
+    let run_fp2 = format_run_fingerprint(&ds_fp, &rep2);
+
+    // Refresh MUST change the run fingerprint
+    assert_ne!(run_fp1, run_fp2);
+    assert!(run_fp1.contains("2026-01-01"));
+    assert!(run_fp2.contains("2026-01-02"));
+
+    // If constituents change, dataset hash itself changes
+    let alt_symbols = vec!["SYM1".to_string()];
+    let ds_fp_alt = cat_src.fingerprint(&alt_symbols, tf, range);
+    assert_ne!(ds_fp.0, ds_fp_alt.0);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn mixed_360_and_375_bar_index_streaming_through_catalog_source() {
+    use algomln::sim::CandleSource;
+    use chrono::{NaiveDate, TimeZone};
+    use chrono_tz::Asia::Kolkata;
+
+    let root = tempfile_dir("mixed_sessions");
+    let db = root.join("catalog.sqlite");
+    let mut cat = Catalog::open(&db).unwrap();
+
+    // 1: F&O eligible (360 bars: 09:15 to 15:14)
+    // 2: Non-F&O (375 bars: 09:15 to 15:29)
+    let scrips = vec![
+        dhan_api::Scrip {
+            security_id: "1001".into(),
+            symbol: "FNO_STOCK".into(),
+            lot_size: 25,
+            tick_size_paise: 5,
+            instrument: "EQUITY".into(),
+            is_fno: true,
+        },
+        dhan_api::Scrip {
+            security_id: "1002".into(),
+            symbol: "CASH_STOCK".into(),
+            lot_size: 1,
+            tick_size_paise: 5,
+            instrument: "EQUITY".into(),
+            is_fno: false,
+        },
+    ];
+    cat.refresh_instruments(&scrips, 0).unwrap();
+
+    let store = Store::new(&root);
+    let session_date = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+    let session_start = Kolkata
+        .from_local_datetime(&session_date.and_hms_opt(9, 15, 0).unwrap())
+        .single()
+        .unwrap()
+        .timestamp();
+
+    // Generate 360 bars for F&O stock
+    let fno_bars: Vec<Bar> = (0..360)
+        .map(|i| Bar {
+            ts: session_start + i * 60,
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close: 100.5,
+            volume: 1000.0,
+        })
+        .collect();
+
+    // Generate 375 bars for Cash stock
+    let cash_bars: Vec<Bar> = (0..375)
+        .map(|i| Bar {
+            ts: session_start + i * 60,
+            open: 50.0,
+            high: 51.0,
+            low: 49.0,
+            close: 50.5,
+            volume: 500.0,
+        })
+        .collect();
+
+    let parts_fno = store.write_partitions("1001", Tf::M1, &fno_bars).unwrap();
+    let parts_cash = store.write_partitions("1002", Tf::M1, &cash_bars).unwrap();
+
+    let sid_fno = cat.series_for_import("1001", Tf::M1).unwrap();
+    let sid_cash = cat.series_for_import("1002", Tf::M1).unwrap();
+
+    for p in &parts_fno {
+        cat.record_partition(sid_fno, &store, p).unwrap();
+    }
+    for p in &parts_cash {
+        cat.record_partition(sid_cash, &store, p).unwrap();
+    }
+
+    let fno_end = session_start + 359 * 60;
+    let cash_end = session_start + 374 * 60;
+
+    cat.record_session(sid_fno, session_date, session_start, fno_end, 360).unwrap();
+    cat.record_session(sid_cash, session_date, session_start, cash_end, 375).unwrap();
+
+    cat.record_coverage("1001", Tf::M1, session_start, fno_end, "data").unwrap();
+    cat.record_coverage("1002", Tf::M1, session_start, cash_end, "data").unwrap();
+    drop(cat);
+
+    let source = CatalogSource::new(Store::new(&root), &db);
+    let symbols = vec!["CASH_STOCK".to_string(), "FNO_STOCK".to_string()];
+    let range = algomln::sim::DateRange {
+        from: Some(session_start),
+        to: Some(cash_end),
+    };
+
+    let stream = source
+        .open(&symbols, algomln::sim::Timeframe::M1, range)
+        .expect("open stream must succeed");
+
+    let items: Vec<(String, algomln::indicators::Candle)> =
+        stream.map(|r| r.expect("candle item")).collect();
+
+    // Total candles must be 360 (FNO) + 375 (CASH) = 735
+    assert_eq!(items.len(), 360 + 375);
+
+    // Monotonic timestamp check
+    for w in items.windows(2) {
+        assert!(
+            w[0].1.timestamp <= w[1].1.timestamp,
+            "candles must be non-decreasing in timestamp"
+        );
+        if w[0].1.timestamp == w[1].1.timestamp {
+            // CASH_STOCK comes before FNO_STOCK due to alphabetical ordering
+            assert_eq!(w[0].0, "CASH_STOCK");
+            assert_eq!(w[1].0, "FNO_STOCK");
+        }
+    }
+
+    // Verify after timestamp > fno_end, only CASH_STOCK is received
+    let late_items: Vec<_> = items
+        .iter()
+        .filter(|(_, c)| c.timestamp > fno_end)
+        .collect();
+    assert_eq!(late_items.len(), 15);
+    for (sym, _) in late_items {
+        assert_eq!(sym, "CASH_STOCK");
+    }
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
