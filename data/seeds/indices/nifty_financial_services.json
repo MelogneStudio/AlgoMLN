@@ -1,0 +1,27 @@
+{
+  "alias": "NIFTY_FINANCIAL_SERVICES",
+  "as_of": "2026-11-21",
+  "source_url": "https://www.niftyindices.com/IndexConstituent/ind_niftyfinancelist.csv",
+  "symbols": [
+    "AXISBANK",
+    "BSE",
+    "BAJFINANCE",
+    "BAJAJFINSV",
+    "CHOLAFIN",
+    "HDFCBANK",
+    "HDFCLIFE",
+    "ICICIBANK",
+    "ICICIGI",
+    "JIOFIN",
+    "KOTAKBANK",
+    "LICHSGFIN",
+    "MFSL",
+    "MUTHOOTFIN",
+    "PFC",
+    "RECLTD",
+    "SBICARD",
+    "SBILIFE",
+    "SHRIRAMFIN",
+    "SBIN"
+  ]
+}

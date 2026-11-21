@@ -1,0 +1,20 @@
+{
+  "alias": "NIFTY_BANK",
+  "symbols": [
+    "AUBANK",
+    "AXISBANK",
+    "BANKBARODA",
+    "CANBK",
+    "FEDERALBNK",
+    "HDFCBANK",
+    "ICICIBANK",
+    "IDFCFIRSTB",
+    "INDUSINDBK",
+    "KOTAKBANK",
+    "PNB",
+    "SBIN",
+    "UNIONBANK",
+    "YESBANK"
+  ],
+  "last_updated": "2026-11-21"
+}

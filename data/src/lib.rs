@@ -2,6 +2,7 @@ pub mod bulk;
 pub mod catalog;
 pub mod error;
 pub mod history;
+pub mod indices;
 pub mod live;
 pub mod session;
 pub mod source;
@@ -20,6 +21,11 @@ pub use bulk::{BulkConfig, BulkDownloader, BulkReport, Progress};
 pub use catalog::Catalog;
 pub use error::DataError;
 pub use history::HistoryApi;
+pub use indices::{
+    default_indices_cache_dir, parse_symbols_from_csv, refresh_all_indices, refresh_index,
+    write_cache_atomic, IndexAlias, IndexCacheFile, IndexEntry, IndexMetadata, IndexRegistry,
+    RefreshError, RefreshOutcome,
+};
 pub use live::LiveCandleSource;
 pub use session::{
     check_overlap, chunk_dates, chunk_dates_limited, complete_intraday, last_complete_bar,

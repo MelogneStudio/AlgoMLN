@@ -20,6 +20,7 @@ bytes = "1"
 sha2 = "0.10"
 csv = "1.4"
 criterion = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [[bench]]
 name = "catalog_source"
