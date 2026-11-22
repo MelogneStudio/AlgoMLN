@@ -1,10 +1,12 @@
 pub mod correlation;
 pub mod error;
 pub mod normalize;
+pub mod queue;
 pub mod rest;
 pub mod state;
 pub mod types;
 pub mod wal;
+pub mod ws;
 
 pub use correlation::{
     is_valid_correlation_id, CorrelationGenerator, DEFAULT_PREFIX, MAX_CORRELATION_LEN,
@@ -13,6 +15,10 @@ pub use error::{classify_error, ErrorClass};
 pub use normalize::{
     map_status, parse_rest_order, parse_rupees_to_paise, parse_ws_order, rupees_to_paise_half_up,
     NormalizedOrderUpdate, NormalizedStatus, UpdateSource,
+};
+pub use queue::{
+    CounterStatus, Priority, QueueAction, SubmissionQueue, DAILY_ORDER_CAP, STOP_ENTRIES_95_PCT,
+    WARN_80_PCT,
 };
 pub use rest::{
     DhanTradingClient, ExecRestError, PlaceOrderResponse, PnlExitRecord, PositionRecord,
@@ -24,6 +30,7 @@ pub use types::{
     Side, LIVE_BASE_URL, LIVE_ORDER_UPDATE_WS, SANDBOX_BASE_URL,
 };
 pub use wal::{OrderWal, WalRecord};
+pub use ws::{spawn_order_update_ws, OrderUpdateWsConfig, WsConnectionEvent};
 
 #[cfg(test)]
 mod tests {
@@ -441,7 +448,6 @@ mod tests {
         let mode_cfg = ModeConfig::resolve(ExecutionMode::Dry, None).unwrap();
         let client = DhanTradingClient::new(mode_cfg, "1000000000".into());
 
-        // Startup check succeeds in dry mode
         client.startup_check().await.unwrap();
 
         let req = OrderRequest {
@@ -454,20 +460,101 @@ mod tests {
             local_seq: 1,
         };
 
-        // Place order in dry mode returns simulated transit response
         let place_resp = client.place_order(&req, "AMLN-DRY-1", Some(5)).await.unwrap();
         assert_eq!(place_resp.order_id, "DRY-1");
         assert_eq!(place_resp.order_status, "TRANSIT");
 
-        // Cancel succeeds
         client.cancel_order("DRY-1").await.unwrap();
 
-        // Get orders returns empty
         let orders = client.get_orders().await.unwrap();
         assert!(orders.is_empty());
 
-        // Kill switch returns INACTIVE
         let ks = client.get_kill_switch_status().await.unwrap();
         assert_eq!(ks, "INACTIVE");
+    }
+
+    #[test]
+    fn test_submission_queue_prioritization() {
+        let mut queue = SubmissionQueue::new(8.0, 10.0);
+
+        // Enqueue Entry first, then Cancel, then Exit
+        let entry_req = OrderRequest {
+            local_id: "E1".into(),
+            security_id: "1333".into(),
+            side: Side::Buy,
+            quantity: 10,
+            kind: OrderKind::Market,
+            intent: OrderIntent::Entry,
+            local_seq: 1,
+        };
+        queue.enqueue_place(entry_req).unwrap();
+
+        queue.enqueue_cancel("C1".into(), "DH-1".into());
+
+        let exit_req = OrderRequest {
+            local_id: "X1".into(),
+            security_id: "1333".into(),
+            side: Side::Sell,
+            quantity: 10,
+            kind: OrderKind::Market,
+            intent: OrderIntent::Exit,
+            local_seq: 2,
+        };
+        queue.enqueue_place(exit_req).unwrap();
+
+        // Check pop order: Exits (0) -> Cancels (1) -> Entries (2)
+        match queue.pop_next().unwrap() {
+            QueueAction::Place(r) => assert_eq!(r.intent, OrderIntent::Exit),
+            _ => panic!("expected Exit first"),
+        }
+
+        match queue.pop_next().unwrap() {
+            QueueAction::Cancel { local_id, .. } => assert_eq!(local_id, "C1"),
+            _ => panic!("expected Cancel second"),
+        }
+
+        match queue.pop_next().unwrap() {
+            QueueAction::Place(r) => assert_eq!(r.intent, OrderIntent::Entry),
+            _ => panic!("expected Entry third"),
+        }
+    }
+
+    #[test]
+    fn test_daily_order_counter_safety_rails() {
+        let mut queue = SubmissionQueue::new(8.0, 10.0);
+        assert_eq!(queue.counter_status(), CounterStatus::Normal);
+
+        // At 80% (5,600) -> Warning
+        queue.set_daily_count(WARN_80_PCT);
+        assert_eq!(queue.counter_status(), CounterStatus::Warning80Pct);
+        assert!(queue.can_submit_entry());
+
+        // At 95% (6,650) -> Stop Entries
+        queue.set_daily_count(STOP_ENTRIES_95_PCT);
+        assert_eq!(queue.counter_status(), CounterStatus::StopEntries95Pct);
+        assert!(!queue.can_submit_entry());
+
+        let entry_req = OrderRequest {
+            local_id: "E2".into(),
+            security_id: "1333".into(),
+            side: Side::Buy,
+            quantity: 10,
+            kind: OrderKind::Market,
+            intent: OrderIntent::Entry,
+            local_seq: 3,
+        };
+        assert!(queue.enqueue_place(entry_req).is_err());
+
+        // But Exits and Cancels are STILL permitted!
+        let exit_req = OrderRequest {
+            local_id: "X2".into(),
+            security_id: "1333".into(),
+            side: Side::Sell,
+            quantity: 10,
+            kind: OrderKind::Market,
+            intent: OrderIntent::Exit,
+            local_seq: 4,
+        };
+        assert!(queue.enqueue_place(exit_req).is_ok());
     }
 }
