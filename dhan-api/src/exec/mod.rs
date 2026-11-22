@@ -1,8 +1,13 @@
+pub mod correlation;
 pub mod error;
 pub mod normalize;
 pub mod state;
 pub mod types;
+pub mod wal;
 
+pub use correlation::{
+    is_valid_correlation_id, CorrelationGenerator, DEFAULT_PREFIX, MAX_CORRELATION_LEN,
+};
 pub use error::{classify_error, ErrorClass};
 pub use normalize::{
     map_status, parse_rest_order, parse_rupees_to_paise, parse_ws_order, rupees_to_paise_half_up,
@@ -13,6 +18,7 @@ pub use types::{
     ExecEvent, ExecutionMode, LocalOrderId, ModeConfig, OrderIntent, OrderKind, OrderRequest,
     Side, LIVE_BASE_URL, LIVE_ORDER_UPDATE_WS, SANDBOX_BASE_URL,
 };
+pub use wal::{OrderWal, WalRecord};
 
 #[cfg(test)]
 mod tests {
@@ -362,5 +368,68 @@ mod tests {
             }
             _ => panic!("expected Unknown event"),
         }
+    }
+
+    #[test]
+    fn test_correlation_id_format_and_ownership() {
+        let gen = CorrelationGenerator::new("RUN1");
+        let cid = gen.generate(42);
+        assert!(is_valid_correlation_id(&cid));
+        assert!(cid.len() <= MAX_CORRELATION_LEN);
+        assert!(gen.is_own(&cid));
+        assert!(gen.is_own("AlgoMLN-test"));
+        assert!(!gen.is_own("EXTERNAL-1234"));
+
+        // Long tag is truncated cleanly to satisfy <= 30 chars
+        let long_gen = CorrelationGenerator::new("VERY_LONG_TAG_THAT_EXCEEDS_NORMAL_LENGTH");
+        let long_cid = long_gen.generate(99999);
+        assert!(is_valid_correlation_id(&long_cid));
+        assert!(long_cid.len() <= MAX_CORRELATION_LEN);
+    }
+
+    #[test]
+    fn test_wal_write_and_recovery() {
+        let dir = std::env::temp_dir().join(format!("wal_test_{}", std::process::id()));
+        let wal_path = dir.join("test_orders.wal");
+        let _ = std::fs::remove_file(&wal_path);
+
+        let mut wal = OrderWal::open(&wal_path).expect("open wal");
+
+        let req1 = OrderRequest {
+            local_id: "O1".into(),
+            security_id: "1333".into(),
+            side: Side::Buy,
+            quantity: 10,
+            kind: OrderKind::Market,
+            intent: OrderIntent::Entry,
+            local_seq: 1,
+        };
+        let mut tracker1 = OrderTracker::new(req1, "AMLN-1-0001".into());
+        tracker1.state = OrderState::Submitted;
+        tracker1.dhan_order_id = Some("DH-1".into());
+        wal.append(&tracker1).unwrap();
+
+        let req2 = OrderRequest {
+            local_id: "O2".into(),
+            security_id: "1333".into(),
+            side: Side::Sell,
+            quantity: 10,
+            kind: OrderKind::Market,
+            intent: OrderIntent::Exit,
+            local_seq: 2,
+        };
+        let mut tracker2 = OrderTracker::new(req2, "AMLN-1-0002".into());
+        tracker2.state = OrderState::Filled;
+        tracker2.cum_traded_qty = 10;
+        wal.append(&tracker2).unwrap();
+
+        // Recover
+        let recovered_open = wal.recover_open_orders().unwrap();
+        assert_eq!(recovered_open.len(), 1);
+        assert_eq!(recovered_open[0].local_id, "O1");
+        assert_eq!(recovered_open[0].state, OrderState::Submitted);
+        assert_eq!(recovered_open[0].dhan_order_id.as_deref(), Some("DH-1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
