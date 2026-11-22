@@ -41,12 +41,13 @@ impl CorrelationGenerator {
     }
 
     pub fn generate(&self, seq: u64) -> String {
-        let cid = format!("{}-{}-{:04}", self.prefix, self.run_tag, seq);
-        if cid.len() > MAX_CORRELATION_LEN {
-            cid.chars().take(MAX_CORRELATION_LEN).collect()
-        } else {
-            cid
+        let seq_str = format!("{:04}", seq);
+        let max_base_len = MAX_CORRELATION_LEN.saturating_sub(seq_str.len() + 1);
+        let mut base = format!("{}-{}", self.prefix, self.run_tag);
+        if base.len() > max_base_len {
+            base.truncate(max_base_len);
         }
+        format!("{}-{}", base, seq_str)
     }
 
     /// Check if correlation ID carries our AlgoMLN ownership prefix.
@@ -63,4 +64,18 @@ pub fn is_valid_correlation_id(s: &str) -> bool {
         && s.len() <= MAX_CORRELATION_LEN
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_correlation_preserves_sequence_suffix_on_truncation() {
+        let gen = CorrelationGenerator::with_prefix("AMLN", "SUPER_LONG_RUN_TAG_NAME_THAT_EXCEEDS_LIMIT");
+        let cid = gen.generate(12345);
+        assert!(is_valid_correlation_id(&cid));
+        assert!(cid.ends_with("-12345"), "CID should end with -12345 but was {}", cid);
+        assert!(cid.len() <= MAX_CORRELATION_LEN);
+    }
 }
