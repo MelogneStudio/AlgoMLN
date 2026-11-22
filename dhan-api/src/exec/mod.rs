@@ -2,7 +2,9 @@ pub mod correlation;
 pub mod error;
 pub mod normalize;
 pub mod queue;
+pub mod reconciler;
 pub mod rest;
+pub mod risk;
 pub mod state;
 pub mod types;
 pub mod wal;
@@ -20,10 +22,12 @@ pub use queue::{
     CounterStatus, Priority, QueueAction, SubmissionQueue, DAILY_ORDER_CAP, STOP_ENTRIES_95_PCT,
     WARN_80_PCT,
 };
+pub use reconciler::Reconciler;
 pub use rest::{
     DhanTradingClient, ExecRestError, PlaceOrderResponse, PnlExitRecord, PositionRecord,
     TradeRecord,
 };
+pub use risk::{inspect_jwt_expiry, RiskController, RiskRailsConfig};
 pub use state::{OrderState, OrderTracker};
 pub use types::{
     ExecEvent, ExecutionMode, LocalOrderId, ModeConfig, OrderIntent, OrderKind, OrderRequest,
@@ -35,6 +39,7 @@ pub use ws::{spawn_order_update_ws, OrderUpdateWsConfig, WsConnectionEvent};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_mode_resolution_isolation() {
@@ -477,7 +482,6 @@ mod tests {
     fn test_submission_queue_prioritization() {
         let mut queue = SubmissionQueue::new(8.0, 10.0);
 
-        // Enqueue Entry first, then Cancel, then Exit
         let entry_req = OrderRequest {
             local_id: "E1".into(),
             security_id: "1333".into(),
@@ -502,7 +506,6 @@ mod tests {
         };
         queue.enqueue_place(exit_req).unwrap();
 
-        // Check pop order: Exits (0) -> Cancels (1) -> Entries (2)
         match queue.pop_next().unwrap() {
             QueueAction::Place(r) => assert_eq!(r.intent, OrderIntent::Exit),
             _ => panic!("expected Exit first"),
@@ -524,12 +527,10 @@ mod tests {
         let mut queue = SubmissionQueue::new(8.0, 10.0);
         assert_eq!(queue.counter_status(), CounterStatus::Normal);
 
-        // At 80% (5,600) -> Warning
         queue.set_daily_count(WARN_80_PCT);
         assert_eq!(queue.counter_status(), CounterStatus::Warning80Pct);
         assert!(queue.can_submit_entry());
 
-        // At 95% (6,650) -> Stop Entries
         queue.set_daily_count(STOP_ENTRIES_95_PCT);
         assert_eq!(queue.counter_status(), CounterStatus::StopEntries95Pct);
         assert!(!queue.can_submit_entry());
@@ -545,7 +546,6 @@ mod tests {
         };
         assert!(queue.enqueue_place(entry_req).is_err());
 
-        // But Exits and Cancels are STILL permitted!
         let exit_req = OrderRequest {
             local_id: "X2".into(),
             security_id: "1333".into(),
@@ -556,5 +556,94 @@ mod tests {
             local_seq: 4,
         };
         assert!(queue.enqueue_place(exit_req).is_ok());
+    }
+
+    #[test]
+    fn test_risk_controller_limits_and_entry_lock() {
+        let cfg = RiskRailsConfig {
+            max_qty_per_order: Some(100),
+            max_value_per_order_paise: Some(100_000), // 1,000 Rs
+            max_orders_per_minute: Some(10),
+            broker_kill_switch_on_breach: true,
+            allow_emergency_delete_all_positions: false,
+        };
+        let mut risk = RiskController::new(cfg);
+
+        let valid_entry = OrderRequest {
+            local_id: "V1".into(),
+            security_id: "1333".into(),
+            side: Side::Buy,
+            quantity: 10,
+            kind: OrderKind::Limit { price_paise: 5000 },
+            intent: OrderIntent::Entry,
+            local_seq: 1,
+        };
+        assert!(risk.validate_order(&valid_entry).is_ok());
+
+        // Max qty exceed
+        let mut excess_qty = valid_entry.clone();
+        excess_qty.quantity = 150;
+        assert!(risk.validate_order(&excess_qty).is_err());
+
+        // Max value exceed (10 * 20,000 = 200,000 paise > 100,000)
+        let mut excess_val = valid_entry.clone();
+        excess_val.kind = OrderKind::Limit { price_paise: 20000 };
+        assert!(risk.validate_order(&excess_val).is_err());
+
+        // Entry lock engages
+        risk.lock_entries("test lock");
+        assert!(risk.is_entries_locked());
+        assert!(risk.validate_order(&valid_entry).is_err());
+
+        // Exits are NEVER blocked by entry lock!
+        let exit_req = OrderRequest {
+            local_id: "X1".into(),
+            security_id: "1333".into(),
+            side: Side::Sell,
+            quantity: 10,
+            kind: OrderKind::Market,
+            intent: OrderIntent::Exit,
+            local_seq: 2,
+        };
+        assert!(risk.validate_order(&exit_req).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_reconciler_and_max_daily_loss_sequence() {
+        let mode_cfg = ModeConfig::resolve(ExecutionMode::Dry, None).unwrap();
+        let client = DhanTradingClient::new(mode_cfg, "1000000000".into());
+        let mut risk = RiskController::new(RiskRailsConfig::default());
+        let reconciler = Reconciler::new(CorrelationGenerator::new("TEST"));
+
+        let mut local_orders = BTreeMap::new();
+        let mut local_positions = BTreeMap::new();
+        local_positions.insert("1333".to_string(), 50i64); // Long 50 shares
+
+        let pending_req = OrderRequest {
+            local_id: "P1".into(),
+            security_id: "1333".into(),
+            side: Side::Buy,
+            quantity: 20,
+            kind: OrderKind::Limit { price_paise: 20000 },
+            intent: OrderIntent::Entry,
+            local_seq: 1,
+        };
+        let mut tracker = OrderTracker::new(pending_req, "AMLN-TEST-1".into());
+        tracker.state = OrderState::Open;
+        tracker.dhan_order_id = Some("DH-100".into());
+        local_orders.insert("P1".into(), tracker);
+
+        // Execute breach sequence
+        let events = reconciler
+            .execute_max_daily_loss_breach(&client, &mut risk, &mut local_orders, &mut local_positions)
+            .await;
+
+        // Entry lock engaged
+        assert!(risk.is_entries_locked());
+
+        // Events include Halt, Cancelled for pending order, and breach exit order
+        assert!(events.iter().any(|e| matches!(e, ExecEvent::Halt { .. })));
+        assert!(events.iter().any(|e| matches!(e, ExecEvent::Cancelled { ref local_id, .. } if local_id == "P1")));
+        assert!(events.iter().any(|e| matches!(e, ExecEvent::Submitted { ref local_id, .. } if local_id == "BREACH-EXIT-1333")));
     }
 }
