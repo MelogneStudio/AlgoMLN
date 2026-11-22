@@ -48,12 +48,32 @@ pub fn rupees_to_paise_half_up(val: f64) -> i64 {
 
 /// Parse rupee price from serde_json::Value (handles integer, float, string)
 pub fn parse_rupees_to_paise(val: &serde_json::Value) -> Option<i64> {
+    if let Some(s) = val.as_str() {
+        let s = s.trim();
+        if let Some((int_part, frac_part)) = s.split_once('.') {
+            let whole: i64 = int_part.parse().ok()?;
+            let mut frac_str = frac_part.to_string();
+            if frac_str.len() == 1 {
+                frac_str.push('0');
+            } else if frac_str.len() > 2 {
+                let round_up = frac_str.as_bytes()[2] >= b'5';
+                frac_str.truncate(2);
+                let mut paise: i64 = frac_str.parse().ok()?;
+                if round_up {
+                    paise += 1;
+                }
+                return Some(whole * 100 + paise);
+            }
+            let paise: i64 = frac_str.parse().ok()?;
+            return Some(whole * 100 + paise);
+        } else if let Ok(whole) = s.parse::<i64>() {
+            return Some(whole * 100);
+        }
+    }
     if let Some(f) = val.as_f64() {
         Some(rupees_to_paise_half_up(f))
     } else if let Some(i) = val.as_i64() {
         Some(i * 100)
-    } else if let Some(s) = val.as_str() {
-        s.trim().parse::<f64>().ok().map(rupees_to_paise_half_up)
     } else {
         None
     }
@@ -61,7 +81,7 @@ pub fn parse_rupees_to_paise(val: &serde_json::Value) -> Option<i64> {
 
 /// Match statuses case-insensitively according to Section 4 mapping:
 /// - TRANSIT -> Submitted
-/// - PENDING -> Open, or PartiallyFilled if traded qty > 0 and remaining > 0
+/// - PENDING -> Open, or PartiallyFilled if traded qty > 0 and remaining > 0, or Filled if traded > 0 and remaining == 0
 /// - PART_TRADED -> PartiallyFilled
 /// - TRADED -> Filled
 /// - CANCELLED -> Cancelled
@@ -77,6 +97,8 @@ pub fn map_status(status_raw: &str, traded_qty: u64, remaining_qty: u64) -> Norm
         "PENDING" => {
             if traded_qty > 0 && remaining_qty > 0 {
                 NormalizedStatus::PartiallyFilled
+            } else if traded_qty > 0 && remaining_qty == 0 {
+                NormalizedStatus::Filled
             } else {
                 NormalizedStatus::Open
             }
