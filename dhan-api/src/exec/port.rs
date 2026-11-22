@@ -38,6 +38,7 @@ pub struct DhanExecutionPort {
     local_positions: BTreeMap<String, i64>,
     tick_sizes_paise: BTreeMap<String, i64>,
     outgoing_events: VecDeque<ExecEvent>,
+    emitted_fill_qtys: BTreeMap<LocalOrderId, u64>,
     seq_counter: u64,
     rt: Option<tokio::runtime::Runtime>,
 }
@@ -56,12 +57,13 @@ impl DhanExecutionPort {
             OrderWal::memory()
         };
 
-        // If tokio runtime is already present on thread, handle it, else create one for sync ExecutionPort bridge
+        // If tokio runtime is already present on thread, handle it, else create a multi-thread runtime
         let rt = if tokio::runtime::Handle::try_current().is_ok() {
             None
         } else {
             Some(
-                tokio::runtime::Builder::new_current_thread()
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
                     .enable_all()
                     .build()
                     .map_err(|e| format!("failed creating tokio runtime: {e}"))?,
@@ -79,6 +81,7 @@ impl DhanExecutionPort {
             local_positions: BTreeMap::new(),
             tick_sizes_paise: config.tick_sizes_paise,
             outgoing_events: VecDeque::new(),
+            emitted_fill_qtys: BTreeMap::new(),
             seq_counter: 0,
             rt,
         };
@@ -121,7 +124,9 @@ impl DhanExecutionPort {
 
     fn run_future<F: std::future::Future>(rt_opt: &Option<tokio::runtime::Runtime>, f: F) -> F::Output {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            tokio::task::block_in_place(|| handle.block_on(f))
+            std::thread::scope(|s| {
+                s.spawn(|| handle.block_on(f)).join().unwrap()
+            })
         } else if let Some(ref rt) = rt_opt {
             rt.block_on(f)
         } else {
@@ -144,8 +149,7 @@ impl DhanExecutionPort {
         self.local_orders.insert(local_id.clone(), tracker);
 
         self.queue.enqueue_place(req)?;
-        self.process_queue_step();
-
+        // Non-blocking: returns LocalOrderId immediately per Section 3
         Ok(local_id)
     }
 
@@ -168,7 +172,6 @@ impl DhanExecutionPort {
 
         self.queue
             .enqueue_cancel(local_id.to_string(), dhan_id);
-        self.process_queue_step();
 
         Ok(())
     }
@@ -369,6 +372,7 @@ impl ExecutionPort for DhanExecutionPort {
                     ..
                 } => {
                     let price = algomln::trader::paise_to_rupees(price_paise);
+                    *self.emitted_fill_qtys.entry(local_id.clone()).or_default() += qty;
                     order_events.push(OrderEvent::PartialFill {
                         id: local_id,
                         qty,
@@ -378,14 +382,19 @@ impl ExecutionPort for DhanExecutionPort {
                 }
                 ExecEvent::Filled { local_id } => {
                     if let Some(tracker) = self.local_orders.get(&local_id) {
+                        let already_emitted = self.emitted_fill_qtys.get(&local_id).copied().unwrap_or(0);
+                        let remaining_unemitted = tracker.order_qty.saturating_sub(already_emitted);
                         let price_paise = tracker.last_avg_price_paise.unwrap_or(0);
                         let price = algomln::trader::paise_to_rupees(price_paise);
-                        order_events.push(OrderEvent::Filled {
-                            id: local_id,
-                            qty: tracker.order_qty,
-                            price,
-                            fees: 0.0,
-                        });
+                        if remaining_unemitted > 0 {
+                            *self.emitted_fill_qtys.entry(local_id.clone()).or_default() += remaining_unemitted;
+                            order_events.push(OrderEvent::Filled {
+                                id: local_id,
+                                qty: remaining_unemitted,
+                                price,
+                                fees: 0.0,
+                            });
+                        }
                     }
                 }
                 ExecEvent::Rejected { local_id, reason, .. } => {
