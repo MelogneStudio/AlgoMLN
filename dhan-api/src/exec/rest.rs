@@ -593,6 +593,9 @@ impl DhanTradingClient {
             };
         }
 
+        let json: serde_json::Value = serde_json::from_str(&body_text)
+            .map_err(|e| ExecRestError::Malformed(e.to_string()))?;
+
         let arr = if let Some(a) = json.as_array() {
             a
         } else if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
