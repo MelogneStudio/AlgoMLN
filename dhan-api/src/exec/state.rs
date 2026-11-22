@@ -56,6 +56,7 @@ pub struct OrderTracker {
     pub remaining_qty: u64,
     pub seen_trade_ids: BTreeSet<String>,
     pub last_avg_price_paise: Option<i64>,
+    pub cum_notional_paise: i64,
 }
 
 impl OrderTracker {
@@ -72,6 +73,7 @@ impl OrderTracker {
             remaining_qty: order_qty,
             seen_trade_ids: BTreeSet::new(),
             last_avg_price_paise: None,
+            cum_notional_paise: 0,
         }
     }
 
@@ -151,15 +153,25 @@ impl OrderTracker {
             self.cum_traded_qty = update.cum_traded_qty;
             self.remaining_qty = self.order_qty.saturating_sub(self.cum_traded_qty);
 
-            // Price for fill: prefer last_traded_price, then avg_price, then limit price, then 0
-            let price_paise = update
-                .last_traded_price_paise
-                .or(update.avg_price_paise)
-                .or_else(|| match self.request.kind {
-                    crate::exec::types::OrderKind::Limit { price_paise } => Some(price_paise),
-                    crate::exec::types::OrderKind::Market => None,
-                })
-                .unwrap_or(0);
+            // Compute incremental slice price:
+            // Prefer last_traded_price; if only cumulative avg_price is available, calculate
+            // incremental slice from notional change: (new_cum_notional - prev_notional) / incremental_qty
+            let price_paise = if let Some(ltp) = update.last_traded_price_paise {
+                self.cum_notional_paise = self.cum_notional_paise.saturating_add((incremental_qty as i64).saturating_mul(ltp));
+                ltp
+            } else if let Some(avg_p) = update.avg_price_paise {
+                let new_cum_notional = (self.cum_traded_qty as i128) * (avg_p as i128);
+                let prev_notional = self.cum_notional_paise as i128;
+                let slice_notional = new_cum_notional.saturating_sub(prev_notional).max(0);
+                let slice_price = (slice_notional / (incremental_qty as i128)) as i64;
+                self.cum_notional_paise = new_cum_notional as i64;
+                slice_price
+            } else if let crate::exec::types::OrderKind::Limit { price_paise } = self.request.kind {
+                self.cum_notional_paise = self.cum_notional_paise.saturating_add((incremental_qty as i64).saturating_mul(price_paise));
+                price_paise
+            } else {
+                0
+            };
 
             // Generate synthetic exchange trade id if this was from cumulative diff
             let synth_trade_id = format!(
@@ -185,7 +197,11 @@ impl OrderTracker {
                 }
             }
             NormalizedStatus::Open => {
-                if self.state != OrderState::Open {
+                // Prevent regressions from PartiallyFilled to Open
+                if self.state == OrderState::Created
+                    || self.state == OrderState::Submitting
+                    || self.state == OrderState::Submitted
+                {
                     self.state = OrderState::Open;
                     events.push(ExecEvent::Open {
                         local_id: self.local_id.clone(),
