@@ -17,7 +17,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let command = args.next().ok_or("usage: algomln run|data|index ...")?;
     if command == "--help" || command == "-h" {
-        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps] [--allow-unresolved] [--replay FILE] [--live] [--record FILE] [--mode ticker|quote]\nalgomln data <update|status|verify|import|bulk> [options]\nalgomln index <list|show|refresh> [options]");
+        println!("algomln run <strategy> [--data DIR] [--tf 1m] [--from DATE] [--to DATE] [--update --master CSV] [--allow-gaps] [--allow-unresolved] [--replay FILE] [--live] [--record FILE] [--mode ticker|quote] [--exec dry|sandbox|live]\nalgomln data <update|status|verify|import|bulk> [options]\nalgomln index <list|show|refresh> [options]");
         return Ok(());
     }
     if command == "data" {
@@ -71,6 +71,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             "--replay",
             "--record",
             "--mode",
+            "--exec",
         ]
         .contains(&k.as_str())
         {
@@ -83,6 +84,24 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let data = PathBuf::from(opts.get("--data").map(String::as_str).unwrap_or("data"));
+    let exec_mode_str = opts.get("--exec").map(String::as_str).unwrap_or("dry");
+    let exec_mode: dhan_api::exec::ExecutionMode = exec_mode_str.parse()?;
+    let mode_config = dhan_api::exec::ModeConfig::resolve(exec_mode, None)?;
+    println!("execution mode (start): {exec_mode}");
+
+    if exec_mode != dhan_api::exec::ExecutionMode::Dry {
+        let client_id = std::env::var("DHAN_CLIENT_ID").unwrap_or_else(|_| "0000000000".into());
+        let port_cfg = dhan_api::exec::DhanExecutionPortConfig {
+            client_id,
+            mode_config: mode_config.clone(),
+            risk_config: dhan_api::exec::RiskRailsConfig::default(),
+            wal_path: None,
+            tick_sizes_paise: BTreeMap::new(),
+            run_tag: "STARTUP".into(),
+        };
+        let _port = dhan_api::exec::DhanExecutionPort::new(port_cfg)
+            .map_err(|e| format!("startup check failed: {e}"))?;
+    }
     let tf = Timeframe::parse(opts.get("--tf").map(String::as_str).unwrap_or("1m"))
         .ok_or("invalid --tf")?;
     let date = |key: &str| -> Result<Option<i64>, Box<dyn std::error::Error>> {
@@ -433,7 +452,9 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         if !resolution_report.indices.is_empty() {
             obj.insert("indices".into(), serde_json::to_value(&resolution_report.indices)?);
         }
+        obj.insert("execution_mode".into(), serde_json::Value::String(exec_mode.to_string()));
     }
+    println!("execution mode (end): {exec_mode}");
     let out_start = std::time::Instant::now();
     sim::write_results(
         opts.get("--out")
@@ -484,5 +505,14 @@ mod tests {
         assert!(validate_date_range(None, to).is_ok());
         assert!(validate_date_range(from, None).is_ok());
         assert!(validate_date_range(None, None).is_ok());
+    }
+
+    #[test]
+    fn test_exec_mode_parsing() {
+        use dhan_api::exec::ExecutionMode;
+        assert_eq!("dry".parse::<ExecutionMode>().unwrap(), ExecutionMode::Dry);
+        assert_eq!("sandbox".parse::<ExecutionMode>().unwrap(), ExecutionMode::Sandbox);
+        assert_eq!("live".parse::<ExecutionMode>().unwrap(), ExecutionMode::Live);
+        assert!("invalid".parse::<ExecutionMode>().is_err());
     }
 }
