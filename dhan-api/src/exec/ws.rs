@@ -60,9 +60,6 @@ pub fn spawn_order_update_ws(
             // Attempt connection
             match connect_async(&config.url).await {
                 Ok((mut ws_stream, _)) => {
-                    // Reset backoff upon successful connection
-                    backoff = config.initial_backoff;
-
                     // Send authentication handshake frame
                     let auth_msg = serde_json::json!({
                         "LoginReq": {
@@ -83,6 +80,9 @@ pub fn spawn_order_update_ws(
                         backoff = (backoff * 2).min(config.max_backoff);
                         continue;
                     }
+
+                    // Reset backoff upon successful authentication handshake frame transmission
+                    backoff = config.initial_backoff;
 
                     // Notify connection status
                     let ev = if is_reconnect {
