@@ -1,6 +1,7 @@
 pub mod correlation;
 pub mod error;
 pub mod normalize;
+pub mod rest;
 pub mod state;
 pub mod types;
 pub mod wal;
@@ -12,6 +13,10 @@ pub use error::{classify_error, ErrorClass};
 pub use normalize::{
     map_status, parse_rest_order, parse_rupees_to_paise, parse_ws_order, rupees_to_paise_half_up,
     NormalizedOrderUpdate, NormalizedStatus, UpdateSource,
+};
+pub use rest::{
+    DhanTradingClient, ExecRestError, PlaceOrderResponse, PnlExitRecord, PositionRecord,
+    TradeRecord,
 };
 pub use state::{OrderState, OrderTracker};
 pub use types::{
@@ -380,7 +385,6 @@ mod tests {
         assert!(gen.is_own("AlgoMLN-test"));
         assert!(!gen.is_own("EXTERNAL-1234"));
 
-        // Long tag is truncated cleanly to satisfy <= 30 chars
         let long_gen = CorrelationGenerator::new("VERY_LONG_TAG_THAT_EXCEEDS_NORMAL_LENGTH");
         let long_cid = long_gen.generate(99999);
         assert!(is_valid_correlation_id(&long_cid));
@@ -423,7 +427,6 @@ mod tests {
         tracker2.cum_traded_qty = 10;
         wal.append(&tracker2).unwrap();
 
-        // Recover
         let recovered_open = wal.recover_open_orders().unwrap();
         assert_eq!(recovered_open.len(), 1);
         assert_eq!(recovered_open[0].local_id, "O1");
@@ -431,5 +434,40 @@ mod tests {
         assert_eq!(recovered_open[0].dhan_order_id.as_deref(), Some("DH-1"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_rest_client_dry_mode() {
+        let mode_cfg = ModeConfig::resolve(ExecutionMode::Dry, None).unwrap();
+        let client = DhanTradingClient::new(mode_cfg, "1000000000".into());
+
+        // Startup check succeeds in dry mode
+        client.startup_check().await.unwrap();
+
+        let req = OrderRequest {
+            local_id: "D1".into(),
+            security_id: "1333".into(),
+            side: Side::Buy,
+            quantity: 25,
+            kind: OrderKind::Limit { price_paise: 25055 },
+            intent: OrderIntent::Entry,
+            local_seq: 1,
+        };
+
+        // Place order in dry mode returns simulated transit response
+        let place_resp = client.place_order(&req, "AMLN-DRY-1", Some(5)).await.unwrap();
+        assert_eq!(place_resp.order_id, "DRY-1");
+        assert_eq!(place_resp.order_status, "TRANSIT");
+
+        // Cancel succeeds
+        client.cancel_order("DRY-1").await.unwrap();
+
+        // Get orders returns empty
+        let orders = client.get_orders().await.unwrap();
+        assert!(orders.is_empty());
+
+        // Kill switch returns INACTIVE
+        let ks = client.get_kill_switch_status().await.unwrap();
+        assert_eq!(ks, "INACTIVE");
     }
 }
