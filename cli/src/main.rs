@@ -90,12 +90,14 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     println!("execution mode (start): {exec_mode}");
 
     if exec_mode != dhan_api::exec::ExecutionMode::Dry {
-        let client_id = std::env::var("DHAN_CLIENT_ID").unwrap_or_else(|_| "0000000000".into());
+        let client_id = std::env::var("DHAN_CLIENT_ID")
+            .map_err(|_| "missing DHAN_CLIENT_ID environment variable for sandbox/live execution")?;
+        let wal_path = data.join("exec-wal.log");
         let port_cfg = dhan_api::exec::DhanExecutionPortConfig {
             client_id,
             mode_config: mode_config.clone(),
             risk_config: dhan_api::exec::RiskRailsConfig::default(),
-            wal_path: None,
+            wal_path: Some(wal_path),
             tick_sizes_paise: BTreeMap::new(),
             run_tag: "STARTUP".into(),
         };
