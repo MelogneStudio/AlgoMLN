@@ -71,17 +71,21 @@ impl Reconciler {
         // 4. Position comparison & ExternalChange detection
         let mut broker_pos_map: BTreeMap<String, i64> = BTreeMap::new();
         for pos in broker_positions {
-            if pos.product_type == "INTRADAY" {
+            if pos.product_type.eq_ignore_ascii_case("INTRADAY") {
                 *broker_pos_map.entry(pos.security_id).or_default() += pos.net_qty;
             }
         }
 
-        // Check each security in our local positions
-        for (sec_id, local_net) in local_positions.iter_mut() {
-            let broker_net = broker_pos_map.get(sec_id).copied().unwrap_or(0);
+        // Check union of local and broker positions
+        let mut all_symbols: std::collections::BTreeSet<String> = local_positions.keys().cloned().collect();
+        all_symbols.extend(broker_pos_map.keys().cloned());
 
-            // External flatten: local position was > 0, but broker position is 0 without own exit
-            if *local_net != 0 && broker_net == 0 {
+        for sec_id in all_symbols {
+            let local_net = local_positions.get(&sec_id).copied().unwrap_or(0);
+            let broker_net = broker_pos_map.get(&sec_id).copied().unwrap_or(0);
+
+            // External flatten: local position was != 0, but broker position is 0 without own exit
+            if local_net != 0 && broker_net == 0 {
                 risk.lock_entries("external flatten detected: positions went flat on broker");
                 events.push(ExecEvent::ExternalChange {
                     security_id: sec_id.clone(),
@@ -91,9 +95,12 @@ impl Reconciler {
                     reason: "external flatten detected; entries locked".into(),
                 });
 
-                // Cancel own pending orders on this symbol
+                // Cancel own pending orders on this symbol locally and on broker
                 for tracker in local_orders.values_mut() {
-                    if tracker.request.security_id == *sec_id && tracker.state.is_open_or_pending() {
+                    if tracker.request.security_id == sec_id && tracker.state.is_open_or_pending() {
+                        if let Some(ref did) = tracker.dhan_order_id {
+                            let _ = client.cancel_order(did).await;
+                        }
                         tracker.state = OrderState::Cancelled;
                         events.push(ExecEvent::Cancelled {
                             local_id: tracker.local_id.clone(),
@@ -101,12 +108,12 @@ impl Reconciler {
                         });
                     }
                 }
-                *local_net = 0;
+                local_positions.insert(sec_id, 0);
                 continue;
             }
 
             // General position mismatch:
-            if *local_net != broker_net {
+            if local_net != broker_net {
                 risk.lock_entries("position mismatch between local ledger and broker");
                 events.push(ExecEvent::ExternalChange {
                     security_id: sec_id.clone(),
@@ -117,7 +124,7 @@ impl Reconciler {
                         "position mismatch for {sec_id}: local={local_net}, broker={broker_net}"
                     ),
                 });
-                *local_net = broker_net;
+                local_positions.insert(sec_id, broker_net);
             }
         }
 
@@ -197,18 +204,19 @@ impl Reconciler {
             if all_flat && no_open {
                 break;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
         // 5. If broker_kill_switch_on_breach is on: POST /killswitch?killSwitchStatus=ACTIVATE
         if risk.config().broker_kill_switch_on_breach {
-            let _ = client.activate_kill_switch().await;
-            // Poll expecting ACTIVE
             for _ in 0..3 {
+                let _ = client.activate_kill_switch().await;
                 if let Ok(status) = client.get_kill_switch_status().await {
                     if status == "ACTIVE" {
                         break;
                     }
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
 
