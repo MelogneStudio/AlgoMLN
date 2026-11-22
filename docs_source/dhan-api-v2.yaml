@@ -1,0 +1,5278 @@
+openapi: 3.1.0
+# Published copy served at https://docs.dhanhq.co/openapi/dhan-api-v2.yaml.
+# It is openapi/dhan-api-v2.yaml plus the Authentication endpoints, which
+# have hand-written pages under docs/guides and are kept out of the page
+# generator's spec. Rebuild it with `npm run build:spec`; do not edit it by hand.
+
+info:
+  title: DhanHQ API
+  version: 2.0.0
+  description: |
+    # Introduction
+
+    DhanHQ API Ver 2.0 is a state-of-the-art platform for you to build trading and investment services & strategies. It provides REST APIs supported in all languages, allowing seamless integration with your applications.
+
+    ## Getting Started
+
+    ### 1. Create an Account
+    Sign up at [dhan.co](https://dhan.co) and complete KYC verification.
+
+    ### 2. Generate API Credentials
+    Navigate to your account settings to generate:
+    - **Client ID**: Your unique identifier
+    - **Access Token**: JWT authentication token for API requests
+
+    ### 3. Install the SDK
+
+    ```bash
+    pip install dhanhq
+    ```
+
+    ### 4. Initialize the Client
+
+    ```python
+    from dhanhq import DhanContext, dhanhq
+
+    context = DhanContext("YOUR_CLIENT_ID", "YOUR_ACCESS_TOKEN")
+    dhan = dhanhq(context)
+    ```
+
+    ## Structure
+
+    All API requests follow REST conventions with JSON request/response bodies.
+
+    ### Request Headers
+    | Header | Required | Description |
+    |--------|----------|-------------|
+    | access-token | Yes | JWT access token from DhanHQ |
+    | Content-Type | Yes | application/json |
+
+    ## Errors
+
+    All error responses follow this structure:
+
+    ```json
+    {
+      "status": "failure",
+      "errorType": "VALIDATION_ERROR",
+      "errorCode": "E001",
+      "errorMessage": "Invalid security ID"
+    }
+    ```
+
+    | Error Type | Description |
+    |------------|-------------|
+    | VALIDATION_ERROR | Invalid request parameters |
+    | AUTHENTICATION_ERROR | Invalid or expired access token |
+    | AUTHORIZATION_ERROR | Insufficient permissions |
+    | RATE_LIMIT_ERROR | Too many requests |
+    | INTERNAL_ERROR | Server-side error |
+
+    ## Rate Limits
+
+    | API Category | Per Second | Daily Limit |
+    |--------------|------------|-------------|
+    | Order APIs | 10 requests | 7,000 |
+    | Data APIs | 5 requests | 100,000 |
+    | Market Quote | 1 request | - |
+    | Option Chain | 1 per 3 sec | - |
+
+  contact:
+    name: DhanHQ API Support
+    url: https://dhan.co/support
+    email: api@dhan.co
+
+servers:
+  - url: https://api.dhan.co/v2
+    description: Production - Live trading environment
+  - url: https://sandbox.dhan.co/v2
+    description: Sandbox - Testing environment
+
+x-tagGroups:
+  - name: Authentication
+    tags:
+      - Authentication
+  - name: Trading APIs
+    tags:
+      - Orders
+      - Super Order
+      - Conditional and Multi Order
+      - Portfolio
+      - EDIS
+      - Trader's Control
+      - Funds
+      - Statement
+  - name: Data APIs
+    tags:
+      - Market Quote
+      - Historical Data
+      - Expired Options Data
+      - Option Chain
+      - Market Analytics
+  - name: Global Stocks
+    tags:
+      - Global Stocks
+
+tags:
+  - name: Authentication
+    description: Access token generation and renewal, API key and Partner consent login, and static IP setup.
+  - name: Orders
+    description: |
+      ## Order Management
+
+      Place, modify, and cancel orders on NSE and BSE exchanges.
+
+      ### Supported Values
+
+      **Transaction Type**: `BUY`, `SELL`
+
+      **Exchange Segment**: `NSE_EQ`, `NSE_FNO`, `BSE_EQ`, `BSE_FNO`, `MCX_COMM`
+
+      **Product Type**: `CNC`, `INTRADAY`, `MARGIN`, `MTF`
+
+      **Order Type**: `LIMIT`, `MARKET`, `STOP_LOSS`, `STOP_LOSS_MARKET`
+
+      **Validity**: `DAY`, `IOC`
+
+      **Order Status**: `TRANSIT`, `PENDING`, `REJECTED`, `CANCELLED`, `TRADED`, `EXPIRED`
+
+  - name: Super Order
+    description: |
+      ## Super Order (Bracket Order)
+
+      Advanced order type with built-in stop-loss and target levels.
+
+      ### Leg Names
+      - `ENTRY_LEG`: Main entry order
+      - `TARGET_LEG`: Profit target order
+      - `STOP_LOSS_LEG`: Stop loss order
+
+  - name: Portfolio
+    description: |
+      ## Portfolio & Positions
+
+      Manage holdings and positions.
+
+  - name: Funds
+    description: |
+      ## Funds & Margin
+
+      Check balances and calculate margins.
+
+  - name: Market Quote
+    description: |
+      ## Market Quote
+
+      Real-time market data including LTP, OHLC, and market depth.
+
+      ### Rate Limits
+      - Maximum 1000 instruments per request
+      - 1 request per second
+
+  - name: Historical Data
+    description: |
+      ## Historical Data
+
+      OHLC candle data for backtesting and analysis.
+
+      ### Intervals
+      - Intraday: `1`, `5`, `15`, `25`, `60` (minutes)
+      - Daily: Full day candles
+      - Note: Maximum 90 days per request
+
+  - name: Conditional and Multi Order
+    description: |
+      ## Conditional and Multi Order
+
+      Place orders based on price or technical indicator conditions.
+      When triggered, orders are placed automatically.
+
+  - name: EDIS
+    description: |
+      ## EDIS (Electronic Delivery Instruction Slip)
+
+      Generate T-PIN and eDIS forms for selling holdings via CDSL.
+
+  - name: "Trader's Control"
+    description: |
+      ## Trader's Control
+
+      Kill Switch and P&L based auto-exit for risk management.
+
+  - name: Statement
+    description: |
+      ## Statement
+
+      Ledger reports and trade history.
+
+  - name: Expired Options Data
+    description: |
+      ## Expired Options Data
+
+      Historical expired options contract data on a rolling basis.
+
+  - name: Option Chain
+    description: |
+      ## Option Chain
+
+      Option chain data with Greeks.
+
+      ### Rate Limits
+      - 1 request per 3 seconds per underlying/expiry
+
+  - name: Market Analytics
+    description: |
+      ## Market Analytics
+
+      Computed technical metrics for an instrument. Only the indicators you
+      request are computed and returned. All values are point-in-time as of the
+      latest closed candle for the requested timeframe.
+
+      **Timeframe**: `1`, `5`, `15` (intraday), `D` (daily)
+
+      **Indicator families**: Moving Averages (`SMA_*`, `EMA_*`), Momentum / Oscillators (`RSI_14`, `MACD_HIST`, `STOCH`, …), Pivot Points (`PIVOT_CLASSIC`, `PIVOT_FIBONACCI`, `PIVOT_CAMARILLA`)
+
+  - name: Global Stocks
+    description: |
+      ## Global Stocks
+
+      APIs for trading and managing global stocks.
+
+      **Order Status Values:** `TRANSIT`, `PENDING`, `REJECTED`, `CANCELLED`, `PART_TRADED`, `TRADED`, `EXPIRED`, `MODIFIED`, `TRIGGERED`, `INACTIVE`
+
+      **Order Types:** `MARKET`, `LIMIT`, `STOP_LOSS`, `STOP_LOSS_MARKET`, `AMOUNT`
+
+paths:
+  # ============== AUTHENTICATION ==============
+  /app/generateAccessToken:
+    post:
+      tags:
+        - Authentication
+      summary: Generate Token
+      operationId: generateAccessToken
+      description: |-
+        Use this endpoint when TOTP is enabled for the account and you want to generate a fresh access token directly through the auth service.
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/generate-token
+      servers:
+        - url: https://auth.dhan.co
+          description: Dhan authentication service
+      security: []
+      parameters:
+        - name: dhanClientId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Client ID of the user
+        - name: pin
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Dhan Pin of the user, numeric code
+        - name: totp
+          in: query
+          required: true
+          schema:
+            type: string
+          description: TOTP code from the authenticator app
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dhanClientId:
+                    type: string
+                    description: User specific identification generated by Dhan
+                  dhanClientName:
+                    type: string
+                    description: Name registered on Dhan
+                  dhanClientUcc:
+                    type: string
+                    description: Unique Client Code registered with Dhan
+                  givenPowerOfAttorney:
+                    type: boolean
+                    description: DDPI status
+                  accessToken:
+                    type: string
+                    description: Generated access token
+                  expiryTime:
+                    type: string
+                    description: Token expiry time, usually 24 hours from generation
+  /RenewToken:
+    get:
+      tags:
+        - Authentication
+      summary: Renew Token
+      operationId: renewToken
+      description: |-
+        This renews a currently active token generated from Dhan Web and returns a new token with another 24 hours of validity.
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/renew-token
+      security:
+        - accessToken: []
+      parameters:
+        - name: dhanClientId
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Client ID of the user
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dhanClientId:
+                    type: string
+                    description: User specific identification generated by Dhan
+                  dhanClientName:
+                    type: string
+                    description: Name registered on Dhan
+                  dhanClientUcc:
+                    type: string
+                    description: Unique Client Code registered with Dhan
+                  givenPowerOfAttorney:
+                    type: boolean
+                    description: DDPI status
+                  accessToken:
+                    type: string
+                    description: Newly generated access token
+                  expiryTime:
+                    type: string
+                    description: New token expiry timestamp
+  /app/generate-consent:
+    post:
+      tags:
+        - Authentication
+      summary: Generate Consent
+      operationId: apiKeyGenerateConsent
+      description: |-
+        This validates the app credentials and creates a consent session that is used in the browser-login step.
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/api-key-generate-consent
+      servers:
+        - url: https://auth.dhan.co
+          description: Dhan authentication service
+      security: []
+      parameters:
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Dhan client ID
+        - name: app_id
+          in: header
+          required: true
+          schema:
+            type: string
+          description: API key generated from Dhan
+        - name: app_secret
+          in: header
+          required: true
+          schema:
+            type: string
+          description: API secret generated from Dhan
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consentAppId:
+                    type: string
+                    description: Temporary session ID to be used in the browser login step
+                  consentAppStatus:
+                    type: string
+                    description: Status of the consent creation request
+                  status:
+                    type: string
+                    description: API response status
+  /login/consentApp-login:
+    get:
+      tags:
+        - Authentication
+      summary: Browser Based Login
+      operationId: apiKeyBrowserLogin
+      description: |-
+        This endpoint needs to be opened directly on a browser. On this step, the user needs to enter their Dhan credentials and validate with 2FA like OTP, pin or password. If the login is successful, the user is redirected to the URL provided while generating the API key. Along with the redirect, Dhan also sends a `tokenId` which needs to be used in [Consume Consent](/api/v2/authentication/api-key-consume-consent).
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/api-key-browser-login
+  
+        This is a page to open in a browser or webview, not an API call. It ends with a 302 redirect to your redirect URL with `tokenId` as a query parameter.
+      servers:
+        - url: https://auth.dhan.co
+          description: Dhan authentication service
+      security: []
+      parameters:
+        - name: consentAppId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Temporary session ID created in the Generate Consent stage
+      x-browser-redirect: true
+      responses:
+        '302':
+          description: 'Redirect to your redirect URL with tokenId. tokenId: Token ID to be used to generate the access token'
+  /app/consumeApp-consent:
+    post:
+      tags:
+        - Authentication
+      summary: Consume Consent
+      operationId: apiKeyConsumeConsent
+      description: |-
+        Use this after the browser-login redirect step. Pass the `tokenId` received from the redirect along with the API key and secret to generate the final access token.
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/api-key-consume-consent
+      servers:
+        - url: https://auth.dhan.co
+          description: Dhan authentication service
+      security: []
+      parameters:
+        - name: tokenId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: User specific token ID obtained from the browser login step
+        - name: app_id
+          in: header
+          required: true
+          schema:
+            type: string
+          description: API key generated from Dhan
+        - name: app_secret
+          in: header
+          required: true
+          schema:
+            type: string
+          description: API secret generated from Dhan
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dhanClientId:
+                    type: string
+                    description: User specific identification generated by Dhan
+                  dhanClientName:
+                    type: string
+                    description: Name of the user
+                  dhanClientUcc:
+                    type: string
+                    description: Unique Client Code (UCC)
+                  givenPowerOfAttorney:
+                    type: boolean
+                    description: Whether the user has activated DDPI
+                  accessToken:
+                    type: string
+                    description: JWT access token to be used for API authentication
+                  expiryTime:
+                    type: string
+                    description: ISO timestamp when the access token expires
+  /partner/generate-consent:
+    post:
+      tags:
+        - Authentication
+      summary: Generate Consent
+      operationId: partnerGenerateConsent
+      description: |-
+        This validates the partner credentials and creates the consent session required for the browser-login step.
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/partner-generate-consent
+      servers:
+        - url: https://auth.dhan.co
+          description: Dhan authentication service
+      security: []
+      parameters:
+        - name: partner_id
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Partner ID provided by Dhan
+        - name: partner_secret
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Partner secret provided by Dhan
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consentId:
+                    type: string
+                    description: Temporary session ID on partner level, used in the browser login step
+                  consentStatus:
+                    type: string
+                    description: Status of the partner consent request
+  /consent-login:
+    get:
+      tags:
+        - Authentication
+      summary: Dhan Login on Browser for User
+      operationId: partnerBrowserLogin
+      description: |-
+        This endpoint needs to be opened directly on a tab for browser based applications or on the webview for mobile apps. On this step, the end user needs to enter their Dhan credentials and validate with 2FA like OTP, pin or password. If the login is successful, the user is redirected to the URL provided to Dhan. Along with the redirect, Dhan also sends a `tokenId` which needs to be used in [Consume Consent](/api/v2/authentication/partner-consume-consent).
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/partner-browser-login
+  
+        This is a page to open in a browser or webview, not an API call. It ends with a 302 redirect to your redirect URL with `tokenId` as a query parameter.
+      servers:
+        - url: https://auth.dhan.co
+          description: Dhan authentication service
+      security: []
+      parameters:
+        - name: consentId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Temporary session ID created in the Generate Consent stage
+      x-browser-redirect: true
+      responses:
+        '302':
+          description: 'Redirect to your redirect URL with tokenId. tokenId: Token ID to be used to generate the access token'
+  /partner/consume-consent:
+    post:
+      tags:
+        - Authentication
+      summary: Consume Consent
+      operationId: partnerConsumeConsent
+      description: |-
+        Use this after the browser-login redirect step. Pass the `tokenId` from the redirect along with partner credentials to generate the end-user access token.
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/partner-consume-consent
+      servers:
+        - url: https://auth.dhan.co
+          description: Dhan authentication service
+      security: []
+      parameters:
+        - name: tokenId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: User specific token ID obtained from the browser login step
+        - name: partner_id
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Partner ID provided by Dhan
+        - name: partner_secret
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Partner secret provided by Dhan
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dhanClientId:
+                    type: string
+                    description: User specific identification generated by Dhan
+                  dhanClientName:
+                    type: string
+                    description: Name of the user
+                  dhanClientUcc:
+                    type: string
+                    description: Unique Client Code (UCC)
+                  givenPowerOfAttorney:
+                    type: boolean
+                    description: Whether the user has activated DDPI
+                  accessToken:
+                    type: string
+                    description: JWT access token to be used for API authentication
+                  expiryTime:
+                    type: string
+                    description: ISO timestamp when the access token expires
+  /ip/setIP:
+    post:
+      tags:
+        - Authentication
+      summary: Set IP
+      operationId: setIP
+      description: |-
+        Use this endpoint to setup the primary or secondary static IP for the account. Once an IP is setup, it cannot be modified for the next 7 days.
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/set-ip
+      security:
+        - accessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dhanClientId:
+                  type: string
+                  description: User specific identification
+                ip:
+                  type: string
+                  description: Static IP address in IPv4 or IPv6 format
+                ipFlag:
+                  type: string
+                  description: Flag to set the IP as primary or secondary
+                  enum:
+                    - PRIMARY
+                    - SECONDARY
+              required:
+                - dhanClientId
+                - ip
+                - ipFlag
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: API response message
+                  status:
+                    type: string
+                    description: API response status
+  /ip/modifyIP:
+    put:
+      tags:
+        - Authentication
+      summary: Modify IP
+      operationId: modifyIP
+      description: |-
+        Use this endpoint to modify the configured primary or secondary static IP. This can only be used when the account is within the allowed modification period.
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/modify-ip
+      security:
+        - accessToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dhanClientId:
+                  type: string
+                  description: User specific identification
+                ip:
+                  type: string
+                  description: Static IP address in IPv4 or IPv6 format
+                ipFlag:
+                  type: string
+                  description: Flag to set the IP as primary or secondary
+                  enum:
+                    - PRIMARY
+                    - SECONDARY
+              required:
+                - dhanClientId
+                - ip
+                - ipFlag
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: API response message
+                  status:
+                    type: string
+                    description: API response status
+  /ip/getIP:
+    get:
+      tags:
+        - Authentication
+      summary: Get IP
+      operationId: getIP
+      description: |-
+        Use this endpoint to fetch the currently configured primary and secondary IPs along with the dates on which each can next be modified.
+  
+        Documentation: https://docs.dhanhq.co/api/v2/authentication/get-ip
+      security:
+        - accessToken: []
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  modifyDateSecondary:
+                    type: string
+                    description: Date from which the secondary IP can be modified
+                  secondaryIP:
+                    type: string
+                    description: Currently set secondary static IP
+                  modifyDatePrimary:
+                    type: string
+                    description: Date from which the primary IP can be modified
+                  primaryIP:
+                    type: string
+                    description: Currently set primary static IP
+
+  # ============== ORDERS ==============
+  /orders:
+    post:
+      tags: [Orders]
+      summary: Place Order
+      operationId: placeOrder
+      description: Place a new order on the exchange.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            response = dhan.place_order(
+                security_id="1333",
+                exchange_segment="NSE_EQ",
+                transaction_type="BUY",
+                quantity=10,
+                order_type="MARKET",
+                product_type="INTRADAY"
+            )
+            print(response)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/orders" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "dhanClientId": "<your-client-id>",
+                "transactionType": "BUY",
+                "exchangeSegment": "NSE_EQ",
+                "productType": "INTRADAY",
+                "orderType": "MARKET",
+                "validity": "DAY",
+                "securityId": "1333",
+                "quantity": 10
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceOrderRequest'
+      responses:
+        '200':
+          description: Order placed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    get:
+      tags: [Orders]
+      summary: Get Order Book
+      operationId: getOrders
+      description: Retrieve all orders for the current trading day.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            orders = dhan.get_order_list()
+            print(orders)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/orders" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: List of orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Order'
+
+  /orders/{orderId}:
+    get:
+      tags: [Orders]
+      summary: Get Order by ID
+      operationId: getOrderById
+      description: Retrieve details of a specific order by its ID.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            order = dhan.get_order_by_id(order_id="123456789")
+            print(order)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/orders/123456789" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Order details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+
+    put:
+      tags: [Orders]
+      summary: Modify Order
+      operationId: modifyOrder
+      description: Modify a pending order.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            response = dhan.modify_order(
+                order_id="123456789",
+                order_type="LIMIT",
+                quantity=15,
+                price=1500.00
+            )
+            print(response)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X PUT "https://api.dhan.co/v2/orders/123456789" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "dhanClientId": "<your-client-id>",
+                "orderId": "123456789",
+                "orderType": "LIMIT",
+                "quantity": 15,
+                "price": 1500.00,
+                "validity": "DAY"
+              }'
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModifyOrderRequest'
+      responses:
+        '200':
+          description: Order modified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+
+    delete:
+      tags: [Orders]
+      summary: Cancel Order
+      operationId: cancelOrder
+      description: Cancel a pending order.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            response = dhan.cancel_order(order_id="123456789")
+            print(response)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X DELETE "https://api.dhan.co/v2/orders/123456789" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Order cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+
+  /orders/slicing:
+    post:
+      tags: [Orders]
+      summary: Slice Order
+      operationId: sliceOrder
+      description: Place order with slicing for quantities exceeding freeze limit.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            response = dhan.place_slice_order(
+                security_id="1333",
+                exchange_segment="NSE_EQ",
+                transaction_type="BUY",
+                quantity=5000,
+                order_type="MARKET",
+                product_type="INTRADAY"
+            )
+            print(response)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/orders/slicing" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "dhanClientId": "<your-client-id>",
+                "transactionType": "BUY",
+                "exchangeSegment": "NSE_EQ",
+                "productType": "INTRADAY",
+                "orderType": "MARKET",
+                "validity": "DAY",
+                "securityId": "1333",
+                "quantity": 5000
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceOrderRequest'
+      responses:
+        '200':
+          description: Sliced orders placed
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OrderResponse'
+
+  /orders/external/{correlationId}:
+    get:
+      tags: [Orders]
+      summary: Get Order by Correlation ID
+      operationId: getOrderByCorrelationId
+      description: Retrieve order details using your custom correlation ID.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            order = dhan.get_order_by_corelation_id(
+                correlation_id="my-order-123"
+            )
+            print(order)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/orders/external/my-order-123" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: correlationId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Order details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+
+  /trades:
+    get:
+      tags: [Orders]
+      summary: Get Trade Book
+      operationId: getTrades
+      description: Retrieve all trades for the current trading day.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            trades = dhan.get_trade_book()
+            print(trades)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/trades" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: List of trades
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Trade'
+
+  /trades/{orderId}:
+    get:
+      tags: [Orders]
+      summary: Get Trades for Order
+      operationId: getTradesByOrderId
+      description: Retrieve all trades executed for a specific order.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            trades = dhan.get_trade_history(order_id="123456789")
+            print(trades)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/trades/123456789" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Trades for order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Trade'
+
+  # ============== SUPER ORDER ==============
+  /super/orders:
+    post:
+      tags: [Super Order]
+      summary: Place Super Order
+      operationId: placeSuperOrder
+      description: Place a bracket order with entry, target, and stop-loss levels.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            response = dhan.place_super_order(
+                security_id="1333",
+                exchange_segment="NSE_EQ",
+                transaction_type="BUY",
+                quantity=10,
+                order_type="LIMIT",
+                price=1500.00,
+                target_price=1550.00,
+                stop_loss_price=1470.00,
+                trailing_jump=5.00
+            )
+            print(response)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/super/orders" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "dhanClientId": "<your-client-id>",
+                "transactionType": "BUY",
+                "exchangeSegment": "NSE_EQ",
+                "productType": "INTRADAY",
+                "orderType": "LIMIT",
+                "securityId": "1333",
+                "quantity": 10,
+                "price": 1500.00,
+                "targetPrice": 1550.00,
+                "stopLossPrice": 1470.00,
+                "trailingJump": 5.00
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuperOrderRequest'
+      responses:
+        '200':
+          description: Super order placed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+
+    get:
+      tags: [Super Order]
+      summary: Get Super Orders
+      operationId: getSuperOrders
+      description: Retrieve all super orders for the current trading day.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            orders = dhan.get_super_order_list()
+            print(orders)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/super/orders" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: List of super orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SuperOrder'
+
+  /super/orders/{orderId}:
+    put:
+      tags: [Super Order]
+      summary: Modify Super Order
+      operationId: modifySuperOrder
+      description: Modify a pending super order leg.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            response = dhan.modify_super_order(
+                order_id="123456789",
+                leg_name="TARGET_LEG",
+                price=1560.00
+            )
+            print(response)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X PUT "https://api.dhan.co/v2/super/orders/123456789" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "dhanClientId": "<your-client-id>",
+                "orderId": "123456789",
+                "legName": "TARGET_LEG",
+                "price": 1560.00
+              }'
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModifySuperOrderRequest'
+      responses:
+        '200':
+          description: Super order modified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+
+  /super/orders/{orderId}/{legName}:
+    delete:
+      tags: [Super Order]
+      summary: Cancel Super Order Leg
+      operationId: cancelSuperOrderLeg
+      description: Cancel a specific leg of a super order.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            response = dhan.cancel_super_order(
+                order_id="123456789",
+                leg_name="STOP_LOSS_LEG"
+            )
+            print(response)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X DELETE "https://api.dhan.co/v2/super/orders/123456789/STOP_LOSS_LEG" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: legName
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [ENTRY_LEG, TARGET_LEG, STOP_LOSS_LEG]
+      responses:
+        '200':
+          description: Leg cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+
+  # ============== PORTFOLIO ==============
+  /holdings:
+    get:
+      tags: [Portfolio]
+      summary: Get Holdings
+      operationId: getHoldings
+      description: Retrieve all holdings in demat account.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            holdings = dhan.get_holdings()
+            print(holdings)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/holdings" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: List of holdings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Holding'
+
+  /positions:
+    get:
+      tags: [Portfolio]
+      summary: Get Positions
+      operationId: getPositions
+      description: Retrieve all open positions for the current trading day.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            positions = dhan.get_positions()
+            print(positions)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/positions" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: List of positions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Position'
+
+    delete:
+      tags: [Portfolio]
+      summary: Exit All Positions
+      operationId: exitAllPositions
+      description: Exit all open positions at market price.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            response = dhan.exit_all_positions()
+            print(response)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X DELETE "https://api.dhan.co/v2/positions" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: All positions exited
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message:
+                    type: string
+
+  /positions/convert:
+    post:
+      tags: [Portfolio]
+      summary: Convert Position
+      operationId: convertPosition
+      description: Convert position between product types (e.g., INTRADAY to CNC).
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            response = dhan.convert_position(
+                security_id="1333",
+                exchange_segment="NSE_EQ",
+                position_type="LONG",
+                convert_qty=10,
+                from_product_type="INTRADAY",
+                to_product_type="CNC"
+            )
+            print(response)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/positions/convert" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "dhanClientId": "<your-client-id>",
+                "fromProductType": "INTRADAY",
+                "exchangeSegment": "NSE_EQ",
+                "positionType": "LONG",
+                "securityId": "1333",
+                "tradingSymbol": "HDFC",
+                "convertQty": 10,
+                "toProductType": "CNC"
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConvertPositionRequest'
+      responses:
+        '202':
+          description: Conversion accepted
+
+  # ============== FUNDS ==============
+  /fundlimit:
+    get:
+      tags: [Funds]
+      summary: Get Fund Limits
+      operationId: getFundLimits
+      description: Retrieve available balance and fund limits.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            funds = dhan.get_fund_limits()
+            print(f"Available: {funds['availabelBalance']}")
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/fundlimit" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: Fund limit details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FundLimit'
+
+  /margincalculator:
+    post:
+      tags: [Funds]
+      summary: Calculate Margin
+      operationId: calculateMargin
+      description: Calculate margin required for a single order.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            margin = dhan.get_margin_calculator(
+                security_id="1333",
+                exchange_segment="NSE_EQ",
+                transaction_type="BUY",
+                quantity=10,
+                product_type="INTRADAY",
+                price=1500.00
+            )
+            print(margin)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/margincalculator" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "dhanClientId": "<your-client-id>",
+                "exchangeSegment": "NSE_EQ",
+                "transactionType": "BUY",
+                "quantity": 10,
+                "productType": "INTRADAY",
+                "securityId": "1333",
+                "price": 1500.00
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarginRequest'
+      responses:
+        '200':
+          description: Margin calculation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarginResponse'
+
+  /margincalculator/multi:
+    post:
+      tags: [Funds]
+      summary: Calculate Multi-Order Margin
+      operationId: calculateMultiMargin
+      description: Calculate combined margin for multiple orders with hedge benefits.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            # Calculate margin for multiple positions
+            scripts = [
+                {
+                    "securityId": "26009",
+                    "exchangeSegment": "NSE_FNO",
+                    "transactionType": "BUY",
+                    "quantity": 50,
+                    "productType": "INTRADAY",
+                    "price": 45000.00
+                },
+                {
+                    "securityId": "26010",
+                    "exchangeSegment": "NSE_FNO",
+                    "transactionType": "SELL",
+                    "quantity": 50,
+                    "productType": "INTRADAY",
+                    "price": 45500.00
+                }
+            ]
+            margin = dhan.get_multi_margin_calculator(scripts=scripts)
+            print(margin)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/margincalculator/multi" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "includePosition": false,
+                "includeOrders": false,
+                "scripts": [
+                  {
+                    "dhanClientId": "<your-client-id>",
+                    "exchangeSegment": "NSE_FNO",
+                    "transactionType": "BUY",
+                    "quantity": 50,
+                    "productType": "INTRADAY",
+                    "securityId": "26009",
+                    "price": 45000.00
+                  }
+                ]
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MultiMarginRequest'
+      responses:
+        '200':
+          description: Multi-order margin calculation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MultiMarginResponse'
+
+  # ============== MARKET QUOTE ==============
+  /marketfeed/ltp:
+    post:
+      tags: [Market Quote]
+      summary: Get LTP
+      operationId: getLTP
+      description: Get last traded price for multiple instruments.
+      security:
+        - accessToken: []
+          clientId: []
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            # Get LTP for multiple instruments
+            instruments = [("NSE_EQ", "1333"), ("NSE_EQ", "11536")]
+            ltp = dhan.get_ltp(instruments)
+            print(ltp)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/marketfeed/ltp \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: <your-access-token>' \
+              --header 'client-id: <your-client-id>' \
+              --data '{
+                "NSE_EQ": ["1333", "11536"],
+                "NSE_FNO": ["26009"]
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarketFeedRequest'
+      responses:
+        '200':
+          description: LTP data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LTPResponse'
+
+  /marketfeed/ohlc:
+    post:
+      tags: [Market Quote]
+      summary: Get OHLC
+      operationId: getOHLC
+      description: Get OHLC (Open, High, Low, Close) data for instruments.
+      security:
+        - accessToken: []
+          clientId: []
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            # Get OHLC for instruments
+            instruments = [("NSE_EQ", "1333")]
+            ohlc = dhan.get_ohlc(instruments)
+            print(ohlc)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/marketfeed/ohlc \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: <your-access-token>' \
+              --header 'client-id: <your-client-id>' \
+              --data '{
+                "NSE_EQ": ["1333"]
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarketFeedRequest'
+      responses:
+        '200':
+          description: OHLC data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OHLCResponse'
+
+  /marketfeed/quote:
+    post:
+      tags: [Market Quote]
+      summary: Get Full Quote
+      operationId: getQuote
+      description: Get full market quote including market depth (5 levels).
+      security:
+        - accessToken: []
+          clientId: []
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            # Get full quote with depth
+            quote = dhan.get_quote(
+                security_id="1333",
+                exchange_segment="NSE_EQ"
+            )
+            print(quote)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/marketfeed/quote \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: <your-access-token>' \
+              --header 'client-id: <your-client-id>' \
+              --data '{
+                "NSE_EQ": ["1333"]
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarketFeedRequest'
+      responses:
+        '200':
+          description: Full quote with depth
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteResponse'
+
+  # ============== HISTORICAL DATA ==============
+  /charts/historical:
+    post:
+      tags: [Historical Data]
+      summary: Get Daily Historical Data
+      operationId: getDailyHistorical
+      description: Get daily OHLC candle data for backtesting and analysis.
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+            from datetime import datetime, timedelta
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            data = dhan.get_historical_data(
+                security_id="1333",
+                exchange_segment="NSE_EQ",
+                instrument_type="EQUITY",
+                from_date=datetime.now() - timedelta(days=30),
+                to_date=datetime.now(),
+                interval="D"
+            )
+            print(data)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/charts/historical" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "securityId": "1333",
+                "exchangeSegment": "NSE_EQ",
+                "instrument": "EQUITY",
+                "fromDate": "2026-01-01",
+                "toDate": "2026-02-23"
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HistoricalRequest'
+      responses:
+        '200':
+          description: Historical OHLC data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoricalResponse'
+
+  /charts/intraday:
+    post:
+      tags: [Historical Data]
+      summary: Get Intraday Historical Data
+      operationId: getIntradayHistorical
+      description: Get intraday OHLC candle data (1, 5, 15, 25, 60 minute intervals).
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+            from datetime import datetime, timedelta
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            data = dhan.get_intraday_data(
+                security_id="1333",
+                exchange_segment="NSE_EQ",
+                instrument_type="EQUITY",
+                from_date=datetime.now() - timedelta(days=5),
+                to_date=datetime.now(),
+                interval="5"
+            )
+            print(data)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/charts/intraday" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "securityId": "1333",
+                "exchangeSegment": "NSE_EQ",
+                "instrument": "EQUITY",
+                "interval": 5,
+                "fromDate": "2026-02-18",
+                "toDate": "2026-02-23"
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IntradayHistoricalRequest'
+      responses:
+        '200':
+          description: Intraday OHLC data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoricalResponse'
+
+  # ============== OPTION CHAIN ==============
+  /optionchain:
+    post:
+      tags: [Option Chain]
+      summary: Get Option Chain
+      operationId: getOptionChain
+      description: Get option chain data with Greeks for an underlying.
+      security:
+        - accessToken: []
+          clientId: []
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            chain = dhan.get_option_chain(
+                underlying_security_id="26000",
+                underlying_type="INDEX",
+                expiry_date="2026-02-27"
+            )
+            print(chain)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/optionchain \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: <your-access-token>' \
+              --header 'client-id: <your-client-id>' \
+              --data '{
+                "UnderlyingScrip": 26000,
+                "UnderlyingSeg": "IDX_I",
+                "Expiry": "2026-02-27"
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OptionChainRequest'
+      responses:
+        '200':
+          description: Option chain data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OptionChainResponse'
+
+  /optionchain/expirylist:
+    post:
+      tags: [Option Chain]
+      summary: Get Expiry List
+      operationId: getExpiryList
+      description: Get available expiry dates for an underlying.
+      security:
+        - accessToken: []
+          clientId: []
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            from dhanhq import DhanContext, dhanhq
+
+            context = DhanContext("client_id", "access_token")
+            dhan = dhanhq(context)
+
+            expiries = dhan.get_expiry_list(
+                underlying_security_id="26000",
+                underlying_type="INDEX"
+            )
+            print(expiries)
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/optionchain/expirylist \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: <your-access-token>' \
+              --header 'client-id: <your-client-id>' \
+              --data '{
+                "UnderlyingScrip": 26000,
+                "UnderlyingSeg": "IDX_I"
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpiryListRequest'
+      responses:
+        '200':
+          description: List of expiry dates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: string
+                      format: date
+
+  # ============== MARKET ANALYTICS ==============
+  /data/technical:
+    post:
+      tags: [Market Analytics]
+      summary: Technical Data
+      operationId: fetchTechnicalData
+      description: Fetch technical indicator values for an instrument. Pass the indicators you need - only those are computed and returned. All values are point-in-time as of the latest closed candle for the requested timeframe.
+      security:
+        - accessToken: []
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            import requests
+
+            url = "https://api.dhan.co/v2/data/technical"
+            headers = {
+                "access-token": "your_access_token",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "securityId": "1333",
+                "exchangeSegment": "NSE_EQ",
+                "instrument": "EQUITY",
+                "timeframe": "D",
+                "indicators": ["SMA_20", "RSI_14", "MACD_HIST"],
+            }
+
+            response = requests.post(url, headers=headers, json=payload)
+            print(response.json())
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/data/technical \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: <your-access-token>' \
+              --data '{
+                "securityId": "1333",
+                "exchangeSegment": "NSE_EQ",
+                "instrument": "EQUITY",
+                "timeframe": "D",
+                "indicators": ["SMA_20", "RSI_14", "MACD_HIST"]
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TechnicalDataRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicalDataResponse'
+
+  /data/companyinfo:
+    post:
+      tags: [Market Analytics]
+      summary: Company Info
+      operationId: fetchFundamentalData
+      description: Fetch selected fundamental metrics for a single equity instrument. Pass the required metric groups and receive the latest available snapshot across company classification, industry benchmarks, shareholding, valuation, profitability, price performance, and book value.
+      security:
+        - accessToken: []
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            import requests
+
+            url = "https://api.dhan.co/v2/data/companyinfo"
+            headers = {
+                "access-token": "your_access_token",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "securityId": "1333",
+                "exchangeSegment": "NSE_EQ",
+                "instrument": "EQUITY",
+                "metrics": ["CO"],
+            }
+
+            response = requests.post(url, headers=headers, json=payload)
+            print(response.json())
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/data/companyinfo \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: <your-access-token>' \
+              --data '{
+                "securityId": "1333",
+                "exchangeSegment": "NSE_EQ",
+                "instrument": "EQUITY",
+                "metrics": ["CO"]
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FundamentalDataRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FundamentalDataResponse'
+
+  /data/marketmovers:
+    post:
+      tags: [Market Analytics]
+      summary: Market Movers
+      operationId: fetchMarketMovers
+      description: Fetch top options, futures, and stocks ranked by open interest, traded volume, or price movement. Select the instrument type(s) and ranking category to retrieve the highest-ranked instruments.
+      security:
+        - accessToken: []
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            import requests
+
+            url = "https://api.dhan.co/v2/data/marketmovers"
+            headers = {
+                "access-token": "your_access_token",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "exchangeSegment": "NSE_FNO",
+                "instrument": ["OPTIDX", "OPTSTK"],
+                "category": "HIGHEST_OI",
+                "expiry": "2026-07-28",
+                "limit": 20,
+            }
+
+            response = requests.post(url, headers=headers, json=payload)
+            print(response.json())
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/data/marketmovers \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: <your-access-token>' \
+              --data '{
+                "exchangeSegment": "NSE_FNO",
+                "instrument": ["OPTIDX", "OPTSTK"],
+                "category": "HIGHEST_OI",
+                "expiry": "2026-07-28",
+                "limit": 20
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarketMoversRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarketMoversResponse'
+
+  /data/newsheadline:
+    post:
+      tags: [Market Analytics]
+      summary: Live News Headline
+      operationId: fetchNewsHeadline
+      description: Fetch the latest news headlines as of now, filterable by category and stock, capped at limit (max 50) items.
+      security:
+        - accessToken: []
+      x-codeSamples:
+        - label: Python
+          lang: python
+          source: |-
+            import requests
+
+            url = "https://api.dhan.co/v2/data/newsheadline"
+            headers = {
+                "access-token": "your_access_token",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "dhanClientId": "1000000001",
+                "categories": ["ALL"],
+                "limit": 1,
+                "universe": "PORTFOLIO",
+                "stockList": [],
+            }
+
+            response = requests.post(url, headers=headers, json=payload)
+            print(response.json())
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/data/newsheadline \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: <your-access-token>' \
+              --data '{
+                "dhanClientId": "1000000001",
+                "categories": ["ALL"],
+                "limit": 1,
+                "universe": "PORTFOLIO",
+                "stockList": []
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewsHeadlineRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewsHeadlineResponse'
+
+  # ============== CONDITIONAL TRIGGER ==============
+  /alerts/orders:
+    post:
+      tags: [Conditional and Multi Order]
+      summary: Place Conditional Order
+      operationId: placeConditionalTrigger
+      description: Create a new conditional trigger with conditions (price or technical indicators) that, when met, place one or multiple orders automatically.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/alerts/orders" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "dhanClientId": "<your-client-id>",
+                "condition": {
+                  "comparisonType": "TECHNICAL_WITH_VALUE",
+                  "exchangeSegment": "NSE_EQ",
+                  "securityId": "1333",
+                  "operator": "GREATER_THAN",
+                  "comparingValue": 250,
+                  "expDate": "2026-12-31",
+                  "frequency": "ONCE"
+                },
+                "orders": [{
+                  "transactionType": "BUY",
+                  "exchangeSegment": "NSE_EQ",
+                  "productType": "CNC",
+                  "orderType": "LIMIT",
+                  "securityId": "1333",
+                  "quantity": 10,
+                  "validity": "DAY",
+                  "price": "250.00"
+                }]
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConditionalTriggerRequest'
+      responses:
+        '200':
+          description: Conditional trigger created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConditionalTriggerResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    get:
+      tags: [Conditional and Multi Order]
+      summary: Get All Conditional Orders
+      operationId: getAllConditionalTriggers
+      description: Retrieve all conditional triggers for the authenticated account.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/alerts/orders" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: List of conditional triggers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConditionalTriggerDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /alerts/multi/orders:
+    post:
+      tags: [Conditional and Multi Order]
+      summary: Place Multi Order
+      operationId: placeMultiOrder
+      description: Place a multi order directly without any conditions.
+      servers:
+        - url: https://api.dhan.co/v2
+          description: Production - Live trading environment
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl --request POST \
+              --url https://api.dhan.co/v2/alerts/multi/orders \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --header 'access-token: YOUR_TOKEN' \
+              --data '{
+                "dhanClientId": "string",
+                "orders": [
+                  {
+                    "sequence": "string",
+                    "correlationId": "string",
+                    "transactionType": "BUY",
+                    "exchangeSegment": "NSE_EQ",
+                    "productType": "CNC",
+                    "orderType": "LIMIT",
+                    "validity": "DAY",
+                    "securityId": "string",
+                    "quantity": 0,
+                    "afterMarketOrder": true,
+                    "amoTime": "OPEN",
+                    "price": 0,
+                    "triggerPrice": 0,
+                    "disclosedQuantity": 0
+                  }
+                ]
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceMultiOrderRequest'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceMultiOrderResponse'
+
+  /alerts/orders/{alertId}:
+    get:
+      tags: [Conditional and Multi Order]
+      summary: Get Conditional Order by ID
+      operationId: getConditionalTriggerById
+      description: Retrieve status and details for a specific conditional trigger.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/alerts/orders/12345" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: alertId
+          in: path
+          required: true
+          description: Unique identifier of the conditional trigger
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Conditional trigger details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConditionalTriggerDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    put:
+      tags: [Conditional and Multi Order]
+      summary: Modify Conditional Order
+      operationId: modifyConditionalTrigger
+      description: Modify a conditional trigger's conditions and/or associated orders.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X PUT "https://api.dhan.co/v2/alerts/orders/12345" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "dhanClientId": "<your-client-id>",
+                "condition": {
+                  "comparisonType": "TECHNICAL_WITH_VALUE",
+                  "exchangeSegment": "NSE_EQ",
+                  "securityId": "1333",
+                  "operator": "GREATER_THAN",
+                  "comparingValue": 260,
+                  "expDate": "2026-12-31",
+                  "frequency": "ONCE"
+                },
+                "orders": [{
+                  "transactionType": "BUY",
+                  "exchangeSegment": "NSE_EQ",
+                  "productType": "CNC",
+                  "orderType": "LIMIT",
+                  "securityId": "1333",
+                  "quantity": 10,
+                  "validity": "DAY",
+                  "price": "260.00"
+                }]
+              }'
+      parameters:
+        - name: alertId
+          in: path
+          required: true
+          description: Unique identifier of the conditional trigger
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConditionalTriggerRequest'
+      responses:
+        '200':
+          description: Conditional trigger modified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConditionalTriggerResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    delete:
+      tags: [Conditional and Multi Order]
+      summary: Delete Conditional Order
+      operationId: deleteConditionalTrigger
+      description: Delete an existing conditional trigger.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X DELETE "https://api.dhan.co/v2/alerts/orders/12345" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: alertId
+          in: path
+          required: true
+          description: Unique identifier of the conditional trigger
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Conditional trigger deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConditionalTriggerResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============== EDIS ==============
+  /edis/tpin:
+    get:
+      tags: [EDIS]
+      summary: Generate T-PIN
+      operationId: generateTpin
+      description: Request a T-PIN on your registered mobile number for eDIS authorization.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/edis/tpin" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '202':
+          description: Accepted — T-PIN sent to your registered mobile number. No response body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /edis/form:
+    post:
+      tags: [EDIS]
+      summary: Generate eDIS Form
+      operationId: generateEdisForm
+      description: Retrieve escaped HTML form from CDSL to enter T-PIN and approve stock for selling.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/edis/form" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "isin": "INE733E01010",
+                "qty": 1,
+                "exchange": "NSE",
+                "segment": "EQ",
+                "bulk": false
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EdisFormRequest'
+      responses:
+        '200':
+          description: eDIS form HTML returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdisFormResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /edis/inquire/{isin}:
+    get:
+      tags: [EDIS]
+      summary: EDIS Status Inquiry
+      operationId: edisInquiry
+      description: Check eDIS approval status for a stock by ISIN. Pass `ALL` to check all holdings.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/edis/inquire/INE733E01010" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: isin
+          in: path
+          required: true
+          description: ISIN of the stock (12-digit alphanumeric) or `ALL` for all holdings
+          schema:
+            type: string
+      responses:
+        '200':
+          description: eDIS status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EdisInquiryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============== TRADER'S CONTROL ==============
+  /killswitch:
+    post:
+      tags: ["Trader's Control"]
+      summary: Manage Kill Switch
+      operationId: manageKillSwitch
+      description: Activate or deactivate the kill switch for your account. Disables trading for the current day.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/killswitch?killSwitchStatus=ACTIVATE" \
+              -H "Accept: application/json" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: killSwitchStatus
+          in: query
+          required: true
+          description: Kill Switch action
+          schema:
+            type: string
+            enum: [ACTIVATE, DEACTIVATE]
+      responses:
+        '200':
+          description: Kill switch status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KillSwitchResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    get:
+      tags: ["Trader's Control"]
+      summary: Kill Switch Status
+      operationId: getKillSwitchStatus
+      description: Check whether kill switch is active for the current trading day.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/killswitch" \
+              -H "Accept: application/json" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: Current kill switch status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KillSwitchResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /pnlExit:
+    post:
+      tags: ["Trader's Control"]
+      summary: Configure P&L Based Exit
+      operationId: configurePnlExit
+      description: Configure automatic exit rules based on cumulative profit or loss thresholds.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/pnlExit" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "profitValue": "1500.00",
+                "lossValue": "500.00",
+                "productType": ["INTRADAY", "DELIVERY"],
+                "enableKillSwitch": true
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PnlExitRequest'
+      responses:
+        '200':
+          description: P&L exit configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PnlExitResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    delete:
+      tags: ["Trader's Control"]
+      summary: Stop P&L Based Exit
+      operationId: stopPnlExit
+      description: Disable the active P&L based exit configuration.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X DELETE "https://api.dhan.co/v2/pnlExit" \
+              -H "Accept: application/json" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: P&L exit stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PnlExitResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    get:
+      tags: ["Trader's Control"]
+      summary: Get P&L Based Exit
+      operationId: getPnlExit
+      description: Fetch the currently active P&L based exit configuration.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/pnlExit" \
+              -H "Accept: application/json" \
+              -H "access-token: YOUR_TOKEN"
+      responses:
+        '200':
+          description: Current P&L exit config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PnlExitDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============== STATEMENT ==============
+  /ledger:
+    get:
+      tags: [Statement]
+      summary: Ledger Report
+      operationId: getLedgerReport
+      description: Retrieve Trading Account Ledger Report with all credit and debit transaction details.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/ledger?from-date=2024-01-01&to-date=2024-01-31" \
+              -H "Accept: application/json" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: from-date
+          in: query
+          required: true
+          description: Start date in YYYY-MM-DD format
+          schema:
+            type: string
+            format: date
+        - name: to-date
+          in: query
+          required: true
+          description: End date in YYYY-MM-DD format
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Ledger entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LedgerEntry'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /trades/{fromDate}/{toDate}/{page}:
+    get:
+      tags: [Statement]
+      summary: Trade History
+      operationId: getTradeHistory
+      description: Retrieve detailed trade history for all orders for a given time frame. Response is paginated.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X GET "https://api.dhan.co/v2/trades/2024-01-01/2024-01-31/0" \
+              -H "Accept: application/json" \
+              -H "access-token: YOUR_TOKEN"
+      parameters:
+        - name: fromDate
+          in: path
+          required: true
+          description: Start date in YYYY-MM-DD format
+          schema:
+            type: string
+            format: date
+        - name: toDate
+          in: path
+          required: true
+          description: End date in YYYY-MM-DD format
+          schema:
+            type: string
+            format: date
+        - name: page
+          in: path
+          required: true
+          description: Page number (pass 0 as default)
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Paginated trade history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TradeHistoryEntry'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============== EXPIRED OPTIONS DATA ==============
+  /charts/rollingoption:
+    post:
+      tags: [Expired Options Data]
+      summary: Historical Rolling Options Data
+      operationId: getExpiredOptionsData
+      description: Fetch expired options contract data on a rolling basis with OHLC, IV, OI and spot information. Up to 30 days per call. Last 5 years available.
+      x-codeSamples:
+        - label: cURL
+          lang: bash
+          source: |-
+            curl -X POST "https://api.dhan.co/v2/charts/rollingoption" \
+              -H "Content-Type: application/json" \
+              -H "access-token: YOUR_TOKEN" \
+              -d '{
+                "exchangeSegment": "NSE_FNO",
+                "interval": "1",
+                "securityId": 13,
+                "instrument": "OPTIDX",
+                "expiryFlag": "MONTH",
+                "expiryCode": 1,
+                "strike": "ATM",
+                "drvOptionType": "CALL",
+                "requiredData": ["open", "high", "low", "close", "volume"],
+                "fromDate": "2024-01-01",
+                "toDate": "2024-01-31"
+              }'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpiredOptionsRequest'
+      responses:
+        '200':
+          description: Expired options data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpiredOptionsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============== GLOBAL STOCKS ==============
+  /globalstocks/orders:
+    get:
+      tags: [Global Stocks]
+      summary: Get Order Book
+      operationId: getGlobalStockOrders
+      description: Retrieve the current trading day's US stock order book for the authenticated user.
+      responses:
+        '200':
+          description: List of orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GlobalStockOrder'
+
+    post:
+      tags: [Global Stocks]
+      summary: Place Order
+      operationId: placeGlobalStockOrder
+      description: Place a buy or sell order for a US stock using the selected order type, quantity, and price details.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceGlobalStockOrderRequest'
+      responses:
+        '200':
+          description: order placed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalStockOrderResponse'
+
+  /globalstocks/orders/{order-id}:
+    get:
+      tags: [Global Stocks]
+      summary: Get Order by Order ID
+      operationId: getGlobalStockOrderById
+      description: Retrieve the latest order details and status for a specific US stock order using its order ID.
+      parameters:
+        - name: order-id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: order details
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GlobalStockOrder'
+
+    put:
+      tags: [Global Stocks]
+      summary: Modify Order
+      operationId: modifyGlobalStockOrder
+      description: Modify an existing pending US stock order by submitting updated order details for the given order ID.
+      parameters:
+        - name: order-id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModifyGlobalStockOrderRequest'
+      responses:
+        '200':
+          description: order modified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalStockOrderResponse'
+
+    delete:
+      tags: [Global Stocks]
+      summary: Cancel Order
+      operationId: cancelGlobalStockOrder
+      description: Cancel an existing pending US stock order using its order ID.
+      parameters:
+        - name: order-id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: order cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalStockOrderResponse'
+
+  /globalstocks/transEstimate:
+    post:
+      tags: [Global Stocks]
+      summary: Order Estimator
+      operationId: globalStockTransEstimate
+      description: Estimate the applicable charges for a US stock order before submitting it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GlobalStockTransEstimateRequest'
+      responses:
+        '200':
+          description: Transaction estimate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalStockOrderEstimate'
+
+  /globalstocks/margincalculator:
+    post:
+      tags: [Global Stocks]
+      summary: Margin Calculator
+      operationId: globalStockMarginCalculator
+      description: Calculate the margin required for a US stock order before submitting it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GlobalStockMarginCalculatorRequest'
+      responses:
+        '200':
+          description: Margin calculation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalStockMarginCalculation'
+
+  /globalstocks/trades:
+    get:
+      tags: [Global Stocks]
+      summary: Get Past Trades
+      operationId: getGlobalStockTrades
+      description: Retrieve the current trading day's executed US stock trades for the authenticated user.
+      responses:
+        '200':
+          description: List of trades
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GlobalStockTrade'
+
+  /globalstocks/trades/{security-id}:
+    get:
+      tags: [Global Stocks]
+      summary: Get Past Trades by Security Id
+      operationId: getGlobalStockTradesByScrip
+      description: Retrieve executed US stock trades for the authenticated user filtered by a specific security ID.
+      parameters:
+        - name: security-id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: trades for security
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GlobalStockTrade'
+
+  /globalstocks/marketstatus:
+    get:
+      tags: [Global Stocks]
+      summary: Get Market Status
+      operationId: getGlobalStockMarketStatus
+      description: Retrieve the current trading status and session timing for the US stock market.
+      responses:
+        '200':
+          description: market status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalStockMarketStatus'
+
+  /globalstocks/holdings:
+    get:
+      tags: [Global Stocks]
+      summary: Get Holdings
+      operationId: getGlobalStockHoldings
+      description: Retrieve the authenticated user's current US stock holdings and holding-level details.
+      responses:
+        '200':
+          description: List of holdings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GlobalStockHolding'
+
+  /globalstocks/fundlimit:
+    get:
+      tags: [Global Stocks]
+      summary: Get Fund Limit
+      operationId: getGlobalStockFundLimit
+      description: Retrieve the authenticated user's fund limit details for US stock trading.
+      responses:
+        '200':
+          description: fund limit details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalStockFundLimit'
+
+components:
+  securitySchemes:
+    accessToken:
+      type: apiKey
+      in: header
+      name: access-token
+    clientId:
+      type: apiKey
+      in: header
+      name: client-id
+
+  schemas:
+    # ===== ORDER SCHEMAS =====
+    PlaceOrderRequest:
+      type: object
+      required:
+        - dhanClientId
+        - transactionType
+        - exchangeSegment
+        - productType
+        - orderType
+        - validity
+        - quantity
+      properties:
+        dhanClientId:
+          type: string
+          description: User identification
+        correlationId:
+          type: string
+          maxLength: 30
+          description: Custom tracking ID (alphanumeric, spaces, hyphens, underscores)
+        transactionType:
+          type: string
+          enum: [BUY, SELL]
+        exchangeSegment:
+          type: string
+          enum: [NSE_EQ, NSE_FNO, BSE_EQ, BSE_FNO, MCX_COMM]
+        productType:
+          type: string
+          enum: [CNC, INTRADAY, MARGIN, MTF]
+        orderType:
+          type: string
+          enum: [LIMIT, MARKET, STOP_LOSS, STOP_LOSS_MARKET]
+        validity:
+          type: string
+          enum: [DAY, IOC]
+        securityId:
+          type: string
+          description: Exchange standard instrument ID
+        quantity:
+          type: integer
+        disclosedQuantity:
+          type: integer
+          description: Visible quantity (must be >30% of total)
+        price:
+          type: number
+          format: double
+        triggerPrice:
+          type: number
+          format: double
+        afterMarketOrder:
+          type: boolean
+        amoTime:
+          type: string
+          enum: [PRE_OPEN, OPEN, OPEN_30, OPEN_60]
+        algoId:
+          type: string
+          description: Algo ID
+
+    ModifyOrderRequest:
+      type: object
+      required:
+        - dhanClientId
+        - orderId
+        - orderType
+        - validity
+      properties:
+        dhanClientId:
+          type: string
+        orderId:
+          type: string
+        orderType:
+          type: string
+          enum: [LIMIT, MARKET, STOP_LOSS, STOP_LOSS_MARKET]
+        quantity:
+          type: integer
+        price:
+          type: number
+          format: double
+        disclosedQuantity:
+          type: integer
+        triggerPrice:
+          type: number
+          format: double
+        validity:
+          type: string
+          enum: [DAY, IOC]
+        legName:
+          type: string
+          enum: [ENTRY_LEG, STOP_LOSS_LEG, TARGET_LEG, NA]
+
+    OrderResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+        orderStatus:
+          type: string
+          enum: [TRANSIT, PENDING, REJECTED, CANCELLED, TRADED, EXPIRED]
+
+    Order:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        orderId:
+          type: string
+        correlationId:
+          type: string
+        orderStatus:
+          type: string
+          enum: [TRANSIT, PENDING, REJECTED, CANCELLED, PART_TRADED, TRADED, EXPIRED]
+        transactionType:
+          type: string
+          enum: [BUY, SELL]
+        exchangeSegment:
+          type: string
+        productType:
+          type: string
+        orderType:
+          type: string
+        validity:
+          type: string
+        tradingSymbol:
+          type: string
+        securityId:
+          type: string
+        quantity:
+          type: integer
+        disclosedQuantity:
+          type: integer
+        price:
+          type: number
+        triggerPrice:
+          type: number
+        afterMarketOrder:
+          type: boolean
+        legName:
+          type: string
+        createTime:
+          type: string
+        updateTime:
+          type: string
+        exchangeTime:
+          type: string
+        drvExpiryDate:
+          type: string
+        drvOptionType:
+          type: string
+          enum: [CALL, PUT]
+        drvStrikePrice:
+          type: number
+        omsErrorCode:
+          type: string
+        omsErrorDescription:
+          type: string
+        remainingQuantity:
+          type: integer
+        averageTradedPrice:
+          type: number
+        filledQty:
+          type: integer
+
+    Trade:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        orderId:
+          type: string
+        exchangeOrderId:
+          type: string
+        exchangeTradeId:
+          type: string
+        transactionType:
+          type: string
+        exchangeSegment:
+          type: string
+        productType:
+          type: string
+        orderType:
+          type: string
+        tradingSymbol:
+          type: string
+        customSymbol:
+          type: string
+          description: Custom trading symbol
+        securityId:
+          type: string
+        tradedQuantity:
+          type: integer
+        tradedPrice:
+          type: number
+        createTime:
+          type: string
+        updateTime:
+          type: string
+        exchangeTime:
+          type: string
+
+    # ===== SUPER ORDER SCHEMAS =====
+    SuperOrderRequest:
+      type: object
+      required:
+        - dhanClientId
+        - transactionType
+        - exchangeSegment
+        - productType
+        - orderType
+        - securityId
+        - quantity
+        - price
+        - targetPrice
+        - stopLossPrice
+        - trailingJump
+      properties:
+        dhanClientId:
+          type: string
+        correlationId:
+          type: string
+        transactionType:
+          type: string
+          enum: [BUY, SELL]
+        exchangeSegment:
+          type: string
+        productType:
+          type: string
+          enum: [CNC, INTRADAY, MARGIN, MTF]
+        orderType:
+          type: string
+          enum: [LIMIT, MARKET]
+        securityId:
+          type: string
+        quantity:
+          type: integer
+        price:
+          type: number
+        targetPrice:
+          type: number
+        stopLossPrice:
+          type: number
+        trailingJump:
+          type: number
+
+    ModifySuperOrderRequest:
+      type: object
+      required:
+        - dhanClientId
+        - orderId
+        - legName
+      properties:
+        dhanClientId:
+          type: string
+        orderId:
+          type: string
+        legName:
+          type: string
+          enum: [ENTRY_LEG, TARGET_LEG, STOP_LOSS_LEG]
+        orderType:
+          type: string
+        quantity:
+          type: integer
+        price:
+          type: number
+        targetPrice:
+          type: number
+        stopLossPrice:
+          type: number
+        trailingJump:
+          type: number
+
+    SuperOrder:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        algoId:
+          type: string
+          description: Algo ID
+        orderId:
+          type: string
+        correlationId:
+          type: string
+        orderStatus:
+          type: string
+          enum: [TRANSIT, PENDING, CLOSED, REJECTED, CANCELLED, PART_TRADED, TRADED, EXPIRED]
+        transactionType:
+          type: string
+        exchangeSegment:
+          type: string
+        productType:
+          type: string
+        orderType:
+          type: string
+        validity:
+          type: string
+          enum: [DAY, IOC]
+        tradingSymbol:
+          type: string
+        securityId:
+          type: string
+        quantity:
+          type: integer
+        remainingQuantity:
+          type: integer
+        ltp:
+          type: number
+        price:
+          type: number
+        legName:
+          type: string
+          enum: [ENTRY_LEG]
+        trailingJump:
+          type: number
+        exchangeOrderId:
+          type: string
+        createTime:
+          type: string
+        updateTime:
+          type: string
+        averageTradedPrice:
+          type: number
+        filledQty:
+          type: integer
+        legDetails:
+          type: array
+          items:
+            type: object
+            properties:
+              legName:
+                type: string
+                enum: [TARGET_LEG, STOP_LOSS_LEG]
+              orderStatus:
+                type: string
+                enum: [TRANSIT, PENDING, CLOSED, REJECTED, CANCELLED, PART_TRADED, TRADED, EXPIRED]
+              orderType:
+                type: string
+              quantity:
+                type: integer
+              remainingQuantity:
+                type: integer
+              price:
+                type: number
+              triggerPrice:
+                type: number
+              exchangeOrderId:
+                type: string
+
+    # ===== PORTFOLIO SCHEMAS =====
+    Holding:
+      type: object
+      properties:
+        exchange:
+          type: string
+        tradingSymbol:
+          type: string
+        securityId:
+          type: string
+        isin:
+          type: string
+        totalQty:
+          type: integer
+        dpQty:
+          type: integer
+        t1Qty:
+          type: integer
+        availableQty:
+          type: integer
+        collateralQty:
+          type: integer
+        avgCostPrice:
+          type: number
+
+    Position:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        tradingSymbol:
+          type: string
+        securityId:
+          type: string
+        positionType:
+          type: string
+          enum: [LONG, SHORT, CLOSED]
+        exchangeSegment:
+          type: string
+        productType:
+          type: string
+        buyAvg:
+          type: number
+        buyQty:
+          type: integer
+        costPrice:
+          type: number
+        sellAvg:
+          type: number
+        sellQty:
+          type: integer
+        netQty:
+          type: integer
+        realizedProfit:
+          type: number
+        unrealizedProfit:
+          type: number
+        dayBuyQty:
+          type: integer
+        daySellQty:
+          type: integer
+
+    ConvertPositionRequest:
+      type: object
+      required:
+        - dhanClientId
+        - fromProductType
+        - exchangeSegment
+        - positionType
+        - securityId
+        - tradingSymbol
+        - convertQty
+        - toProductType
+      properties:
+        dhanClientId:
+          type: string
+        fromProductType:
+          type: string
+          enum: [CNC, INTRADAY, MARGIN]
+        exchangeSegment:
+          type: string
+        positionType:
+          type: string
+          enum: [LONG, SHORT, CLOSED]
+        securityId:
+          type: string
+        tradingSymbol:
+          type: string
+        convertQty:
+          type: integer
+        toProductType:
+          type: string
+
+    # ===== FUNDS SCHEMAS =====
+    FundLimit:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        availabelBalance:
+          type: number
+        sodLimit:
+          type: number
+        collateralAmount:
+          type: number
+        receiveableAmount:
+          type: number
+        utilizedAmount:
+          type: number
+        blockedPayoutAmount:
+          type: number
+        withdrawableBalance:
+          type: number
+
+    MarginRequest:
+      type: object
+      required:
+        - dhanClientId
+        - exchangeSegment
+        - transactionType
+        - quantity
+        - productType
+        - securityId
+        - price
+      properties:
+        dhanClientId:
+          type: string
+        exchangeSegment:
+          type: string
+        transactionType:
+          type: string
+          enum: [BUY, SELL]
+        quantity:
+          type: integer
+        productType:
+          type: string
+        securityId:
+          type: string
+        price:
+          type: number
+        triggerPrice:
+          type: number
+
+    MarginResponse:
+      type: object
+      properties:
+        totalMargin:
+          type: number
+        spanMargin:
+          type: number
+        exposureMargin:
+          type: number
+        availableBalance:
+          type: number
+        variableMargin:
+          type: number
+        insufficientBalance:
+          type: number
+        brokerage:
+          type: number
+        leverage:
+          type: string
+
+    MultiMarginRequest:
+      type: object
+      properties:
+        includePosition:
+          type: boolean
+        includeOrders:
+          type: boolean
+        scripts:
+          type: array
+          items:
+            $ref: '#/components/schemas/MarginRequest'
+
+    MultiMarginResponse:
+      type: object
+      properties:
+        total_margin:
+          type: string
+        span_margin:
+          type: string
+        exposure_margin:
+          type: string
+        equity_margin:
+          type: string
+        fo_margin:
+          type: string
+        commodity_margin:
+          type: string
+        currency:
+          type: string
+        hedge_benefit:
+          type: string
+
+    # ===== MARKET DATA SCHEMAS =====
+    MarketFeedRequest:
+      type: object
+      properties:
+        NSE_EQ:
+          type: array
+          items:
+            type: integer
+          example: [11536]
+        NSE_FNO:
+          type: array
+          items:
+            type: integer
+          example: [49081, 49082]
+        BSE_EQ:
+          type: array
+          items:
+            type: integer
+          example: [532540]
+
+    LTPResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        data:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              last_price:
+                type: number
+
+    OHLCResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        data:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              last_price:
+                type: number
+              ohlc:
+                type: object
+                properties:
+                  open:
+                    type: number
+                  high:
+                    type: number
+                  low:
+                    type: number
+                  close:
+                    type: number
+
+    QuoteResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        data:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              average_price:
+                type: number
+              buy_quantity:
+                type: integer
+              sell_quantity:
+                type: integer
+              last_price:
+                type: number
+              last_quantity:
+                type: integer
+              last_trade_time:
+                type: string
+              lower_circuit_limit:
+                type: number
+              upper_circuit_limit:
+                type: number
+              net_change:
+                type: number
+              volume:
+                type: integer
+              oi:
+                type: integer
+              depth:
+                type: object
+                properties:
+                  buy:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        quantity:
+                          type: integer
+                        price:
+                          type: number
+                        orders:
+                          type: integer
+                  sell:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        quantity:
+                          type: integer
+                        price:
+                          type: number
+                        orders:
+                          type: integer
+
+    # ===== HISTORICAL DATA SCHEMAS =====
+    HistoricalRequest:
+      type: object
+      required:
+        - securityId
+        - exchangeSegment
+        - instrument
+        - fromDate
+        - toDate
+      properties:
+        securityId:
+          type: string
+        exchangeSegment:
+          type: string
+        instrument:
+          type: string
+          enum: [EQUITY, INDEX, FUTIDX, FUTSTK, OPTIDX, OPTSTK]
+        expiryCode:
+          type: integer
+        oi:
+          type: boolean
+        fromDate:
+          type: string
+          format: date
+        toDate:
+          type: string
+          format: date
+
+    IntradayHistoricalRequest:
+      type: object
+      required:
+        - securityId
+        - exchangeSegment
+        - instrument
+        - interval
+        - fromDate
+        - toDate
+      properties:
+        securityId:
+          type: string
+        exchangeSegment:
+          type: string
+        instrument:
+          type: string
+        interval:
+          type: integer
+          enum: [1, 5, 15, 25, 60]
+        oi:
+          type: boolean
+        fromDate:
+          type: string
+          format: date
+        toDate:
+          type: string
+          format: date
+
+    HistoricalResponse:
+      type: object
+      properties:
+        open:
+          type: array
+          items:
+            type: number
+        high:
+          type: array
+          items:
+            type: number
+        low:
+          type: array
+          items:
+            type: number
+        close:
+          type: array
+          items:
+            type: number
+        volume:
+          type: array
+          items:
+            type: integer
+        timestamp:
+          type: array
+          items:
+            type: integer
+        open_interest:
+          type: array
+          items:
+            type: integer
+
+    # ===== OPTION CHAIN SCHEMAS =====
+    OptionChainRequest:
+      type: object
+      required:
+        - UnderlyingScrip
+      properties:
+        UnderlyingScrip:
+          type: integer
+        UnderlyingSeg:
+          type: string
+        Expiry:
+          type: string
+          format: date
+
+    ExpiryListRequest:
+      type: object
+      required:
+        - UnderlyingScrip
+      properties:
+        UnderlyingScrip:
+          type: integer
+        UnderlyingSeg:
+          type: string
+
+    TechnicalDataRequest:
+      type: object
+      required:
+        - securityId
+        - exchangeSegment
+        - instrument
+        - timeframe
+        - indicators
+      properties:
+        securityId:
+          type: string
+          description: 'Exchange standard ID for each security. For eg. "1333"'
+        exchangeSegment:
+          type: string
+          description: Exchange segment of the instrument (see Annexure)
+          enum:
+            - NSE_EQ
+            - IDX_I
+        instrument:
+          type: string
+          description: Valid Instrument types INDEX and EQUITY
+          enum:
+            - INDEX
+            - EQUITY
+        timeframe:
+          type: string
+          description: Candle size used to compute all indicators in this request (see Annexure)
+          enum:
+            - '1'
+            - '5'
+            - '15'
+            - D
+        indicators:
+          type: array
+          description: 'Indicator identifiers to fetch. Only those passed here are computed and returned. For eg. [ "SMA_20", "RSI_14", "MACD_HIST" ] (see Annexure)'
+          items:
+            type: string
+            enum:
+              - SMA_5
+              - SMA_10
+              - SMA_20
+              - SMA_50
+              - SMA_100
+              - SMA_200
+              - EMA_5
+              - EMA_10
+              - EMA_20
+              - EMA_50
+              - EMA_100
+              - EMA_200
+              - RSI_14
+              - MACD_HIST
+              - STOCH
+              - STOCHRSI_14
+              - ATR_14
+              - ADX_14
+              - UO
+              - ROC
+              - WILLR
+              - PIVOT_CLASSIC
+              - PIVOT_FIBONACCI
+              - PIVOT_CAMARILLA
+
+    MarketMoversRequest:
+      type: object
+      required:
+        - exchangeSegment
+        - instrument
+        - category
+      properties:
+        exchangeSegment:
+          type: string
+          description: Exchange segment of the instruments to rank (see Annexure)
+          enum:
+            - NSE_FNO
+            - BSE_FNO
+            - NSE_COMM
+            - MCX_COMM
+            - NSE_EQ
+            - BSE_EQ
+        instrument:
+          type: array
+          minItems: 1
+          description: Instrument types for which data is to be fetched (see Annexure)
+          items:
+            type: string
+            enum:
+              - OPTIDX
+              - OPTSTK
+              - OPTFUT
+              - FUTIDX
+              - FUTSTK
+              - FUTCOM
+              - EQUITY
+        category:
+          type: string
+          description: Ranking category to apply. Supported categories depend on the selected instrument (see Annexure)
+          enum:
+            - HIGHEST_OI
+            - OI_GAINERS
+            - OI_LOSERS
+            - TOP_VOLUME
+            - PRICE_GAINERS
+            - PRICE_LOSERS
+        expiry:
+          type: string
+          description: 'Expiry date of the derivative contracts in YYYY-MM-DD format. Required when instrument is an option or future contract. Optional and ignored when instrument is EQUITY. For eg. "2026-07-28"'
+        universe:
+          type: string
+          description: Stock universe within which instruments are ranked, Applicable only when instrument is EQUITY
+          enum:
+            - ALL
+            - FNO_STOCKS
+            - NIFTY_50
+            - NIFTY_BANK
+            - FINNIFTY
+            - INDIA_VIX
+            - NIFTY_MIDCAP
+            - NIFTY_NEXT_50
+            - NIFTY_SMALLCAP_50
+            - NIFTY_MIDCAP_50
+            - NIFTY_100
+            - NIFTY_200
+            - NIFTY_500
+            - NIFTY_MIDCAP_100
+            - NIFTY_MIDCAP_150
+            - NIFTY_SMALLCAP_100
+            - NIFTY_SMALLCAP_250
+            - NIFTY_MICROCAP_250
+            - NIFTY_AUTO
+            - NIFTY_PRIVATE_BANK
+            - NIFTY_FMCG
+            - NIFTY_ENERGY
+            - NIFTY_INFRA
+            - NIFTY_IT
+            - NIFTY_MEDIA
+            - NIFTY_METAL
+            - NIFTY_MNC
+            - NIFTY_PHARMA
+            - NIFTY_PSU_BANK
+            - NIFTY_REALTY
+            - NIFTY_SERVICES_SECTOR
+            - NIFTY_CONSUMPTION
+            - GIFT_NIFTY
+            - SENSEX
+            - BSE_100
+            - BSE_200
+            - BSE_500
+            - BSE_150_MIDCAP
+            - BSE_250_SMALLCAP
+            - BSE_250_LARGEMID
+            - BSE_400_MIDSMALL
+            - BSE_BANKEX
+            - BSE_AUTO
+            - BSE_CAPITAL_GOODS
+            - BSE_CONSUMER_DURABLES
+            - BSE_ENERGY
+            - BSE_FINANCE
+            - BSE_FMCG
+            - BSE_HEALTHCARE
+            - BSE_INDIA_MFG
+            - BSE_INDUSTRIALS
+            - BSE_IPO
+            - BSE_IT
+            - BSE_METALS
+            - BSE_OIL_AND_GAS
+            - BSE_POWER
+            - BSE_PSU
+            - BSE_TELECOM
+        limit:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+          description: 'Maximum number of instruments to return. Maximum allowed value is 100. For eg. "20"'
+
+    MarketMoversResponse:
+      type: object
+      properties:
+        exchangeSegment:
+          type: string
+          description: Exchange segment for which the instruments were fetched.
+        category:
+          type: string
+          description: Ranking category applied to the result.
+        data:
+          type: array
+          description: List of instruments ranked according to the selected category.
+          items:
+            type: object
+            properties:
+              securityId:
+                type: string
+                description: Exchange-standard security ID of the instrument.
+              exchangeSegment:
+                type: string
+                description: Exchange and segment of the instrument.
+              tradingSymbol:
+                type: string
+                description: Exchange trading symbol of the instrument.
+              displayName:
+                type: string
+                description: Human-readable name of the instrument.
+              instrument:
+                type: string
+                description: Instrument type of the security.
+              expiry:
+                type: string
+                description: Expiry date in YYYY-MM-DD format. Returns null for stocks.
+              strikePrice:
+                type: number
+                format: double
+                description: Strike price of the option contract. Returns null for futures and stocks.
+              tickSize:
+                type: number
+                format: double
+                description: Minimum permitted price movement of the instrument.
+              lotSize:
+                type: integer
+                format: int32
+                description: Number of units in one market lot.
+              ltp:
+                type: number
+                format: double
+                description: Last traded price of the instrument.
+              change:
+                type: number
+                format: double
+                description: Absolute price change from the previous close.
+              changePercent:
+                type: number
+                format: double
+                description: Percentage price change from the previous close.
+              volume:
+                type: integer
+                format: int64
+                description: Total traded volume during the current session.
+              tradedValue:
+                type: number
+                format: double
+                description: Total traded value during the current session.
+              underlyingSecurityId:
+                type: string
+                description: Security ID of the underlying instrument. Applicable to derivatives.
+              underlyingLtp:
+                type: number
+                format: double
+                description: Last traded price of the underlying instrument. Applicable to derivatives.
+              premiumDiscount:
+                type: number
+                format: double
+                description: Difference between futures LTP and underlying LTP. Returns null for options and stocks.
+              premiumDiscountPercent:
+                type: number
+                format: double
+                description: Futures premium or discount as a percentage of the underlying LTP. Returns null for options and stocks.
+              openInterest:
+                type: integer
+                format: int64
+                description: Current outstanding open interest of the derivative contract. Returns null for stocks.
+              openInterestChange:
+                type: integer
+                format: int64
+                description: Absolute change in open interest from the previous trading session. Returns null for stocks.
+              openInterestChangePercent:
+                type: number
+                format: double
+                description: Percentage change in open interest from the previous trading session. Returns null for stocks.
+              putCallRatio:
+                type: number
+                format: double
+                description: Put-call ratio for the applicable option universe. Returns null for futures and stocks.
+
+    NewsHeadlineRequest:
+      type: object
+      required:
+        - dhanClientId
+        - categories
+        - limit
+      properties:
+        dhanClientId:
+          type: string
+          description: User specific identification generated by Dhan
+        categories:
+          type: array
+          minItems: 1
+          description: News category filter, (see Annexure) for valid enums.
+          example:
+            - ALL
+          items:
+            type: string
+            enum:
+              - ALL
+              - COMPANIES
+              - EQUITY_MARKETS
+              - DEBT_MARKETS
+              - IPO
+              - GLOBAL
+              - INDIAN_ECONOMY
+              - GLOBAL_ECONOMY
+              - CURRENCY
+              - COMMODITIES
+              - CRYPTOCURRENCIES
+              - GOVERNMENT_POLICY_AND_REGULATION
+              - INFRASTRUCTURE
+              - INTERNATIONAL_TRADE
+              - INVESTMENT_IDEAS
+              - REAL_ESTATE
+              - STARTUPS
+              - TECHNOLOGY
+              - MUTUAL_FUNDS
+        limit:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 50
+          example: 1
+          description: 'Max number of news items to return, counted from the current date/time backwards. Allowed range is 1 to 50. For eg. 50'
+        universe:
+          type: string
+          description: Scopes the news to the caller's portfolio or watchlist. Optional - omit for no scoping (must be a string, not null, not empty).
+          enum:
+            - PORTFOLIO
+            - WATCHLIST
+        stockList:
+          type: array
+          description: Security IDs to filter news by specific stocks.
+          example: []
+          items:
+            type: string
+
+    NewsHeadlineResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          description: Container object. latestNews/nextNews hold the returned news items, filtered by category/stock and paginated per the request.
+          properties:
+            latestNews:
+              type: array
+              description: List of latest news items matching the request filters. Empty when the vendor has no items for this bucket (e.g. narrow date/time filters where matches only fall under nextNews).
+              items:
+                type: object
+                properties:
+                  newsObject:
+                    type: object
+                    description: Article headline, sentiment, and full text.
+                    properties:
+                      overallSentiment:
+                        type: string
+                        description: Sentiment of the article.
+                        enum:
+                          - positive
+                          - negative
+                          - neutral
+                      title:
+                        type: string
+                        description: Article headline.
+                      text:
+                        type: string
+                        description: Full article body/summary.
+                  category:
+                    type: string
+                    description: Top-level news category.
+                  subCategory:
+                    type: string
+                    description: News sub-category.
+                  publishDate:
+                    type: string
+                    description: Article publish date, in YYYY-MM-DD format.
+                  stockName:
+                    type: string
+                    description: Full company name.
+                  isinCode:
+                    type: string
+                    description: ISIN of the security.
+                  smSymbol:
+                    type: string
+                    description: Short market symbol.
+                  nseScripCode:
+                    type: integer
+                    format: int32
+                    description: NSE scrip code.
+                  bseScripCode:
+                    type: integer
+                    format: int32
+                    description: BSE scrip code.
+                  displaySymbol:
+                    type: string
+                    description: Human-readable display name.
+                  tickSize:
+                    type: number
+                    format: double
+                    description: Minimum price movement.
+                  lotSize:
+                    type: integer
+                    format: int32
+                    description: Units per market lot.
+
+    FundamentalDataRequest:
+      type: object
+      required:
+        - securityId
+        - exchangeSegment
+        - instrument
+        - metrics
+      properties:
+        securityId:
+          type: string
+          description: 'Exchange standard ID for each security. For eg. "1333"'
+        exchangeSegment:
+          type: string
+          description: Exchange segment of the instrument NSE_EQ and BSE_EQ
+          enum:
+            - NSE_EQ
+            - BSE_EQ
+        instrument:
+          type: string
+          description: Instrument Type EQUITY
+          enum:
+            - EQUITY
+        metrics:
+          type: array
+          description: 'Metric sections to fetch. Only those passed here are returned. For eg. [ "CO" ] (see Annexure)'
+          items:
+            type: string
+            enum:
+              - CO
+              - RATIOS
+              - SHP
+
+    FundamentalDataResponse:
+      type: object
+      properties:
+        securityId:
+          type: string
+          description: Exchange standard ID for each security
+        data:
+          type: object
+          description: Keyed by metric section (CO, RATIOS, SHP). Only the requested sections are present.
+          additionalProperties:
+            type: object
+
+    TechnicalDataResponse:
+      type: object
+      properties:
+        securityId:
+          type: string
+          description: Echoed from request
+        timeframe:
+          type: string
+          description: Echoed from request
+        data:
+          type: object
+          description: Keyed by indicator type. Only requested indicators are present.
+          additionalProperties:
+            type: object
+
+    OptionChainResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            last_price:
+              type: number
+            oc:
+              type: object
+              additionalProperties:
+                type: object
+                properties:
+                  ce:
+                    $ref: '#/components/schemas/OptionData'
+                  pe:
+                    $ref: '#/components/schemas/OptionData'
+
+    OptionData:
+      type: object
+      properties:
+        average_price:
+          type: number
+        greeks:
+          type: object
+          properties:
+            delta:
+              type: number
+            theta:
+              type: number
+            gamma:
+              type: number
+            vega:
+              type: number
+        implied_volatility:
+          type: number
+        last_price:
+          type: number
+        oi:
+          type: integer
+        security_id:
+          type: integer
+        top_bid_price:
+          type: number
+        top_bid_quantity:
+          type: integer
+        top_ask_price:
+          type: number
+        top_ask_quantity:
+          type: integer
+        volume:
+          type: integer
+
+    # ===== CONDITIONAL TRIGGER SCHEMAS =====
+    ConditionalTriggerCondition:
+      type: object
+      properties:
+        comparisonType:
+          type: string
+          enum: [TECHNICAL_WITH_VALUE, TECHNICAL_WITH_INDICATOR, TECHNICAL_WITH_CLOSE, PRICE_WITH_VALUE]
+          description: Type of comparison
+        exchangeSegment:
+          type: string
+          enum: [NSE_EQ, BSE_EQ, IDX_I]
+        securityId:
+          type: string
+          description: Exchange standard ID for the scrip
+        indicatorName:
+          type: string
+          description: Technical indicator name (e.g. SMA_5, EMA_20, RSI_14)
+        timeFrame:
+          type: string
+          enum: [DAY, ONE_MIN, FIVE_MIN, FIFTEEN_MIN]
+        operator:
+          type: string
+          enum: [CROSSING_UP, CROSSING_DOWN, CROSSING_ANY_SIDE, GREATER_THAN, LESS_THAN, GREATER_THAN_EQUAL, LESS_THAN_EQUAL, EQUAL, NOT_EQUAL]
+        comparingValue:
+          type: number
+          description: Value for comparison
+        comparingIndicatorName:
+          type: string
+          description: Second indicator for indicator-vs-indicator comparison
+        expDate:
+          type: string
+          format: date
+          description: Expiry date of alert (default 1 year)
+        frequency:
+          type: string
+          enum: [ONCE, ALWAYS]
+        userNote:
+          type: string
+
+    ConditionalTriggerOrder:
+      type: object
+      properties:
+        transactionType:
+          type: string
+          enum: [BUY, SELL]
+        exchangeSegment:
+          type: string
+          enum: [NSE_EQ, NSE_FNO, NSE_COMM, BSE_EQ, BSE_FNO, MCX_COMM]
+        productType:
+          type: string
+          enum: [CNC, INTRADAY, MARGIN, MTF]
+        orderType:
+          type: string
+          enum: [LIMIT, MARKET, STOP_LOSS, STOP_LOSS_MARKET]
+        securityId:
+          type: string
+        quantity:
+          type: integer
+        validity:
+          type: string
+          enum: [DAY, IOC]
+        price:
+          type: string
+        discQuantity:
+          type: string
+        triggerPrice:
+          type: string
+
+    ConditionalTriggerRequest:
+      type: object
+      required:
+        - dhanClientId
+        - condition
+        - orders
+      properties:
+        dhanClientId:
+          type: string
+        condition:
+          $ref: '#/components/schemas/ConditionalTriggerCondition'
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConditionalTriggerOrder'
+
+    ConditionalTriggerResponse:
+      type: object
+      properties:
+        alertId:
+          type: string
+        alertStatus:
+          type: string
+          enum: [ACTIVE, TRIGGERED, EXPIRED, CANCELLED]
+
+    PlaceMultiOrderRequest:
+      type: object
+      required:
+        - dhanClientId
+        - orders
+      properties:
+        dhanClientId:
+          type: string
+          description: User specific identification generated by Dhan
+        orders:
+          type: array
+          description: List of orders to place
+          items:
+            $ref: '#/components/schemas/MultiOrderRequestOrder'
+
+    MultiOrderRequestOrder:
+      type: object
+      required:
+        - sequence
+        - transactionType
+        - exchangeSegment
+      properties:
+        sequence:
+          type: string
+          description: Sequence number to identify order in the batch
+        correlationId:
+          type: string
+          minLength: 0
+          maxLength: 30
+          description: The user/partner generated id for tracking back
+        transactionType:
+          type: string
+          enum: [BUY, SELL]
+          description: Signifies the type of transaction whether it's BUY or SELL
+        exchangeSegment:
+          type: string
+          enum: [NSE_EQ, NSE_FNO, NSE_COMM, BSE_EQ, BSE_FNO, MCX_COMM]
+          description: Exchange segment for the order
+        productType:
+          type: string
+          enum: [CNC, INTRADAY, MARGIN, MTF]
+          description: Product type for the order
+        orderType:
+          type: string
+          enum: [LIMIT, MARKET, STOP_LOSS, STOP_LOSS_MARKET]
+          description: Order type for the order
+        validity:
+          type: string
+          enum: [DAY, IOC]
+          description: Validity of the order
+        securityId:
+          type: string
+          description: Exchange standard identification for each scrip
+        quantity:
+          type: integer
+          format: int32
+          description: Number of shares or lots
+        afterMarketOrder:
+          type: boolean
+          description: Flag to inform that the order placed is After Market Order
+        amoTime:
+          type: string
+          enum: [OPEN, OPEN_30, OPEN_60, PRE_OPEN]
+          description: Flag to inform after what time AMO is pumped
+        price:
+          type: number
+          format: float
+          description: Price at which the order is requested to execute
+        triggerPrice:
+          type: number
+          format: float
+          description: Price at which the order is triggered
+        disclosedQuantity:
+          type: integer
+          format: int32
+          description: Number shares visible in the market depth
+
+    PlaceMultiOrderResponse:
+      type: object
+      properties:
+        orders:
+          type: array
+          description: List of order responses
+          items:
+            $ref: '#/components/schemas/MultiOrderResponseOrder'
+
+    MultiOrderResponseOrder:
+      type: object
+      properties:
+        orderId:
+          type: string
+          description: Order specific identification generated by Dhan
+        sequence:
+          type: string
+          description: Sequence number to identify order in the batch
+        orderStatus:
+          type: string
+          enum: [TRANSIT, PENDING, REJECTED, CANCELLED, PART_TRADED, TRADED, EXPIRED, MODIFIED, TRIGGERED, INACTIVE]
+          description: Status of the order
+
+    ConditionalTriggerDetail:
+      type: object
+      properties:
+        alertId:
+          type: string
+        alertStatus:
+          type: string
+          enum: [ACTIVE, TRIGGERED, EXPIRED, CANCELLED]
+        createdTime:
+          type: string
+          format: date-time
+        triggeredTime:
+          type: string
+          format: date-time
+        lastPrice:
+          type: number
+        condition:
+          $ref: '#/components/schemas/ConditionalTriggerCondition'
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConditionalTriggerOrder'
+
+    # ===== EDIS SCHEMAS =====
+    EdisFormRequest:
+      type: object
+      properties:
+        isin:
+          type: string
+          description: ISIN of the stock
+        qty:
+          type: integer
+          description: Number of shares to mark
+        exchange:
+          type: string
+          enum: [NSE, BSE]
+        segment:
+          type: string
+          enum: [EQ]
+        bulk:
+          type: boolean
+          description: Mark eDIS for all stocks in portfolio
+
+    EdisFormResponse:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+          description: User specific identification generated by Dhan
+          example: "1000000401"
+        edisFormHtml:
+          type: string
+          description: Escaped HTML form — render at your end to unescape
+          example: "<!DOCTYPE html> <html>...</html>"
+
+    EdisInquiryResponse:
+      type: object
+      properties:
+        clientId:
+          type: string
+          description: User specific identification
+          example: "1000000401"
+        isin:
+          type: string
+          description: International Securities Identification Number
+          example: "INE00IN01015"
+        totalQty:
+          type: string
+          description: Total number of shares for given stock
+          example: "10"
+        aprvdQty:
+          type: string
+          description: Number of approved stocks
+          example: "4"
+        status:
+          type: string
+          description: Status of the eDIS order
+          example: "SUCCESS"
+        remark:
+          type: string
+          description: Remarks of the order status
+          example: "eDIS transaction done successfully"
+
+    # ===== TRADER'S CONTROL SCHEMAS =====
+    KillSwitchResponse:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        killSwitchStatus:
+          type: string
+
+    PnlExitRequest:
+      type: object
+      properties:
+        profitValue:
+          type: string
+          description: Target profit amount
+        lossValue:
+          type: string
+          description: Target loss amount
+        productType:
+          type: array
+          items:
+            type: string
+            enum: [INTRADAY, DELIVERY]
+        enableKillSwitch:
+          type: boolean
+
+    PnlExitResponse:
+      type: object
+      properties:
+        pnlExitStatus:
+          type: string
+          enum: [ACTIVE, INACTIVE, DISABLED]
+        message:
+          type: string
+
+    PnlExitDetail:
+      type: object
+      properties:
+        pnlExitStatus:
+          type: string
+          enum: [ACTIVE, INACTIVE]
+        profit:
+          type: string
+        loss:
+          type: string
+        productType:
+          type: array
+          items:
+            type: string
+        enableKillSwitch:
+          type: boolean
+
+    # ===== STATEMENT SCHEMAS =====
+    LedgerEntry:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        narration:
+          type: string
+          description: Description of transaction
+        voucherdate:
+          type: string
+        exchange:
+          type: string
+        voucherdesc:
+          type: string
+          description: Nature of transaction
+        vouchernumber:
+          type: string
+        debit:
+          type: string
+        credit:
+          type: string
+        runbal:
+          type: string
+          description: Running balance
+
+    TradeHistoryEntry:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        orderId:
+          type: string
+        exchangeOrderId:
+          type: string
+        exchangeTradeId:
+          type: string
+        transactionType:
+          type: string
+          enum: [BUY, SELL]
+        exchangeSegment:
+          type: string
+        productType:
+          type: string
+        orderType:
+          type: string
+        customSymbol:
+          type: string
+        securityId:
+          type: string
+        tradedQuantity:
+          type: integer
+        tradedPrice:
+          type: number
+        isin:
+          type: string
+        instrument:
+          type: string
+          enum: [EQUITY, DERIVATIVES]
+        sebiTax:
+          type: number
+        stt:
+          type: number
+        brokerageCharges:
+          type: number
+        serviceTax:
+          type: number
+        exchangeTransactionCharges:
+          type: number
+        stampDuty:
+          type: number
+        createTime:
+          type: string
+        updateTime:
+          type: string
+        exchangeTime:
+          type: string
+        drvExpiryDate:
+          type: string
+        drvOptionType:
+          type: string
+          enum: [CALL, PUT]
+        drvStrikePrice:
+          type: number
+
+    # ===== EXPIRED OPTIONS SCHEMAS =====
+    ExpiredOptionsRequest:
+      type: object
+      required:
+        - exchangeSegment
+        - interval
+        - securityId
+        - instrument
+        - expiryCode
+        - expiryFlag
+        - strike
+        - drvOptionType
+        - requiredData
+        - fromDate
+        - toDate
+      properties:
+        exchangeSegment:
+          type: string
+          enum: [NSE_FNO, BSE_FNO]
+        interval:
+          type: string
+          enum: ['1', '5', '15', '25', '60']
+          description: Minute intervals
+        securityId:
+          type: integer
+          description: Underlying security ID
+        instrument:
+          type: string
+          enum: [OPTIDX, OPTSTK]
+        expiryFlag:
+          type: string
+          enum: [WEEK, MONTH]
+        expiryCode:
+          type: integer
+          description: 0 (Current), 1 (Next), 2 (Far)
+        strike:
+          type: string
+          description: ATM, ATM+1 to ATM+10, ATM-1 to ATM-10
+        drvOptionType:
+          type: string
+          enum: [CALL, PUT]
+        requiredData:
+          type: array
+          items:
+            type: string
+            enum: [open, high, low, close, iv, volume, strike, oi, spot]
+        fromDate:
+          type: string
+          format: date
+        toDate:
+          type: string
+          format: date
+
+    ExpiredOptionsResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            ce:
+              type: object
+              properties:
+                open:
+                  type: array
+                  items:
+                    type: number
+                high:
+                  type: array
+                  items:
+                    type: number
+                low:
+                  type: array
+                  items:
+                    type: number
+                close:
+                  type: array
+                  items:
+                    type: number
+                volume:
+                  type: array
+                  items:
+                    type: integer
+                iv:
+                  type: array
+                  items:
+                    type: number
+                oi:
+                  type: array
+                  items:
+                    type: integer
+                spot:
+                  type: array
+                  items:
+                    type: number
+                strike:
+                  type: array
+                  items:
+                    type: number
+                timestamp:
+                  type: array
+                  items:
+                    type: integer
+            pe:
+              type: [object, "null"]
+
+    # ===== GLOBAL STOCKS SCHEMAS =====
+    PlaceGlobalStockOrderRequest:
+      type: object
+      required:
+        - transactionType
+        - orderType
+        - securityId
+      properties:
+        dhanClientId:
+          type: string
+          description: User specific identification generated by Dhan
+        correlationId:
+          type: string
+          maxLength: 30
+          description: User/partner generated id for tracking back
+        transactionType:
+          type: string
+          enum: [BUY, SELL]
+        orderType:
+          type: string
+          enum: [MARKET, LIMIT, STOP_LOSS, STOP_LOSS_MARKET, AMOUNT]
+        securityId:
+          type: string
+          description: Exchange standard ID for the scrip
+        quantity:
+          type: number
+          format: float
+        price:
+          type: number
+          format: float
+          description: Order price in USD. Use 0 for market orders.
+        triggerPrice:
+          type: number
+          format: float
+          description: Price in USD at which order is triggered (for stop loss orders)
+        stopLossPrice:
+          type: number
+          format: float
+          description: Stop loss price in USD
+        targetPrice:
+          type: number
+          format: float
+          description: Target price in USD
+        amount:
+          type: number
+          format: float
+        afterMarketOrder:
+          type: boolean
+          description: Flag to inform that the order placed is After Market Order
+
+    ModifyGlobalStockOrderRequest:
+      type: object
+      required:
+        - orderType
+        - transactionType
+        - securityId
+      properties:
+        dhanClientId:
+          type: string
+          description: User specific identification generated by Dhan
+        orderType:
+          type: string
+          enum: [MARKET, LIMIT, STOP_LOSS, STOP_LOSS_MARKET, AMOUNT]
+        transactionType:
+          type: string
+          enum: [BUY, SELL]
+        securityId:
+          type: string
+          description: Exchange standard ID for the scrip
+        quantity:
+          type: number
+          format: float
+        price:
+          type: number
+          format: float
+          description: Order price in USD. Use 0 for market orders.
+        legNo:
+          type: integer
+          format: int32
+
+    GlobalStockOrderResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+        orderStatus:
+          type: string
+          enum: [TRANSIT, PENDING, REJECTED, CANCELLED, PART_TRADED, TRADED, EXPIRED, MODIFIED, TRIGGERED, INACTIVE]
+
+    GlobalStockOrder:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        orderId:
+          type: string
+        exchangeOrderId:
+          type: string
+        correlationId:
+          type: string
+        transactionType:
+          type: string
+        exchangeSegment:
+          type: string
+        productType:
+          type: string
+        orderType:
+          type: string
+        validity:
+          type: string
+        tradingSymbol:
+          type: string
+        displayName:
+          type: string
+        securityId:
+          type: string
+        quantity:
+          type: number
+          format: float
+        remainingQuantity:
+          type: number
+          format: float
+        tradedQty:
+          type: number
+          format: float
+        price:
+          type: number
+          format: float
+          description: Order price in USD. Use 0 for market orders.
+        triggerPrice:
+          type: number
+          format: float
+          description: Price in USD at which order is triggered
+        avgTradedPrice:
+          type: number
+          format: float
+          description: Average traded price in USD
+        orderStatus:
+          type: string
+        createTime:
+          type: string
+        exchangeTime:
+          type: string
+        updateTime:
+          type: string
+        omsErrorCode:
+          type: string
+        omsErrorDescription:
+          type: string
+        afterMarketOrder:
+          type: boolean
+        amount:
+          type: number
+          format: float
+        lotSize:
+          type: integer
+          format: int32
+        fractionalFlag:
+          type: boolean
+        legName:
+          type: string
+          description: Leg name for super orders
+          enum: [ENTRY_LEG, STOP_LOSS_LEG, TARGET_LEG, NA]
+        childOrders:
+          type: array
+          items:
+            type: object
+
+    GlobalStockTransEstimateRequest:
+      type: object
+      required:
+        - securityId
+        - price
+        - quantity
+        - transactionType
+      properties:
+        securityId:
+          type: string
+        price:
+          type: string
+          description: Order price in USD. Use 0 for market orders.
+        quantity:
+          type: string
+        transactionType:
+          type: string
+
+    GlobalStockOrderEstimate:
+      type: object
+      properties:
+        brokerage:
+          type: number
+          format: float
+          description: Brokerage charges
+        order_charges:
+          type: number
+          format: float
+          description: Total order charges
+        exchange_charges:
+          type: number
+          format: float
+          description: Exchange charges
+        turn_over_fee:
+          type: number
+          format: float
+          description: Turnover fee
+        gst_charges:
+          type: number
+          format: float
+          description: GST charges
+        other_charges:
+          type: number
+          format: float
+          description: Other charges
+
+    GlobalStockMarginCalculatorRequest:
+      type: object
+      required:
+        - securityId
+        - price
+        - quantity
+        - transactionType
+      properties:
+        securityId:
+          type: string
+        price:
+          type: string
+          description: Order price in USD. Use 0 for market orders.
+        quantity:
+          type: string
+        transactionType:
+          type: string
+
+    GlobalStockMarginCalculation:
+      type: object
+      properties:
+        brokerage:
+          type: number
+          format: float
+          description: Brokerage
+        leverage:
+          type: string
+          description: Leverage
+        insufficient_bal:
+          type: number
+          format: float
+          description: Insufficient balance
+        t_total_margin:
+          type: number
+          format: float
+          description: Total margin required
+        available_bal:
+          type: number
+          format: float
+          description: Available balance
+
+    GlobalStockMarketStatus:
+      type: object
+      properties:
+        holidayFlg:
+          type: boolean
+          description: Holiday flag
+        status:
+          type: string
+          description: Market status - open/closed
+        MarketCloseTime:
+          type: string
+          description: Market close time
+        MarketOpenTime:
+          type: string
+          description: Market open time
+
+    GlobalStockTrade:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+          description: User specific identification generated by Dhan
+        orderId:
+          type: string
+          description: Order specific identification generated by Dhan
+        exchangeOrderId:
+          type: string
+          description: Order specific identification generated by Exchange
+        transactionType:
+          type: string
+          description: Signifies the type of transaction whether it's BUY or SELL
+        exchangeSegment:
+          type: string
+          description: Exchange segment
+        productType:
+          type: string
+          description: Product type
+        orderType:
+          type: string
+          description: Order type
+        tradingSymbol:
+          type: string
+          description: Exchange standard trading symbol
+        securityId:
+          type: string
+          description: Exchange standard identification for each scrip
+        tradedQuantity:
+          type: number
+          format: float
+          description: Number of shares traded (fractional supported)
+        tradedPrice:
+          type: number
+          format: float
+          description: Price in USD at which trade executed
+        tradeDate:
+          type: string
+          description: Trade date
+        createTime:
+          type: string
+          description: Record create date time
+        exchangeTime:
+          type: string
+          description: Time at which order reached at exchange end
+        orderStatus:
+          type: string
+          description: Trade status
+        brokerage:
+          type: number
+          format: float
+          description: Brokerage charges
+        otherCharges:
+          type: number
+          format: float
+          description: Other fees
+        tradeValue:
+          type: number
+          format: float
+          description: Average trade value
+
+    GlobalStockHolding:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        tradingSymbol:
+          type: string
+        displayName:
+          type: string
+        securityId:
+          type: string
+        exchange:
+          type: string
+        quantity:
+          type: number
+          format: float
+        avgCostPrice:
+          type: number
+          format: float
+          description: Average cost price in USD
+        costValue:
+          type: number
+          format: float
+        currentValue:
+          type: number
+          format: float
+        gainValue:
+          type: number
+          format: float
+        ltp:
+          type: number
+          format: float
+          description: Last traded price in USD
+        prevClose:
+          type: number
+          format: float
+          description: Previous close price in USD
+        longTermFlag:
+          type: string
+        lastUpdated:
+          type: string
+
+    GlobalStockFundLimit:
+      type: object
+      properties:
+        dhanClientId:
+          type: string
+        availableCash:
+          type: number
+          format: float
+        cashOnAccount:
+          type: number
+          format: float
+        actualCash:
+          type: number
+          format: float
+        settledCash:
+          type: number
+          format: float
+        unsettledCash:
+          type: number
+          format: float
+        marginUtilized:
+          type: number
+          format: float
+
+  responses:
+    BadRequest:
+      description: Bad Request
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                example: failure
+              errorType:
+                type: string
+                example: VALIDATION_ERROR
+              errorCode:
+                type: string
+              errorMessage:
+                type: string
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                example: failure
+              errorType:
+                type: string
+                example: AUTHENTICATION_ERROR
+              errorCode:
+                type: string
+              errorMessage:
+                type: string
+
+security:
+  - accessToken: []

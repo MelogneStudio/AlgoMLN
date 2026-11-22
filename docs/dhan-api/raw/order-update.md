@@ -1,0 +1,221 @@
+# Live Order Update
+
+Real-time order updates via WebSocket for individuals and partners
+
+**Live Order Update** sends real-time updates of your orders over a WebSocket connection. Once you connect and authorise, order updates in your account are streamed to you as they happen.
+
+### What it does
+
+- Streams updates for all your orders in real time.
+- Each update includes the status, traded price, quantity and other details of the order.
+- Sends the messages as JSON.
+- For individuals: sends updates for all orders placed via your account, irrespective of the platform they were placed from.
+- For partners: sends updates for all users connected to their platform/app, using the Partner Login module.
+
+**How it works**
+
+1. Connect to the endpoint `wss://api-order-update.dhan.co` using a WebSocket library.
+2. While connecting, send the authorisation message: your `ClientId` and `Token` with `UserType` `SELF` for individuals, or the `Secret` with `UserType` `PARTNER` for partners.
+3. Order updates are then streamed over the same connection as JSON messages, each with `"Type": "order_alert"`.
+
+See [For Individual](#for-individual) and [For Partners](#for-partners) for the authorisation messages, and [Order Update](#order-update) for the message structure.
+
+---
+
+Realtime order updates of all your orders can be received directly via WebSocket in your system. Once you connect to the WebSocket and authorise, all order updates in your account will get reflected real time via the stream.
+
+With this update stream, you can know about status, traded price, quantity and other details about your orders.
+
+The messages sent over this WebSocket will be **JSON**.
+
+---
+
+## Establishing Connection
+
+To establish connection with DhanHQ Live Order Update, you can connect to the below endpoint using WebSocket library.
+
+```
+wss://api-order-update.dhan.co
+```
+
+While establishing connection, you need to send Authorisation Message for connection.
+
+### For Individual
+
+You can receive order updates for all orders placed via your account, irrespective of the platform via which it was placed.
+
+**Authorisation message structure**
+
+```json
+{
+    "LoginReq": {
+        "MsgCode": 42,
+        "ClientId": "1000000001",
+        "Token": "JWT"
+    },
+    "UserType": "SELF"
+}
+```
+
+### For Partners
+
+Platforms can receive order updates originating for all users connected to their platform/app for which [Partner Login](/api/v2/authentication#for-partners) module needs to be used.
+
+**Authorisation message structure**
+
+```json
+{
+    "LoginReq": {
+        "MsgCode": 42,
+        "ClientId": "partner_id"
+    },
+    "UserType": "PARTNER",
+    "Secret": "partner_secret"
+}
+```
+
+---
+
+## Order Update
+
+Order Update messages are sent via WebSocket in below structure.
+
+```json
+{
+    "Data": {
+        "series": "EQ",
+        "goodTillDaysDate": "2024-09-11",
+        "instrumentType": "EQ",
+        "refLtp": 13.21,
+        "tickSize": 0.01,
+        "algoId": "0",
+        "multiplier": 1,
+        "Exchange": "NSE",
+        "Segment": "E",
+        "Source": "N",
+        "SecurityId": "14366",
+        "ClientId": "1000000001",
+        "ExchOrderNo": "1400000000404591",
+        "OrderNo": "1124091136546",
+        "Product": "C",
+        "TxnType": "B",
+        "OrderType": "LMT",
+        "Validity": "DAY",
+        "DiscQuantity": 1,
+        "DiscQtyRem": 1,
+        "RemainingQuantity": 1,
+        "Quantity": 1,
+        "TradedQty": 0,
+        "Price": 13,
+        "TriggerPrice": 0,
+        "TradedPrice": 0,
+        "AvgTradedPrice": 0,
+        "AlgoOrdNo": null,
+        "OffMktFlag": "0",
+        "OrderDateTime": "2024-09-11 14:39:29",
+        "ExchOrderTime": "2024-09-11 14:39:29",
+        "LastUpdatedTime": "2024-09-11 14:39:29",
+        "Remarks": "NR",
+        "MktType": "NL",
+        "ReasonDescription": "CONFIRMED",
+        "LegNo": 1,
+        "Instrument": "EQUITY",
+        "Symbol": "IDEA",
+        "ProductName": "CNC",
+        "Status": "Cancelled",
+        "LotSize": 1,
+        "StrikePrice": null,
+        "ExpiryDate": "0001-01-01 00:00:00",
+        "OptType": "XX",
+        "DisplayName": "Vodafone Idea",
+        "Isin": "INE669E01016",
+        "Series": "EQ",
+        "GoodTillDaysDate": "2024-09-11",
+        "RefLtp": 13.21,
+        "TickSize": 0.01,
+        "AlgoId": "0",
+        "Multiplier": 1,
+        "CorrelationId": "",
+        "Remarks": "Super Order"
+    },
+    "Type": "order_alert"
+}
+```
+
+
+For description of enum values, refer to the [Annexure](/api/v2/annexure).
+
+
+### Response Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| LoginReq | {}, string | Yes | JSON for adding Client ID and Access Token |
+| MsgCode | int | Yes | Message Code for getting Order Updates. 42 by default |
+| ClientId | string | Yes | User specific identification generated by Dhan |
+| Token | string | Yes | Access Token generated for user |
+| UserType | string | Yes | SELF for individual users |
+
+
+### Response Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| LoginReq | {}, string | Yes | JSON for adding Client ID |
+| MsgCode | int | Yes | Message Code for getting Order Updates. 42 by default |
+| ClientId | string | Yes | partner_id generated for the partner |
+| UserType | string | Yes | PARTNER for partner platforms |
+| Secret | string | Yes | partner_secret generated for the partner |
+
+
+### Response Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| Exchange | string | No | Exchange in which order is placed |
+| Segment | string | No | Segment for which order is placed |
+| Source | string | No | Platform via which order is placed - P for API Orders |
+| SecurityId | string | No | Exchange standard ID for each scrip. [Refer here](/api/v2/instruments) |
+| ClientId | string | No | User specific identification generated by Dhan |
+| ExchOrderNo | string | No | Order specific identification generated by Exchange |
+| OrderNo | string | No | Order specific identification generated by Dhan |
+| Product | enum | No | Product type of trade. C for CNC, I for INTRADAY, M for MARGIN, F for MTF, V for CO, B for BO |
+| TxnType | enum | No | The trading side of transaction. B for Buy, S for Sell |
+| OrderType | enum | No | Order Type. LMT for Limit, MKT for Market, SL for Stop Loss, SLM for Stop Loss Market |
+| Validity | enum | No | Validity of Order Values: `DAY`, `IOC`. |
+| DiscQuantity | int | No | Number of shares visible |
+| DiscQtyRem | int | No | Disclosed quantity pending for execution |
+| RemainingQuantity | int | No | Quantity pending for execution |
+| Quantity | int | No | Total order quantity placed |
+| TradedQty | int | No | Actual quantity executed on exchange |
+| Price | float | No | Price at which order is placed |
+| TriggerPrice | float | No | Price at which order is triggered, for SL-M, SL-L, CO & BO |
+| TradedPrice | float | No | Price at which trade of an order is executed |
+| AvgTradedPrice | float | No | Average trade price of an order (this will be different from Traded Price in case of partial execution) |
+| AlgoOrdNo | float | No | Entry leg order number to track Target and Stop Loss leg (in case of BO and CO) |
+| OffMktFlag | string | No | 1 in case of AMO order else 0 |
+| OrderDateTime | string | No | Time at which the order is received by Dhan |
+| ExchOrderTime | string | No | Time at which order is placed on Exchange |
+| LastUpdatedTime | string | No | Last update time of any order modification or trade |
+| Remarks | string | No | Additional remarks sent along while placing order |
+| MktType | string | No | NL for Normal Market. AU, A1 and A2 for Auction Market |
+| ReasonDescription | string | No | Order rejection reason |
+| LegNo | int | No | 1 for Entry Leg, 2 for Stop Loss Leg, 3 for Target Leg |
+| Instrument | string | No | Instrument in which order is placed - [here](/api/v2/annexure#instrument) |
+| Symbol | string | No | Symbol in which order is placed - [Refer here](/api/v2/instruments) |
+| ProductName | string | No | Product type of the order placed - [here](/api/v2/annexure#product-type) |
+| Status | enum | No | Last updated status of the order Values: `TRANSIT`, `PENDING`, `REJECTED`, `CANCELLED`, `TRADED`, `EXPIRED`. |
+| LotSize | int | No | Lot Size in case of Derivatives |
+| StrikePrice | float | No | Strike Price in which order is placed in Option contract |
+| ExpiryDate | string | No | Expiry Date of the contract in which order is placed |
+| OptType | string | No | CE or PE in case of Option contract |
+| DisplayName | string | No | Name of instrument in which order is placed - [Refer here](/api/v2/instruments) |
+| Isin | string | No | ISIN of the instrument in which order is placed |
+| Series | string | No | Exchange series of the instrument |
+| GoodTillDaysDate | string | No | Order validity in case of Forever Order |
+| RefLtp | float | No | LTP at time of order update |
+| TickSize | float | No | Tick size of the instrument |
+| AlgoId | string | No | Exchange ID for special order types |
+| Multiplier | int | No | In case of commodity and currency contracts |
+| CorrelationId | string | No | The user/partner generated id for tracking back Values: `Max 30 chars`, `Allowed: [^a-zA-Z0-9 _-]`. |
+| Remarks | string | No | Super Order if the order is part of super order |

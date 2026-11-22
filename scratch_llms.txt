@@ -1,0 +1,289 @@
+# DhanHQ API Documentation
+
+DhanHQ API documentation for trading APIs, market data APIs, authentication, postbacks, rate limits, errors, instruments, SDKs, and API reference.
+
+## Primary machine-readable resources
+
+- Full Markdown export: https://docs.dhanhq.co/llms-full.txt (also at https://docs.dhanhq.co/docs-export.md)
+- Per-page Markdown files: https://docs.dhanhq.co/markdown/
+- OpenAPI specification: https://docs.dhanhq.co/openapi/dhan-api-v2.yaml
+- Sitemap: https://docs.dhanhq.co/sitemap.xml
+- Dhan MCP server (remote, OAuth): https://mcp.dhan.co/mcp
+- Agent Skills pack: https://github.com/dhan-oss/dhanhq-skills
+- AI catalog: https://docs.dhanhq.co/.well-known/ai-catalog.json
+
+## Recommended parsing order for agents
+
+1. Read this file first.
+2. Use the full Markdown export for human-written guides and endpoint explanations.
+3. Use per-page Markdown files for targeted page retrieval. The path mirrors the rendered page URL. For example, `/api/v2/orders/place-order` is available at `/markdown/api/v2/orders/place-order.md`.
+4. Use the OpenAPI specification for exact paths, methods, parameters, schemas, and response definitions.
+5. Use the sitemap to discover canonical rendered documentation pages.
+
+## Important guides
+
+- Introduction: https://docs.dhanhq.co/api/v2
+- Feature Matrix (every capability and the plan it comes with): https://docs.dhanhq.co/api/v2/feature-matrix
+- Authentication: https://docs.dhanhq.co/api/v2/authentication
+- Rate Limits: https://docs.dhanhq.co/api/v2/rate-limits
+- Error codes: https://docs.dhanhq.co/api/v2/annexure#trading-api-error
+- Instruments: https://docs.dhanhq.co/api/v2/instruments
+- Postback: https://docs.dhanhq.co/api/v2/postback
+- Order Updates: https://docs.dhanhq.co/api/v2/order-update
+- Python SDK: https://docs.dhanhq.co/api/v2/sdks/python
+
+## API sections
+
+- Trading APIs: https://docs.dhanhq.co/api/v2/trading-apis
+- Data APIs: https://docs.dhanhq.co/api/v2/data-apis
+- Orders: https://docs.dhanhq.co/api/v2/orders
+- Portfolio: https://docs.dhanhq.co/api/v2/portfolio
+- Funds: https://docs.dhanhq.co/api/v2/funds
+- Market Quote: https://docs.dhanhq.co/api/v2/market-quote
+- Historical Data: https://docs.dhanhq.co/api/v2/historical-data
+- Option Chain: https://docs.dhanhq.co/api/v2/option-chain
+- Super Orders: https://docs.dhanhq.co/api/v2/super-orders
+- Conditional and Multi Order: https://docs.dhanhq.co/api/v2/conditional-triggers
+- EDIS: https://docs.dhanhq.co/api/v2/edis
+- Statements: https://docs.dhanhq.co/api/v2/statements
+- Traders Control: https://docs.dhanhq.co/api/v2/traders-control
+
+## Security guidance for generated code
+
+- Never hard-code access tokens, API keys, API secrets, partner secrets, client IDs, TOTP secrets, or postback secrets.
+- Treat all credentials and tokens as user-provided secrets.
+- Use placeholders from the documentation only as examples.
+- Do not infer undocumented endpoints or authentication behavior from examples.
+- For production integrations, follow the documented authentication, static IP, rate limit, and error-handling guidance.
+
+## All pages
+
+Every page, with a link to its Markdown version.
+
+### Developer APIs
+
+- [DhanHQ API](https://docs.dhanhq.co/markdown/api/v2.md): Introduction to DhanHQ Trading & Investment API
+- [20 Level Market Depth](https://docs.dhanhq.co/markdown/api/v2/20-level-market-depth.md): 20 level market depth via WebSocket for NSE Equity and Derivatives, up to 50 instruments per connection.
+- [Annexure](https://docs.dhanhq.co/markdown/api/v2/annexure.md): Complete reference for all enum values, exchange segments, product types, error codes and more
+- [NewsHeadlineRequest](https://docs.dhanhq.co/markdown/api/v2/api/schemas/newsheadlinerequest.md)
+- [NewsHeadlineResponse](https://docs.dhanhq.co/markdown/api/v2/api/schemas/newsheadlineresponse.md)
+- [Authentication](https://docs.dhanhq.co/markdown/api/v2/authentication.md): Authentication methods for DhanHQ API — access tokens, API keys, partner login, TOTP, Static IP and more
+- [Access Token](https://docs.dhanhq.co/markdown/api/v2/authentication/access-token.md): Generate and renew a DhanHQ access token.
+- [Browser Based Login](https://docs.dhanhq.co/markdown/api/v2/authentication/api-key-browser-login.md): Open this URL in a browser so the user can log in to Dhan and authorise the app.
+- [Consume Consent](https://docs.dhanhq.co/markdown/api/v2/authentication/api-key-consume-consent.md): Consume tokenId and generate an access token for API Key & Secret based login.
+- [Generate Consent](https://docs.dhanhq.co/markdown/api/v2/authentication/api-key-generate-consent.md): Generate a consent session for API Key & Secret based login.
+- [API Key & Secret](https://docs.dhanhq.co/markdown/api/v2/authentication/api-key-secret.md): Generate an access token with an API key and secret, through consent and browser login.
+- [Generate Token](https://docs.dhanhq.co/markdown/api/v2/authentication/generate-token.md): Generate an access token using dhanClientId, PIN, and TOTP.
+- [Get IP](https://docs.dhanhq.co/markdown/api/v2/authentication/get-ip.md): Get the currently configured primary and secondary IPs and their next modification dates.
+- [Modify IP](https://docs.dhanhq.co/markdown/api/v2/authentication/modify-ip.md): Modify a primary or secondary static IP when the modification window is available.
+- [Dhan Login on Browser for User](https://docs.dhanhq.co/markdown/api/v2/authentication/partner-browser-login.md): Open this URL in a browser tab or webview so the end user can log in to Dhan and authorise the partner app.
+- [Consume Consent](https://docs.dhanhq.co/markdown/api/v2/authentication/partner-consume-consent.md): Consume partner tokenId and generate an access token for the end user.
+- [Generate Consent](https://docs.dhanhq.co/markdown/api/v2/authentication/partner-generate-consent.md): Generate a partner consent session for user login.
+- [Partners](https://docs.dhanhq.co/markdown/api/v2/authentication/partners.md): Partner login flow to generate access tokens for Dhan users.
+- [Renew Token](https://docs.dhanhq.co/markdown/api/v2/authentication/renew-token.md): Renew an active Dhan Web access token for another 24 hours.
+- [Set IP](https://docs.dhanhq.co/markdown/api/v2/authentication/set-ip.md): Set a primary or secondary static IP for the account.
+- [Setup Static IP](https://docs.dhanhq.co/markdown/api/v2/authentication/static-ip.md): Set, modify and view the static IP whitelisted on your Dhan account.
+- [CAS Live Feed](https://docs.dhanhq.co/markdown/api/v2/cas-live-feed.md): Closing Auction Session data via WebSocket — indicative equilibrium price, depth and indicative index values
+- [Conditional and Multi Order](https://docs.dhanhq.co/markdown/api/v2/conditional-triggers.md): Conditional and Multi Order: price and technical indicator conditional orders, and multi orders with up to 15 orders in one Dhan API call.
+- [Delete Conditional Order](https://docs.dhanhq.co/markdown/api/v2/conditional-triggers/delete-conditional-trigger.md): Delete an existing conditional order. Cancel a conditional order by its alert ID with the Dhan API.
+- [Get All Conditional Orders](https://docs.dhanhq.co/markdown/api/v2/conditional-triggers/get-all-conditional-triggers.md): Retrieve all conditional orders for the authenticated account, with the status of each.
+- [Get Conditional Order by ID](https://docs.dhanhq.co/markdown/api/v2/conditional-triggers/get-conditional-trigger-by-id.md): Retrieve status and details for a specific conditional trigger. Check whether a price or indicator trigger order is active or triggered.
+- [Modify Conditional Order](https://docs.dhanhq.co/markdown/api/v2/conditional-triggers/modify-conditional-trigger.md): Modify a conditional order's conditions and/or associated orders. Change the price or indicator condition and the orders it places, with the Dhan API.
+- [Place Conditional Order](https://docs.dhanhq.co/markdown/api/v2/conditional-triggers/place-conditional-trigger.md): Create a new conditional order with conditions (price or technical indicators) that, when met, place one or multiple orders automatically. Price or indicator-based conditional orders (RSI, moving averages, MACD) with the Dhan API.
+- [Place Multi Order](https://docs.dhanhq.co/markdown/api/v2/conditional-triggers/place-multi-order.md): Place a multi order directly without any conditions. Place up to 15 orders in one Dhan API request.
+- [Data APIs](https://docs.dhanhq.co/markdown/api/v2/data-apis.md)
+- [EDIS](https://docs.dhanhq.co/markdown/api/v2/edis.md): EDIS: CDSL T-PIN and eDIS authorisation to sell stocks from your demat account with the Dhan API.
+- [EDIS Status Inquiry](https://docs.dhanhq.co/markdown/api/v2/edis/edis-inquiry.md): Check eDIS approval status for a stock by ISIN. Pass `ALL` to check all holdings. Check whether a stock is eDIS-approved for selling, by ISIN.
+- [Generate eDIS Form](https://docs.dhanhq.co/markdown/api/v2/edis/generate-edis-form.md): Retrieve escaped HTML form from CDSL to enter T-PIN and approve stock for selling. Generate the CDSL eDIS form to authorise selling demat holdings by ISIN.
+- [Generate T-PIN](https://docs.dhanhq.co/markdown/api/v2/edis/generate-tpin.md): Request a T-PIN on your registered mobile number for eDIS authorization. Get a CDSL T-PIN on your registered mobile to authorise selling holdings.
+- [Expired Options Data](https://docs.dhanhq.co/markdown/api/v2/expired-options-data.md): Expired Options Data: minute-level OHLC, IV and OI for expired index and stock options.
+- [Historical Rolling Options Data](https://docs.dhanhq.co/markdown/api/v2/expired-options-data/get-expired-options-data.md): Fetch expired options contract data on a rolling basis with OHLC, IV, OI and spot information. Up to one day per call. Last 5 years available. Minute-level data for expired index and stock options: OHLC, IV, OI and spot, by strike relative to ATM.
+- [Feature Matrix](https://docs.dhanhq.co/markdown/api/v2/feature-matrix.md): Every DhanHQ API in one place: 71 REST endpoints and 7 WebSocket and webhook feeds, with what each does, its plan, sandbox support and static IP requirement.
+- [Full Market Depth](https://docs.dhanhq.co/markdown/api/v2/full-market-depth.md): 200 level market depth via WebSocket for NSE Equity and Derivatives, 1 instrument per connection.
+- [Funds](https://docs.dhanhq.co/markdown/api/v2/funds.md): Funds: available balance, fund limits and margin calculator (single order and multiple orders) with the Dhan API.
+- [Calculate Margin](https://docs.dhanhq.co/markdown/api/v2/funds/calculate-margin.md): Calculate margin required for a single order. Margin calculator API: SPAN, exposure, brokerage and leverage for any order before placing it.
+- [Calculate Multi-Order Margin](https://docs.dhanhq.co/markdown/api/v2/funds/calculate-multi-margin.md): Calculate combined margin for multiple orders with hedge benefits.
+- [Get Fund Limits](https://docs.dhanhq.co/markdown/api/v2/funds/get-fund-limits.md): Retrieve available balance and fund limits. Fetch available balance, margin used, collateral and withdrawable funds.
+- [Global Stocks](https://docs.dhanhq.co/markdown/api/v2/global-stocks.md): Global Stocks
+- [Cancel Order](https://docs.dhanhq.co/markdown/api/v2/global-stocks/cancel-order.md): Cancel an existing pending US stock order using its order ID. Cancel a pending NYSE or NASDAQ stock order by its order ID.
+- [Data APIs](https://docs.dhanhq.co/markdown/api/v2/global-stocks/data-apis.md): Global Stocks Data APIs: real-time US stock prices over WebSocket.
+- [Global Stocks Live Feed](https://docs.dhanhq.co/markdown/api/v2/global-stocks/data-apis/broadcast-websocket.md): Real-time Global Stocks market data over WebSocket.
+- [Funds & Margin](https://docs.dhanhq.co/markdown/api/v2/global-stocks/funds.md): Global Stocks Funds & Margin: US trading balance, margin calculator and order charges estimator.
+- [Get Fund Limit](https://docs.dhanhq.co/markdown/api/v2/global-stocks/get-fund-limit.md): Retrieve the authenticated user's fund limit details for US stock trading. Available cash, settled and unsettled cash and margin used for US stock trading.
+- [Get Holdings](https://docs.dhanhq.co/markdown/api/v2/global-stocks/get-holdings.md): Retrieve the authenticated user's current US stock holdings and holding-level details. Your US stock holdings with quantity, average cost, current value and gain.
+- [Get Market Status](https://docs.dhanhq.co/markdown/api/v2/global-stocks/get-market-status.md): Retrieve the current trading status and session timing for the US stock market. Whether the US stock market is open, today's session times and holidays.
+- [Get Order Book](https://docs.dhanhq.co/markdown/api/v2/global-stocks/get-order-book.md): Retrieve the current trading day's US stock order book for the authenticated user. Today's US stock orders with status, fills and average price.
+- [Get Order by ID](https://docs.dhanhq.co/markdown/api/v2/global-stocks/get-order-by-id.md): Retrieve the latest order details and status for a specific US stock order using its order ID. Status, fills and details of one US stock order by its order ID.
+- [Get Past Trades by Security Id](https://docs.dhanhq.co/markdown/api/v2/global-stocks/get-past-trades-by-scrip.md): Retrieve executed US stock trades for the authenticated user filtered by a specific security ID. Executed trades in one US stock, with brokerage and charges.
+- [Get Past Trades](https://docs.dhanhq.co/markdown/api/v2/global-stocks/get-past-trades.md): Retrieve the current trading day's executed US stock trades for the authenticated user. Executed US stock trades for the day with brokerage, charges and trade value.
+- [Margin Calculator](https://docs.dhanhq.co/markdown/api/v2/global-stocks/margin-calculator.md): Calculate the margin required for a US stock order before submitting it. Margin and buying power needed for a US stock order, before you place it.
+- [Modify Order](https://docs.dhanhq.co/markdown/api/v2/global-stocks/modify-order.md): Modify an existing pending US stock order by submitting updated order details for the given order ID. Change the price, quantity or order type of a pending US stock order.
+- [Order Estimator](https://docs.dhanhq.co/markdown/api/v2/global-stocks/order-estimator.md): Estimate the applicable charges for a US stock order before submitting it. Brokerage, exchange fees, GST and other charges for a US stock order, before you place it.
+- [Orders](https://docs.dhanhq.co/markdown/api/v2/global-stocks/orders.md): Global Stocks Orders: buy and sell NYSE and NASDAQ stocks from India, and modify, cancel and track US orders.
+- [Place Order](https://docs.dhanhq.co/markdown/api/v2/global-stocks/place-order.md): Place a buy or sell order for a US stock using the selected order type, quantity, and price details. Buy and sell NYSE and NASDAQ stocks from India: market, limit, stop-loss or dollar-amount orders.
+- [Portfolio & Positions](https://docs.dhanhq.co/markdown/api/v2/global-stocks/portfolio.md): Global Stocks Portfolio & Positions: your US stock holdings with cost, value and gain.
+- [Statements](https://docs.dhanhq.co/markdown/api/v2/global-stocks/statements.md): Global Stocks Statements: executed US stock trades with brokerage and charges.
+- [Trader's Control](https://docs.dhanhq.co/markdown/api/v2/global-stocks/traders-control.md): Global Stocks Trader's Control: US market open/closed status and session times.
+- [Historical Data](https://docs.dhanhq.co/markdown/api/v2/historical-data.md): Historical Data: daily and intraday (1 to 60-minute) OHLC candles for charts and backtesting.
+- [Get Daily Historical Data](https://docs.dhanhq.co/markdown/api/v2/historical-data/get-daily-historical.md): Get daily OHLC candle data for backtesting and analysis. Daily OHLC and volume candles for stocks, F&O and indices, for backtesting and charts.
+- [Get Intraday Historical Data](https://docs.dhanhq.co/markdown/api/v2/historical-data/get-intraday-historical.md): Get intraday OHLC candle data (1, 5, 15, 25, 60 minute intervals). 1, 5, 15, 25 and 60-minute OHLC candles for the last 5 years, for intraday backtesting.
+- [Instrument List](https://docs.dhanhq.co/markdown/api/v2/instruments.md): Fetch tradable instrument lists with Security IDs and column descriptions
+- [Live Market Feed](https://docs.dhanhq.co/markdown/api/v2/live-market-feed.md): Real-time market data streaming via WebSocket — ticker, quote, and full packets
+- [Market Analytics](https://docs.dhanhq.co/markdown/api/v2/market-analytics.md): Market Analytics: technical indicators, market movers, news headlines and company fundamentals.
+- [Company Info](https://docs.dhanhq.co/markdown/api/v2/market-analytics/company-info.md): Fetch selected fundamental metrics for a single equity instrument. Pass the required metric groups and receive the latest available snapshot across company classification, industry benchmarks, shareholding, valuation, profitability, price performance, and book value. Company fundamentals: market cap, EPS, P/E, ROE, debt to equity and shareholding pattern.
+- [Market Movers](https://docs.dhanhq.co/markdown/api/v2/market-analytics/fetch-market-movers.md): Fetch top options, futures, and stocks ranked by open interest, traded volume, or price movement. Select the instrument type(s) and ranking category to retrieve the highest-ranked instruments. Top gainers, losers, most active and OI gainers across stocks, futures and options.
+- [Live News Headline](https://docs.dhanhq.co/markdown/api/v2/market-analytics/fetch-news-headline.md): Fetch the latest news headlines as of now, filterable by category and stock, capped at limit (max 50) items. Latest market and company news headlines with sentiment, filterable by category and stock.
+- [Technical Data](https://docs.dhanhq.co/markdown/api/v2/market-analytics/fetch-technical-data.md): Fetch technical indicator values for an instrument. Pass the indicators you need - only those are computed and returned. All values are point-in-time as of the latest closed candle for the requested timeframe. RSI, moving averages, MACD, ADX, pivot points and more for a stock or index, computed on request.
+- [Market Quote](https://docs.dhanhq.co/markdown/api/v2/market-quote.md): Market Quote: live LTP, OHLC and full quotes with market depth for up to 1,000 instruments per request.
+- [Get LTP](https://docs.dhanhq.co/markdown/api/v2/market-quote/get-ltp.md): Get last traded price for multiple instruments. Live LTP for up to 1,000 stocks, F&O contracts or indices in one Dhan API call.
+- [Get OHLC](https://docs.dhanhq.co/markdown/api/v2/market-quote/get-ohlc.md): Get OHLC (Open, High, Low, Close) data for instruments. Live OHLC and LTP for up to 1,000 instruments in one Dhan API call.
+- [Get Full Quote](https://docs.dhanhq.co/markdown/api/v2/market-quote/get-quote.md): Get full market quote including market depth (5 levels). Full market quote: LTP, OHLC, volume, OI, circuit limits and 5-level market depth.
+- [Option Chain](https://docs.dhanhq.co/markdown/api/v2/option-chain.md): Option Chain: live option chain with OI, Greeks and IV, plus active expiry dates.
+- [Get Expiry List](https://docs.dhanhq.co/markdown/api/v2/option-chain/get-expiry-list.md): Get available expiry dates for an underlying. All active option expiry dates for an index or stock, to use with the Option Chain API.
+- [Get Option Chain](https://docs.dhanhq.co/markdown/api/v2/option-chain/get-option-chain.md): Get option chain data with Greeks for an underlying. Live option chain with OI, Greeks (delta, gamma, theta, vega), IV and bid/ask for every strike.
+- [Live Order Update](https://docs.dhanhq.co/markdown/api/v2/order-update.md): Real-time order updates via WebSocket for individuals and partners
+- [Orders](https://docs.dhanhq.co/markdown/api/v2/orders.md): Orders
+- [Cancel Order](https://docs.dhanhq.co/markdown/api/v2/orders/cancel-order.md): Cancel a pending order.
+- [Get Order by Correlation ID](https://docs.dhanhq.co/markdown/api/v2/orders/get-order-by-correlation-id.md): Retrieve order details using your custom correlation ID.
+- [Get Order by ID](https://docs.dhanhq.co/markdown/api/v2/orders/get-order-by-id.md): Retrieve details of a specific order by its ID.
+- [Get Order Book](https://docs.dhanhq.co/markdown/api/v2/orders/get-orders.md): Retrieve all orders for the current trading day.
+- [Get Trades for Order](https://docs.dhanhq.co/markdown/api/v2/orders/get-trades-by-order-id.md): Retrieve all trades executed for a specific order.
+- [Get Trade Book](https://docs.dhanhq.co/markdown/api/v2/orders/get-trades.md): Retrieve all trades for the current trading day.
+- [Modify Order](https://docs.dhanhq.co/markdown/api/v2/orders/modify-order.md): Modify a pending order.
+- [Place Order](https://docs.dhanhq.co/markdown/api/v2/orders/place-order.md): Place a new order on the exchange.
+- [Slice Order](https://docs.dhanhq.co/markdown/api/v2/orders/slice-order.md): Place order with slicing for quantities exceeding freeze limit.
+- [Portfolio](https://docs.dhanhq.co/markdown/api/v2/portfolio.md): Portfolio: your demat holdings, open positions and P&L, plus converting and squaring off positions with the Dhan API.
+- [Convert Position](https://docs.dhanhq.co/markdown/api/v2/portfolio/convert-position.md): Convert position between product types (e.g., INTRADAY to CNC). Convert positions between intraday and delivery (MIS to CNC) with the Dhan API.
+- [Exit All Positions](https://docs.dhanhq.co/markdown/api/v2/portfolio/exit-all-positions.md): Exit all open positions at market price. Square off every open position and cancel all open orders in one Dhan API call.
+- [Get Holdings](https://docs.dhanhq.co/markdown/api/v2/portfolio/get-holdings.md): Retrieve all holdings in demat account. Fetch demat holdings with quantity, average price and LTP using the Dhan API.
+- [Get Positions](https://docs.dhanhq.co/markdown/api/v2/portfolio/get-positions.md): Retrieve all open positions for the current trading day. Fetch today's open intraday and carry-forward positions with P&L using the Dhan API.
+- [Postback](https://docs.dhanhq.co/markdown/api/v2/postback.md): Webhooks for real-time order status updates via POST callbacks
+- [Rate Limits](https://docs.dhanhq.co/markdown/api/v2/rate-limits.md): DhanHQ API rate limits and best practices
+- [Release Notes](https://docs.dhanhq.co/markdown/api/v2/releases.md): Changelog and release notes for DhanHQ API versions
+- [Sandbox](https://docs.dhanhq.co/markdown/api/v2/sandbox.md): Test DhanHQ API integrations in the sandbox environment
+- [ConditionalTriggerCondition](https://docs.dhanhq.co/markdown/api/v2/schemas/conditionaltriggercondition.md)
+- [ConditionalTriggerDetail](https://docs.dhanhq.co/markdown/api/v2/schemas/conditionaltriggerdetail.md)
+- [ConditionalTriggerOrder](https://docs.dhanhq.co/markdown/api/v2/schemas/conditionaltriggerorder.md)
+- [ConditionalTriggerRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/conditionaltriggerrequest.md)
+- [ConditionalTriggerResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/conditionaltriggerresponse.md)
+- [ConvertPositionRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/convertpositionrequest.md)
+- [EdisFormRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/edisformrequest.md)
+- [EdisFormResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/edisformresponse.md)
+- [EdisInquiryResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/edisinquiryresponse.md)
+- [ExpiredOptionsRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/expiredoptionsrequest.md)
+- [ExpiredOptionsResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/expiredoptionsresponse.md)
+- [ExpiryListRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/expirylistrequest.md)
+- [FundamentalDataRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/fundamentaldatarequest.md)
+- [FundamentalDataResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/fundamentaldataresponse.md)
+- [FundLimit](https://docs.dhanhq.co/markdown/api/v2/schemas/fundlimit.md)
+- [HistoricalRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/historicalrequest.md)
+- [HistoricalResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/historicalresponse.md)
+- [Holding](https://docs.dhanhq.co/markdown/api/v2/schemas/holding.md)
+- [IntradayHistoricalRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/intradayhistoricalrequest.md)
+- [KillSwitchResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/killswitchresponse.md)
+- [LedgerEntry](https://docs.dhanhq.co/markdown/api/v2/schemas/ledgerentry.md)
+- [LTPResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/ltpresponse.md)
+- [MarginRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/marginrequest.md)
+- [MarginResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/marginresponse.md)
+- [MarketFeedRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/marketfeedrequest.md)
+- [MarketMoversRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/marketmoversrequest.md)
+- [MarketMoversResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/marketmoversresponse.md)
+- [ModifyOrderRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/modifyorderrequest.md)
+- [ModifySuperOrderRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/modifysuperorderrequest.md)
+- [MultiMarginRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/multimarginrequest.md)
+- [MultiMarginResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/multimarginresponse.md)
+- [OHLCResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/ohlcresponse.md)
+- [OptionChainRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/optionchainrequest.md)
+- [OptionChainResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/optionchainresponse.md)
+- [OptionData](https://docs.dhanhq.co/markdown/api/v2/schemas/optiondata.md)
+- [Order](https://docs.dhanhq.co/markdown/api/v2/schemas/order.md)
+- [OrderResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/orderresponse.md)
+- [PlaceOrderRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/placeorderrequest.md)
+- [PnlExitDetail](https://docs.dhanhq.co/markdown/api/v2/schemas/pnlexitdetail.md)
+- [PnlExitRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/pnlexitrequest.md)
+- [PnlExitResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/pnlexitresponse.md)
+- [Position](https://docs.dhanhq.co/markdown/api/v2/schemas/position.md)
+- [QuoteResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/quoteresponse.md)
+- [SuperOrder](https://docs.dhanhq.co/markdown/api/v2/schemas/superorder.md)
+- [SuperOrderRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/superorderrequest.md)
+- [TechnicalDataRequest](https://docs.dhanhq.co/markdown/api/v2/schemas/technicaldatarequest.md)
+- [TechnicalDataResponse](https://docs.dhanhq.co/markdown/api/v2/schemas/technicaldataresponse.md)
+- [Trade](https://docs.dhanhq.co/markdown/api/v2/schemas/trade.md)
+- [TradeHistoryEntry](https://docs.dhanhq.co/markdown/api/v2/schemas/tradehistoryentry.md)
+- [Python SDK](https://docs.dhanhq.co/markdown/api/v2/sdks/python.md): DhanHQ Python SDK reference and examples
+- [Statement](https://docs.dhanhq.co/markdown/api/v2/statements.md): Statement: ledger report and trade history with brokerage and charges, using the Dhan API.
+- [Ledger Report](https://docs.dhanhq.co/markdown/api/v2/statements/get-ledger-report.md): Retrieve Trading Account Ledger Report with all credit and debit transaction details. Fetch your trading account ledger: every credit and debit with running balance.
+- [Trade History](https://docs.dhanhq.co/markdown/api/v2/statements/get-trade-history.md): Retrieve detailed trade history for all orders for a given time frame. Response is paginated. Fetch past trades between two dates with brokerage, STT and other charges.
+- [Super Order](https://docs.dhanhq.co/markdown/api/v2/super-orders.md): Super Order: Dhan's bracket order API. Place, modify and cancel orders with entry, target, stop-loss and trailing stop loss in one request.
+- [Cancel Super Order Leg](https://docs.dhanhq.co/markdown/api/v2/super-orders/cancel-super-order-leg.md): Cancel a specific leg of a super order. Cancel the entry, target or stop-loss leg of a Dhan bracket order (Super Order) by order ID.
+- [Get Super Orders](https://docs.dhanhq.co/markdown/api/v2/super-orders/get-super-orders.md): Retrieve all super orders for the current trading day. The order book for Dhan bracket orders: entry, target, stop-loss and trailing stop loss legs.
+- [Modify Super Order](https://docs.dhanhq.co/markdown/api/v2/super-orders/modify-super-order.md): Modify a pending super order leg. Move a bracket order's target or stop-loss, or change its trailing stop loss, with the Dhan API.
+- [Place Super Order](https://docs.dhanhq.co/markdown/api/v2/super-orders/place-super-order.md): Place a bracket order with entry, target, and stop-loss levels. Dhan's Super Order API: one call for entry, target and stop-loss legs, with trailing stop loss.
+- [Trader's Control](https://docs.dhanhq.co/markdown/api/v2/traders-control.md): Trader's Control: trading kill switch and P&L based auto exit (daily profit target and max loss) with the Dhan API.
+- [Configure P&L Based Exit](https://docs.dhanhq.co/markdown/api/v2/traders-control/configure-pnl-exit.md): Configure automatic exit rules based on cumulative profit or loss thresholds. Set a daily profit target and max loss that auto square off positions.
+- [Kill Switch Status](https://docs.dhanhq.co/markdown/api/v2/traders-control/get-kill-switch-status.md): Check whether kill switch is active for the current trading day. Check whether the trading kill switch is active on your account.
+- [Get P&L Based Exit](https://docs.dhanhq.co/markdown/api/v2/traders-control/get-pnl-exit.md): Fetch the currently active P&L based exit configuration. See the active daily profit target and max loss exit settings.
+- [Manage Kill Switch](https://docs.dhanhq.co/markdown/api/v2/traders-control/manage-kill-switch.md): Activate or deactivate the kill switch for your account. Disables trading for the current day. Turn the trading kill switch on or off to stop trading for the day with the Dhan API.
+- [Stop P&L Based Exit](https://docs.dhanhq.co/markdown/api/v2/traders-control/stop-pnl-exit.md): Disable the active P&L based exit configuration. Turn off the daily profit target and max loss auto exit.
+- [Trading APIs](https://docs.dhanhq.co/markdown/api/v2/trading-apis.md)
+
+### DhanHQ Agent Skills
+
+- [DhanHQ Agent Skills](https://docs.dhanhq.co/markdown/skills.md): Open SKILL.md skills that give your AI coding agent deep knowledge of DhanHQ — order placement, portfolio, market data, option chains, live feeds, and ScanX — with built-in safety guardrails.
+- [Backtesting](https://docs.dhanhq.co/markdown/skills/categories/backtesting.md): Test trading strategies against historical data to evaluate performance before going live.
+- [Common Workflows](https://docs.dhanhq.co/markdown/skills/categories/common-workflows.md): End-to-end recipes for frequent trading tasks combining multiple skills.
+- [Error Codes](https://docs.dhanhq.co/markdown/skills/categories/error-codes.md): Reference DhanHQ error codes and troubleshooting guidance for common API issues.
+- [Funds](https://docs.dhanhq.co/markdown/skills/categories/funds.md): Check available margins, fund balances, and margin requirements through your AI agent.
+- [Instruments](https://docs.dhanhq.co/markdown/skills/categories/instruments.md): Access the complete instrument universe across all Indian exchanges — NSE, BSE, and MCX.
+- [Live Feed](https://docs.dhanhq.co/markdown/skills/categories/live-feed.md): Stream real-time market quotes and order book updates via WebSocket connections.
+- [Market Data](https://docs.dhanhq.co/markdown/skills/categories/market-data.md): Fetch OHLC, historical data, and intraday candles for any instrument on Indian exchanges.
+- [Option Chain](https://docs.dhanhq.co/markdown/skills/categories/option-chain.md): Retrieve real-time option chain data with Greeks for any underlying on Indian exchanges.
+- [Options Analysis](https://docs.dhanhq.co/markdown/skills/categories/options-analysis.md): Strategy building, payoff analysis, and implied volatility calculations for options trading.
+- [Orders](https://docs.dhanhq.co/markdown/skills/categories/orders.md): Place, modify, and cancel orders across NSE, BSE, and MCX using AI agent commands.
+- [Portfolio](https://docs.dhanhq.co/markdown/skills/categories/portfolio.md): View holdings, positions, and trade history through your AI agent.
+- [ScanX](https://docs.dhanhq.co/markdown/skills/categories/scanx.md): Screen and filter stocks using AI-powered scanning tools across Indian markets.
+- [Configuration](https://docs.dhanhq.co/markdown/skills/getting-started/configuration.md): Configure your DhanHQ access token so your AI agent can authenticate with DhanHQ APIs.
+- [Installation](https://docs.dhanhq.co/markdown/skills/getting-started/installation.md): Step-by-step guide to installing the Skills CLI and adding DhanHQ Agent Skills to your development environment.
+- [Safety Guardrails](https://docs.dhanhq.co/markdown/skills/getting-started/safety-guardrails.md): Understand the built-in safety mechanisms that protect your account when trading with AI agents using DhanHQ Skills.
+- [Agent Compatibility](https://docs.dhanhq.co/markdown/skills/overview/compatibility.md): DhanHQ Skills work with Claude Code, Codex, and any AI agent that supports the SKILL.md open standard.
+- [The SKILL.md Standard](https://docs.dhanhq.co/markdown/skills/overview/skill-standard.md): SKILL.md is an open standard for describing API capabilities in a format AI agents can understand and act upon.
+- [What Are Agent Skills?](https://docs.dhanhq.co/markdown/skills/overview/what-are-skills.md): Agent Skills are reusable capabilities for AI agents — procedural knowledge that helps agents accomplish trading tasks on Indian exchanges.
+
+### Dhan Cloud
+
+- [Dhan Cloud](https://docs.dhanhq.co/markdown/cloud.md): Deploy and run algorithmic trading strategies on Dhan's managed cloud infrastructure.
+- [Compute Tiers](https://docs.dhanhq.co/markdown/cloud/core-concepts/compute-tiers.md): Dhan Cloud compute tier specs and per-strategy isolation model.
+- [Credits](https://docs.dhanhq.co/markdown/cloud/core-concepts/credits.md): Dhan Cloud credit-based billing, free credits on signup, topping up from Dhan ledger, and low-balance behavior.
+- [Dependencies](https://docs.dhanhq.co/markdown/cloud/core-concepts/dependencies.md): How to declare and manage Python package dependencies for Dhan Cloud strategies.
+- [Execution Environment](https://docs.dhanhq.co/markdown/cloud/core-concepts/execution-environment.md): Python version, runtime restrictions, persistent storage, and execution model for Dhan Cloud strategies.
+- [Variables](https://docs.dhanhq.co/markdown/cloud/core-concepts/variables.md): Inject credentials and config into strategies using Dhan Cloud's Variables system, global and strategy-scoped.
+- [Versions](https://docs.dhanhq.co/markdown/cloud/core-concepts/versions.md): How strategy versioning works in Dhan Cloud, including saving, restoring, and the relationship between editor and deployed versions.
+- [Getting Started](https://docs.dhanhq.co/markdown/cloud/getting-started.md): Connect your Dhan account and deploy your first Python strategy on Dhan Cloud.
+- [Common Errors](https://docs.dhanhq.co/markdown/cloud/reference/errors.md): Common errors in Dhan Cloud strategies and how to fix them, covering deployment, auth, orders, rate limits, SDK, and Python issues.
+- [Allowed Operations](https://docs.dhanhq.co/markdown/cloud/security/allowed-operations.md): What Python operations are allowed and blocked in Dhan Cloud's isolated container environment.
+- [Code Scanner](https://docs.dhanhq.co/markdown/cloud/security/code-scanner.md): How Dhan Cloud's AI code scanner works, what it checks, risk levels, common flags and how to fix them.
+- [Account Menu](https://docs.dhanhq.co/markdown/cloud/using-dhan-cloud/account-menu.md): Credits & Usage, Data API Access, Global Variables, Dhan MCP and other settings in the Dhan Cloud profile menu.
+- [AI Strategy Agent](https://docs.dhanhq.co/markdown/cloud/using-dhan-cloud/ai-strategy-agent.md): Build a Dhan Cloud trading strategy by describing it in plain English. The agent asks what it needs and writes a full Python script you can read and edit.
+- [Code Editor](https://docs.dhanhq.co/markdown/cloud/using-dhan-cloud/code-editor.md): The Dhan Cloud Code Editor - project files, script editor, dependencies, env variables, terminal, compute and deploy.
+- [Orders & Positions](https://docs.dhanhq.co/markdown/cloud/using-dhan-cloud/orders-and-positions.md): Today's positions and orders on your Dhan account, with live P&L, inside Dhan Cloud.
+- [Runs & Logs](https://docs.dhanhq.co/markdown/cloud/using-dhan-cloud/runs-and-logs.md): Every Dhan Cloud strategy run with its start time, duration, status and logs.
+- [Sandbox](https://docs.dhanhq.co/markdown/cloud/using-dhan-cloud/sandbox.md): Generate a DhanHQ sandbox token in Dhan Cloud and test APIs in a closed sandbox environment.
+- [Strategy Dashboard](https://docs.dhanhq.co/markdown/cloud/using-dhan-cloud/strategy-dashboard.md): See every Dhan Cloud strategy with its version, status, activity and compute, and run or schedule it.
+- [Writing Strategies](https://docs.dhanhq.co/markdown/cloud/writing-strategies.md): How to write, structure, and deploy Python trading strategies on Dhan Cloud.
+- [DhanHQ SDK](https://docs.dhanhq.co/markdown/cloud/writing-strategies/dhanhq-sdk.md): Using the official DhanHQ Python SDK in Dhan Cloud, including market data, order placement, and fund limits.
+- [Pine Script to Python](https://docs.dhanhq.co/markdown/cloud/writing-strategies/pine-to-python.md): AI-powered converter that translates TradingView Pine Script v5 strategies into Python code for Dhan Cloud.
+
+### Dhan MCP
+
+- [Dhan MCP](https://docs.dhanhq.co/markdown/mcp.md): Connect your live Dhan trading account to any MCP-compatible AI client — trade, manage portfolio, fetch market data, set alerts, and calculate margins through natural language.
+- [First Query](https://docs.dhanhq.co/markdown/mcp/getting-started/first-query.md): Run your first interaction with Dhan MCP.
+- [Installation](https://docs.dhanhq.co/markdown/mcp/getting-started/installation.md): Set up Dhan MCP with your preferred AI client.
+- [Requirements](https://docs.dhanhq.co/markdown/mcp/getting-started/requirements.md): What you need before connecting to Dhan MCP.
+- [Architecture](https://docs.dhanhq.co/markdown/mcp/overview/architecture.md): How Dhan MCP connects your AI client to your live trading account through the Model Context Protocol.
+- [What is MCP?](https://docs.dhanhq.co/markdown/mcp/overview/what-is-mcp.md): The Model Context Protocol is an open standard that connects AI applications to external tools and data sources through a universal interface.
+- [Alerts](https://docs.dhanhq.co/markdown/mcp/tools/alerts.md): Create price or indicator-triggered alerts with linked orders.
+- [Margin](https://docs.dhanhq.co/markdown/mcp/tools/margin.md): Check required margin before placing any order — single or basket.
+- [Market Data](https://docs.dhanhq.co/markdown/mcp/tools/market-data.md): Fetch live prices, quotes, option chains, and historical OHLCV candles.
+- [Orders](https://docs.dhanhq.co/markdown/mcp/tools/orders.md): View, place, modify, and cancel orders — including Super Orders.
+- [Portfolio](https://docs.dhanhq.co/markdown/mcp/tools/portfolio.md): Check your account snapshot — funds, holdings, positions, and today's trades.
+- [Search](https://docs.dhanhq.co/markdown/mcp/tools/search.md): Resolve company names, tickers, and indices to Dhan security IDs.
