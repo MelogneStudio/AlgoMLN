@@ -54,7 +54,7 @@ pub fn classify_error(
     status_code: Option<u16>,
     error_code: Option<&str>,
     error_type: Option<&str>,
-    _message: Option<&str>,
+    message: Option<&str>,
 ) -> ErrorClass {
     // Check specific HTTP status codes first if present
     if let Some(status) = status_code {
@@ -63,6 +63,9 @@ pub fn classify_error(
         }
         if status == 429 {
             return ErrorClass::Throttle;
+        }
+        if status == 408 {
+            return ErrorClass::UnknownOutcome;
         }
     }
 
@@ -91,6 +94,18 @@ pub fn classify_error(
         }
     }
 
+    // Check message for timeouts or connection resets (Section 8: timeout, connection reset -> UnknownOutcome)
+    if let Some(msg) = message {
+        let msg_lower = msg.to_ascii_lowercase();
+        if msg_lower.contains("timeout")
+            || msg_lower.contains("timed out")
+            || msg_lower.contains("connection reset")
+            || msg_lower.contains("connection refused")
+        {
+            return ErrorClass::UnknownOutcome;
+        }
+    }
+
     // Check 5xx or server transport errors
     if let Some(status) = status_code {
         if (500..=599).contains(&status) {
@@ -99,4 +114,37 @@ pub fn classify_error(
     }
 
     ErrorClass::Unclassified
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_error_timeouts_and_connection_resets() {
+        assert_eq!(
+            classify_error(Some(408), None, None, None),
+            ErrorClass::UnknownOutcome
+        );
+        assert_eq!(
+            classify_error(None, None, None, Some("operation timed out")),
+            ErrorClass::UnknownOutcome
+        );
+        assert_eq!(
+            classify_error(None, None, None, Some("connection reset by peer")),
+            ErrorClass::UnknownOutcome
+        );
+        assert_eq!(
+            classify_error(Some(401), None, None, None),
+            ErrorClass::FatalAuth
+        );
+        assert_eq!(
+            classify_error(Some(429), None, None, None),
+            ErrorClass::Throttle
+        );
+        assert_eq!(
+            classify_error(None, Some("RL001"), None, None),
+            ErrorClass::Throttle
+        );
+    }
 }
