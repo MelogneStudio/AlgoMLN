@@ -191,12 +191,12 @@ impl DhanTradingClient {
             OrderKind::Limit { .. } => "LIMIT",
         };
 
-        // Round limit price to instrument tick size without float noise
+        // Round limit price to instrument tick size without float noise (half-up)
         let price_rupees = match req.kind {
             OrderKind::Market => 0.0,
             OrderKind::Limit { price_paise } => {
                 let tick = tick_size_paise.unwrap_or(5).max(1);
-                let rounded_paise = (price_paise / tick) * tick;
+                let rounded_paise = round_to_nearest_tick(price_paise, tick);
                 rounded_paise as f64 / 100.0
             }
         };
@@ -228,14 +228,29 @@ impl DhanTradingClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ExecRestError::Transport(e.to_string()))?;
+            .map_err(|e| {
+                if e.is_timeout() || e.is_connect() {
+                    ExecRestError::UnknownOutcome {
+                        class: ErrorClass::UnknownOutcome,
+                        message: e.to_string(),
+                        raw_body: None,
+                    }
+                } else {
+                    ExecRestError::Transport(e.to_string())
+                }
+            })?;
 
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
+        let json_err: Option<serde_json::Value> = serde_json::from_str(&body_text).ok();
+        let is_failure = json_err
+            .as_ref()
+            .and_then(|j| j.get("status"))
+            .and_then(|v| v.as_str())
+            == Some("failure");
 
-        if status.is_success() {
-            let json: serde_json::Value = serde_json::from_str(&body_text)
-                .map_err(|e| ExecRestError::Malformed(e.to_string()))?;
+        if status.is_success() && !is_failure {
+            let json = json_err.unwrap_or(serde_json::Value::Null);
             let order_id = json
                 .get("orderId")
                 .and_then(|v| v.as_str().or_else(|| v.as_i64().map(|_| "")))
@@ -260,7 +275,6 @@ impl DhanTradingClient {
         }
 
         // Handle error responses using error classification
-        let json_err: Option<serde_json::Value> = serde_json::from_str(&body_text).ok();
         let err_code = json_err
             .as_ref()
             .and_then(|j| j.get("errorCode"))
@@ -309,17 +323,62 @@ impl DhanTradingClient {
             .headers(self.headers())
             .send()
             .await
-            .map_err(|e| ExecRestError::Transport(e.to_string()))?;
+            .map_err(|e| {
+                if e.is_timeout() || e.is_connect() {
+                    ExecRestError::UnknownOutcome {
+                        class: ErrorClass::UnknownOutcome,
+                        message: e.to_string(),
+                        raw_body: None,
+                    }
+                } else {
+                    ExecRestError::Transport(e.to_string())
+                }
+            })?;
 
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            let body_text = resp.text().await.unwrap_or_default();
-            Err(ExecRestError::Rejected {
-                class: ErrorClass::Unclassified,
-                message: format!("cancel order failed: {body_text}"),
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        let json_opt: Option<serde_json::Value> = serde_json::from_str(&body_text).ok();
+        let is_failure = json_opt
+            .as_ref()
+            .and_then(|j| j.get("status"))
+            .and_then(|v| v.as_str())
+            == Some("failure");
+
+        if status.is_success() && !is_failure {
+            return Ok(());
+        }
+
+        let err_code = json_opt
+            .as_ref()
+            .and_then(|j| j.get("errorCode"))
+            .and_then(|v| v.as_str());
+        let err_type = json_opt
+            .as_ref()
+            .and_then(|j| j.get("errorType"))
+            .and_then(|v| v.as_str());
+        let err_msg = json_opt
+            .as_ref()
+            .and_then(|j| j.get("errorMessage").or_else(|| j.get("message")))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&body_text);
+
+        let class = classify_error(Some(status.as_u16()), err_code, err_type, Some(err_msg));
+
+        match class {
+            ErrorClass::FatalAuth => Err(ExecRestError::Auth(err_msg.to_string())),
+            ErrorClass::Throttle => Err(ExecRestError::Throttle(err_msg.to_string())),
+            ErrorClass::UnknownOutcome | ErrorClass::TransientServerError => {
+                Err(ExecRestError::UnknownOutcome {
+                    class,
+                    message: err_msg.to_string(),
+                    raw_body: Some(body_text),
+                })
+            }
+            _ => Err(ExecRestError::Rejected {
+                class,
+                message: err_msg.to_string(),
                 raw_body: Some(body_text),
-            })
+            }),
         }
     }
 
@@ -338,7 +397,18 @@ impl DhanTradingClient {
             .await
             .map_err(|e| ExecRestError::Transport(e.to_string()))?;
 
+        let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            let class = classify_error(Some(status.as_u16()), None, None, Some(&body_text));
+            return match class {
+                ErrorClass::FatalAuth => Err(ExecRestError::Auth(body_text)),
+                ErrorClass::Throttle => Err(ExecRestError::Throttle(body_text)),
+                _ => Err(ExecRestError::Transport(format!("HTTP {status}: {body_text}"))),
+            };
+        }
+
         let json: serde_json::Value = serde_json::from_str(&body_text)
             .map_err(|e| ExecRestError::Malformed(e.to_string()))?;
 
@@ -376,16 +446,40 @@ impl DhanTradingClient {
             .await
             .map_err(|e| ExecRestError::Transport(e.to_string()))?;
 
-        if resp.status() == StatusCode::NOT_FOUND {
+        let status = resp.status();
+        if status == StatusCode::NOT_FOUND {
             return Ok(None);
         }
 
         let body_text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            let class = classify_error(Some(status.as_u16()), None, None, Some(&body_text));
+            return match class {
+                ErrorClass::FatalAuth => Err(ExecRestError::Auth(body_text)),
+                ErrorClass::Throttle => Err(ExecRestError::Throttle(body_text)),
+                _ => Err(ExecRestError::Transport(format!("HTTP {status}: {body_text}"))),
+            };
+        }
+
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_text) {
             // Check if Dhan returns an error indicating not found or failure
-            if json.get("status").and_then(|s| s.as_str()) == Some("failure")
-                || json.get("orderId").is_none()
-            {
+            if json.get("status").and_then(|s| s.as_str()) == Some("failure") {
+                let msg = json
+                    .get("errorMessage")
+                    .or_else(|| json.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if msg.contains("not found") || msg.contains("no order") {
+                    return Ok(None);
+                }
+                return Err(ExecRestError::Rejected {
+                    class: ErrorClass::BusinessRejection,
+                    message: msg,
+                    raw_body: Some(body_text),
+                });
+            }
+            if json.get("orderId").is_none() {
                 return Ok(None);
             }
             if let Ok(norm) = parse_rest_order(&json) {
@@ -414,7 +508,18 @@ impl DhanTradingClient {
             .await
             .map_err(|e| ExecRestError::Transport(e.to_string()))?;
 
+        let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            let class = classify_error(Some(status.as_u16()), None, None, Some(&body_text));
+            return match class {
+                ErrorClass::FatalAuth => Err(ExecRestError::Auth(body_text)),
+                ErrorClass::Throttle => Err(ExecRestError::Throttle(body_text)),
+                _ => Err(ExecRestError::Transport(format!("HTTP {status}: {body_text}"))),
+            };
+        }
+
         let json: serde_json::Value = serde_json::from_str(&body_text)
             .map_err(|e| ExecRestError::Malformed(e.to_string()))?;
 
@@ -476,9 +581,17 @@ impl DhanTradingClient {
             .await
             .map_err(|e| ExecRestError::Transport(e.to_string()))?;
 
+        let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
-        let json: serde_json::Value = serde_json::from_str(&body_text)
-            .map_err(|e| ExecRestError::Malformed(e.to_string()))?;
+
+        if !status.is_success() {
+            let class = classify_error(Some(status.as_u16()), None, None, Some(&body_text));
+            return match class {
+                ErrorClass::FatalAuth => Err(ExecRestError::Auth(body_text)),
+                ErrorClass::Throttle => Err(ExecRestError::Throttle(body_text)),
+                _ => Err(ExecRestError::Transport(format!("HTTP {status}: {body_text}"))),
+            };
+        }
 
         let arr = if let Some(a) = json.as_array() {
             a
@@ -691,5 +804,25 @@ impl DhanTradingClient {
                 raw_body: Some(body_text),
             })
         }
+    }
+}
+
+/// Round price in paise to the nearest instrument tick size (half-up).
+pub fn round_to_nearest_tick(price_paise: i64, tick_paise: i64) -> i64 {
+    let tick = tick_paise.max(1);
+    ((price_paise + tick / 2) / tick) * tick
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tick_rounding_half_up() {
+        assert_eq!(round_to_nearest_tick(25050, 5), 25050);
+        assert_eq!(round_to_nearest_tick(25052, 5), 25050);
+        assert_eq!(round_to_nearest_tick(25053, 5), 25055); // 25053 rounds up to 25055
+        assert_eq!(round_to_nearest_tick(25054, 5), 25055);
+        assert_eq!(round_to_nearest_tick(25055, 5), 25055);
     }
 }
