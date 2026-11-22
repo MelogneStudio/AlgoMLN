@@ -181,10 +181,17 @@ impl SubmissionQueue {
     }
 
     /// Pop the next highest priority item if token is consumed.
+    /// Drops entries if daily limit has reached the 95% stop-entries threshold.
     pub fn pop_next(&mut self) -> Option<QueueAction> {
-        let item = self.heap.pop()?;
-        self.daily_count += 1;
-        Some(item.action)
+        while let Some(item) = self.heap.pop() {
+            if item.priority == Priority::Entry && !self.can_submit_entry() {
+                // Entries are locked at 95% safety threshold; discard pending entry
+                continue;
+            }
+            self.daily_count += 1;
+            return Some(item.action);
+        }
+        None
     }
 
     pub fn counter_status(&self) -> CounterStatus {
