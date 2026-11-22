@@ -122,7 +122,11 @@ impl DhanExecutionPort {
         Ok(port)
     }
 
-    fn run_future<F: std::future::Future>(rt_opt: &Option<tokio::runtime::Runtime>, f: F) -> F::Output {
+    fn run_future<F: std::future::Future>(rt_opt: &Option<tokio::runtime::Runtime>, f: F) -> F::Output
+    where
+        F: Send,
+        F::Output: Send,
+    {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             std::thread::scope(|s| {
                 s.spawn(|| handle.block_on(f)).join().unwrap()
