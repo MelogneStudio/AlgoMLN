@@ -1,6 +1,7 @@
 pub mod correlation;
 pub mod error;
 pub mod normalize;
+pub mod port;
 pub mod queue;
 pub mod reconciler;
 pub mod rest;
@@ -18,6 +19,7 @@ pub use normalize::{
     map_status, parse_rest_order, parse_rupees_to_paise, parse_ws_order, rupees_to_paise_half_up,
     NormalizedOrderUpdate, NormalizedStatus, UpdateSource,
 };
+pub use port::{DhanExecutionPort, DhanExecutionPortConfig};
 pub use queue::{
     CounterStatus, Priority, QueueAction, SubmissionQueue, DAILY_ORDER_CAP, STOP_ENTRIES_95_PCT,
     WARN_80_PCT,
@@ -562,7 +564,7 @@ mod tests {
     fn test_risk_controller_limits_and_entry_lock() {
         let cfg = RiskRailsConfig {
             max_qty_per_order: Some(100),
-            max_value_per_order_paise: Some(100_000), // 1,000 Rs
+            max_value_per_order_paise: Some(100_000),
             max_orders_per_minute: Some(10),
             broker_kill_switch_on_breach: true,
             allow_emergency_delete_all_positions: false,
@@ -580,22 +582,18 @@ mod tests {
         };
         assert!(risk.validate_order(&valid_entry).is_ok());
 
-        // Max qty exceed
         let mut excess_qty = valid_entry.clone();
         excess_qty.quantity = 150;
         assert!(risk.validate_order(&excess_qty).is_err());
 
-        // Max value exceed (10 * 20,000 = 200,000 paise > 100,000)
         let mut excess_val = valid_entry.clone();
         excess_val.kind = OrderKind::Limit { price_paise: 20000 };
         assert!(risk.validate_order(&excess_val).is_err());
 
-        // Entry lock engages
         risk.lock_entries("test lock");
         assert!(risk.is_entries_locked());
         assert!(risk.validate_order(&valid_entry).is_err());
 
-        // Exits are NEVER blocked by entry lock!
         let exit_req = OrderRequest {
             local_id: "X1".into(),
             security_id: "1333".into(),
@@ -617,7 +615,7 @@ mod tests {
 
         let mut local_orders = BTreeMap::new();
         let mut local_positions = BTreeMap::new();
-        local_positions.insert("1333".to_string(), 50i64); // Long 50 shares
+        local_positions.insert("1333".to_string(), 50i64);
 
         let pending_req = OrderRequest {
             local_id: "P1".into(),
@@ -633,17 +631,53 @@ mod tests {
         tracker.dhan_order_id = Some("DH-100".into());
         local_orders.insert("P1".into(), tracker);
 
-        // Execute breach sequence
         let events = reconciler
             .execute_max_daily_loss_breach(&client, &mut risk, &mut local_orders, &mut local_positions)
             .await;
 
-        // Entry lock engaged
         assert!(risk.is_entries_locked());
-
-        // Events include Halt, Cancelled for pending order, and breach exit order
         assert!(events.iter().any(|e| matches!(e, ExecEvent::Halt { .. })));
         assert!(events.iter().any(|e| matches!(e, ExecEvent::Cancelled { ref local_id, .. } if local_id == "P1")));
         assert!(events.iter().any(|e| matches!(e, ExecEvent::Submitted { ref local_id, .. } if local_id == "BREACH-EXIT-1333")));
+    }
+
+    #[test]
+    fn test_dhan_execution_port_dry_mode_3c_adapter() {
+        use algomln::trader::{ExecutionPort, OrderEvent};
+
+        let port_cfg = DhanExecutionPortConfig {
+            client_id: "1000000000".into(),
+            mode_config: ModeConfig::resolve(ExecutionMode::Dry, None).unwrap(),
+            risk_config: RiskRailsConfig::default(),
+            wal_path: None,
+            tick_sizes_paise: BTreeMap::new(),
+            run_tag: "DRYRUN".into(),
+        };
+
+        let mut port = DhanExecutionPort::new(port_cfg).expect("create port");
+
+        // Submit via 3c trait
+        let trader_req = algomln::trader::OrderRequest {
+            client_order_id: "ORD-001".into(),
+            symbol: "RELIANCE".into(),
+            side: algomln::trader::Side::Buy,
+            qty: 15,
+            reason: algomln::trader::OrderReason::Rule("R1".into()),
+            ref_price: 2500.0,
+            decided_at: 1700000000,
+        };
+
+        port.submit(&trader_req).expect("submit succeeds");
+
+        // Drain 3c events: should contain Acked
+        let events = port.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], OrderEvent::Acked { id: "ORD-001".into() });
+
+        // Cancel via 3c trait
+        port.cancel("ORD-001".into()).expect("cancel succeeds");
+        let cancel_evs = port.drain_events();
+        assert_eq!(cancel_evs.len(), 1);
+        assert_eq!(cancel_evs[0], OrderEvent::Cancelled { id: "ORD-001".into() });
     }
 }
