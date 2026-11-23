@@ -1396,3 +1396,100 @@ fn test_rejected_exit_order_does_not_permanently_block_future_exits() {
 
     assert!(port.submit_order(exit2).is_ok(), "subsequent exit must be allowed once previous exit ended terminal");
 }
+
+// 10. position query error triggers reconcile and partial exit replaces only requested remaining qty
+#[test]
+fn test_exit_replace_handles_position_error_and_caps_partial_exit() {
+    let _env = init_mock_env();
+    let pos_call_count = Arc::new(AtomicUsize::new(0));
+    let pcc = Arc::clone(&pos_call_count);
+    let placed_qty = Arc::new(AtomicUsize::new(0));
+    let pq = Arc::clone(&placed_qty);
+
+    let server = MockHttpServer::new(move |method, path, body| {
+        if method == "GET" && path == "/orders" {
+            (200, "[]")
+        } else if method == "GET" && path == "/positions" {
+            let n = pcc.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == 2 {
+                // Second call (during exit replace sizing) fails with 500 error
+                (500, r#"{"status":"failure","errorMessage":"Position service unavailable"}"#)
+            } else {
+                // Subsequent calls succeed: position has 100 shares, but exit order only requested 25
+                (200, r#"[{"securityId":"LT","netQty":100,"productType":"INTRADAY","buyQty":100,"sellQty":0}]"#)
+            }
+        } else if method == "POST" && path == "/orders" {
+            let body_json = body.split("\r\n\r\n").nth(1).unwrap_or(body);
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(body_json) {
+                if let Some(q) = json.get("quantity").and_then(|v| v.as_u64()) {
+                    pq.store(q as usize, Ordering::SeqCst);
+                }
+            }
+            (200, r#"{"orderId":"EX-LT","orderStatus":"TRANSIT"}"#)
+        } else if method == "DELETE" && path.starts_with("/orders/") {
+            (200, r#"{"status":"success"}"#)
+        } else if method == "GET" && path.starts_with("/orders/external/") {
+            (200, r#"{"orderId":"EX-LT","orderStatus":"CANCELLED","filledQty":0,"remainingQuantity":25}"#)
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig {
+            timeout: Duration::from_millis(5),
+            max_rounds: 4,
+        },
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    // Partial exit: 25 shares out of 100
+    let exit_req = OrderRequest {
+        local_id: "EXIT-LT".into(),
+        security_id: "LT".into(),
+        side: Side::Sell,
+        quantity: 25,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 1,
+    };
+
+    port.submit_order(exit_req).unwrap();
+    port.process_queue_step();
+
+    // Transition to Open
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-LT".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Open,
+        quantity: 25,
+        cum_traded_qty: 0,
+        remaining_qty: 25,
+        avg_price_paise: None,
+        last_traded_price_paise: None,
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    thread::sleep(Duration::from_millis(10));
+    // First timeout check: cancel succeeds, status CANCELLED, but positions fails with 500
+    // Must NOT abandon; phase becomes Reconciling
+    port.check_exit_timeouts();
+    assert_eq!(port.active_exit_loops().get("LT").unwrap().phase, ExitLoopPhase::Reconciling);
+
+    // Second check: positions query succeeds
+    port.check_exit_timeouts();
+    // Sizing must cap at remaining_qty (25), not 100!
+    assert_eq!(placed_qty.load(Ordering::SeqCst), 25, "replacement must be capped at 25 shares (not full 100 pos)");
+    let r2 = port.local_orders().get("EXIT-LT-R2").expect("EXIT-LT-R2 must exist");
+    assert_eq!(r2.request.quantity, 25);
+}

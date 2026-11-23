@@ -647,10 +647,17 @@ impl DhanExecutionPort {
 
                     // Rule 4: Size replacement from broker-confirmed position snapshot
                     let client = self.client.clone();
-                    let broker_positions = Self::run_future(&self.rt, async {
+                    let broker_positions = match Self::run_future(&self.rt, async {
                         client.get_positions().await
-                    })
-                    .unwrap_or_default();
+                    }) {
+                        Ok(positions) => positions,
+                        Err(e) => {
+                            eprintln!("Failed to get broker positions for exit replace sizing: {e}; triggering reconcile");
+                            exit_loop.phase = ExitLoopPhase::Reconciling;
+                            self.active_exit_loops.insert(symbol, exit_loop);
+                            continue;
+                        }
+                    };
 
                     let mut confirmed_net_qty = 0i64;
                     for pos in broker_positions {
@@ -659,7 +666,11 @@ impl DhanExecutionPort {
                         }
                     }
 
-                    if confirmed_net_qty == 0 {
+                    let open_target_qty = tracker.remaining_qty;
+                    let confirmed_qty = confirmed_net_qty.unsigned_abs();
+                    let replace_qty = std::cmp::min(open_target_qty, confirmed_qty);
+
+                    if replace_qty == 0 {
                         println!(
                             "EXIT_REPLACE: symbol={}, round={}, old_order_id={}, outcome={:?}, new_order_id=none",
                             symbol, exit_loop.round, old_order_id, outcome
@@ -669,7 +680,6 @@ impl DhanExecutionPort {
                         continue;
                     }
 
-                    let replace_qty = confirmed_net_qty.unsigned_abs();
                     let replace_side = if confirmed_net_qty > 0 {
                         Side::Sell
                     } else {
