@@ -72,13 +72,6 @@ pub fn classify_error(
         }
     }
 
-    // Check message for Invalid IP before DH-905 OurBug mapping
-    if let Some(msg) = message {
-        if msg.to_ascii_lowercase().contains("invalid ip") {
-            return ErrorClass::FatalConfigIp;
-        }
-    }
-
     let code_upper = error_code.map(|c| c.to_ascii_uppercase());
     let type_upper = error_type.map(|t| t.to_ascii_uppercase());
 
@@ -94,13 +87,37 @@ pub fn classify_error(
             "DH-902" => return ErrorClass::FatalConfig,
             "DH-903" => return ErrorClass::FatalAccount,
             "DH-904" | "RL001" => return ErrorClass::Throttle,
-            "DH-905" => return ErrorClass::OurBug,
+            "DH-905" => {
+                if let Some(msg) = message {
+                    let msg_lower = msg.to_ascii_lowercase();
+                    if (msg_lower.contains("invalid ip") && !msg_lower.contains("invalid ipo"))
+                        || msg_lower.contains("static ip")
+                        || msg_lower.contains("ip not whitelisted")
+                    {
+                        return ErrorClass::FatalConfigIp;
+                    }
+                }
+                return ErrorClass::OurBug;
+            }
             "DH-906" => return ErrorClass::BusinessRejection,
             "DH-907" => return ErrorClass::BadRequest,
             "DH-908" => return ErrorClass::TransientServerError,
             "DH-909" => return ErrorClass::UnknownOutcome,
             "DH-910" => return ErrorClass::Unclassified,
             _ => {}
+        }
+    }
+
+    // Check message for Invalid IP if code was not DH-905 but HTTP status is 400/403
+    if let Some(msg) = message {
+        let msg_lower = msg.to_ascii_lowercase();
+        if (msg_lower.contains("invalid ip") && !msg_lower.contains("invalid ipo"))
+            || msg_lower.contains("static ip")
+            || msg_lower.contains("ip not whitelisted")
+        {
+            if status_code == Some(400) || status_code == Some(403) {
+                return ErrorClass::FatalConfigIp;
+            }
         }
     }
 
@@ -176,5 +193,13 @@ mod tests {
         // DH-905 with no message -> OurBug
         let err_none = classify_error(None, Some("DH-905"), None, None);
         assert_eq!(err_none, ErrorClass::OurBug);
+
+        // DH-906 with "Invalid IPO" must NOT map to FatalConfigIp
+        let err_ipo = classify_error(None, Some("DH-906"), None, Some("Invalid IPO bid quantity"));
+        assert_eq!(err_ipo, ErrorClass::BusinessRejection);
+
+        // Static IP variation
+        let err_static_ip = classify_error(None, Some("DH-905"), None, Some("Invalid static IP configured"));
+        assert_eq!(err_static_ip, ErrorClass::FatalConfigIp);
     }
 }
