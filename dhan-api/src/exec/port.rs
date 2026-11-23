@@ -739,6 +739,7 @@ impl DhanExecutionPort {
 
     /// Drain incoming raw ExecEvents
     pub fn drain_exec_events(&mut self) -> Vec<ExecEvent> {
+        self.check_exit_timeouts();
         self.outgoing_events.drain(..).collect()
     }
 }
