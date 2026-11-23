@@ -220,6 +220,12 @@ impl DhanExecutionPort {
                             if let Some(tracker) = self.local_orders.get_mut(&req.local_id) {
                                 tracker.state = OrderState::Rejected;
                                 let _ = self.wal.append(tracker);
+                                if class.locks_entries() {
+                                    self.risk.lock_entries(&format!("fatal rejection ({class:?}): {message}"));
+                                    self.outgoing_events.push_back(ExecEvent::Halt {
+                                        reason: format!("fatal config/auth rejection ({class:?}): {message}"),
+                                    });
+                                }
                                 self.outgoing_events.push_back(ExecEvent::Rejected {
                                     local_id: req.local_id.clone(),
                                     reason: message,

@@ -9,6 +9,8 @@ pub enum ErrorClass {
     FatalAuth,
     /// DH-902: Lock entries, alert (segment access, or live static IP missing).
     FatalConfig,
+    /// DH-905 with "Invalid IP": Lock entries, alert loudly, never retry.
+    FatalConfigIp,
     /// DH-903: Lock entries, alert.
     FatalAccount,
     /// DH-904, RL001 (RATE_LIMIT_ERROR), HTTP 429: Back off at least 1s, requeue, exits first,
@@ -34,6 +36,7 @@ impl ErrorClass {
             self,
             ErrorClass::FatalAuth
                 | ErrorClass::FatalConfig
+                | ErrorClass::FatalConfigIp
                 | ErrorClass::FatalAccount
                 | ErrorClass::OurBug
         )
@@ -66,6 +69,13 @@ pub fn classify_error(
         }
         if status == 408 {
             return ErrorClass::UnknownOutcome;
+        }
+    }
+
+    // Check message for Invalid IP before DH-905 OurBug mapping
+    if let Some(msg) = message {
+        if msg.to_ascii_lowercase().contains("invalid ip") {
+            return ErrorClass::FatalConfigIp;
         }
     }
 
@@ -146,5 +156,25 @@ mod tests {
             classify_error(None, Some("RL001"), None, None),
             ErrorClass::Throttle
         );
+    }
+
+    #[test]
+    fn test_classify_error_dh905_invalid_ip_vs_our_bug() {
+        // DH-905 with "Invalid IP" -> FatalConfigIp, locks entries
+        let err_ip = classify_error(None, Some("DH-905"), None, Some("Request received from Invalid IP address"));
+        assert_eq!(err_ip, ErrorClass::FatalConfigIp);
+        assert!(err_ip.locks_entries(), "FatalConfigIp must lock entries");
+
+        // Case-insensitivity check
+        let err_ip_lower = classify_error(None, Some("DH-905"), None, Some("error: invalid ip detected"));
+        assert_eq!(err_ip_lower, ErrorClass::FatalConfigIp);
+
+        // DH-905 without "Invalid IP" -> OurBug
+        let err_other = classify_error(None, Some("DH-905"), None, Some("Internal schema parser failed"));
+        assert_eq!(err_other, ErrorClass::OurBug);
+
+        // DH-905 with no message -> OurBug
+        let err_none = classify_error(None, Some("DH-905"), None, None);
+        assert_eq!(err_none, ErrorClass::OurBug);
     }
 }
