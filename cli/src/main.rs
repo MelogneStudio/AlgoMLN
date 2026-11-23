@@ -100,6 +100,7 @@ fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             wal_path: Some(wal_path),
             tick_sizes_paise: BTreeMap::new(),
             run_tag: "STARTUP".into(),
+            exit_replace_config: dhan_api::exec::ExitReplaceConfig::default(),
         };
         let _port = dhan_api::exec::DhanExecutionPort::new(port_cfg)
             .map_err(|e| format!("startup check failed: {e}"))?;

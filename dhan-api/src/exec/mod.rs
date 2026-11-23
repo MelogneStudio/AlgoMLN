@@ -19,7 +19,9 @@ pub use normalize::{
     map_status, parse_rest_order, parse_rupees_to_paise, parse_ws_order, rupees_to_paise_half_up,
     NormalizedOrderUpdate, NormalizedStatus, UpdateSource,
 };
-pub use port::{DhanExecutionPort, DhanExecutionPortConfig};
+pub use port::{
+    ActiveExitLoop, DhanExecutionPort, DhanExecutionPortConfig, ExitLoopPhase, ExitReplaceConfig,
+};
 pub use queue::{
     CounterStatus, Priority, QueueAction, SubmissionQueue, DAILY_ORDER_CAP, STOP_ENTRIES_95_PCT,
     WARN_80_PCT,
@@ -652,6 +654,7 @@ mod tests {
             wal_path: None,
             tick_sizes_paise: BTreeMap::new(),
             run_tag: "DRYRUN".into(),
+            exit_replace_config: ExitReplaceConfig::default(),
         };
 
         let mut port = DhanExecutionPort::new(port_cfg).expect("create port");

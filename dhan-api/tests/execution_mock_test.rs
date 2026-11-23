@@ -1,8 +1,9 @@
 use dhan_api::exec::{
-    CorrelationGenerator, DhanTradingClient, ErrorClass, ExecEvent, ExecutionMode, ModeConfig,
-    NormalizedOrderUpdate, NormalizedStatus, OrderIntent, OrderKind, OrderRequest, OrderState,
-    OrderTracker, OrderWal, Reconciler, RiskController, RiskRailsConfig, Side, SubmissionQueue,
-    UpdateSource,
+    CorrelationGenerator, DhanExecutionPort, DhanExecutionPortConfig,
+    DhanTradingClient, ErrorClass, ExecEvent, ExecutionMode, ExitLoopPhase, ExitReplaceConfig,
+    ModeConfig, NormalizedOrderUpdate, NormalizedStatus, OrderIntent, OrderKind, OrderRequest,
+    OrderState, OrderTracker, OrderWal, Reconciler, RiskController, RiskRailsConfig, Side,
+    SubmissionQueue, UpdateSource,
 };
 use std::{
     collections::BTreeMap,
@@ -15,6 +16,14 @@ use std::{
     thread,
     time::Duration,
 };
+
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn init_mock_env() -> std::sync::MutexGuard<'static, ()> {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("DHAN_SANDBOX_ACCESS_TOKEN", "mock_sandbox_token");
+    guard
+}
 
 /// Simple mock server that routes incoming HTTP requests to handlers.
 struct MockHttpServer {
@@ -39,6 +48,8 @@ impl MockHttpServer {
             while !stop_clone.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                         let mut buf = [0u8; 8192];
                         let n = match stream.read(&mut buf) {
                             Ok(n) if n > 0 => n,
@@ -91,6 +102,7 @@ impl Drop for MockHttpServer {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_timeout_then_success_resolved_by_correlation_no_duplicate() {
+    let _env = init_mock_env();
     let server = MockHttpServer::new(|method, path, _req| {
         if method == "POST" && path == "/orders" {
             // First place request triggers a transient 504 Gateway Timeout
@@ -225,6 +237,7 @@ fn test_partial_fill_then_fill_incremental_quantities() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_rejection_with_no_retry() {
+    let _env = init_mock_env();
     let server = MockHttpServer::new(|method, path, _req| {
         if method == "POST" && path == "/orders" {
             // Broker business rejection DH-906
@@ -324,6 +337,7 @@ fn test_duplicate_fill_poll_and_websocket_counted_once() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_websocket_drop_missed_fill_recovered_by_reconciler() {
+    let _env = init_mock_env();
     let server = MockHttpServer::new(|method, path, _req| {
         if method == "GET" && path == "/orders" {
             // Broker reports the missed fill
@@ -473,6 +487,7 @@ fn test_unknown_status_string_locks_entries_without_crashing() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_rate_limit_rl001_and_dh904_backs_off_and_requeues() {
+    let _env = init_mock_env();
     let attempt = Arc::new(AtomicUsize::new(0));
     let attempt_clone = Arc::clone(&attempt);
     let server = MockHttpServer::new(move |_method, path, _req| {
@@ -579,6 +594,7 @@ fn test_flatten_many_positions_paced_under_rate_limit() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_kill_switch_activation_retried_until_flat() {
+    let _env = init_mock_env();
     let ks_attempts = Arc::new(AtomicUsize::new(0));
     let ks_clone = Arc::clone(&ks_attempts);
     let server = MockHttpServer::new(move |_method, path, _req| {
@@ -619,6 +635,7 @@ async fn test_kill_switch_activation_retried_until_flat() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_mode_isolation_sandbox_cannot_use_live_base_url_or_token() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // 1. Sandbox cannot use live token or live base URL
     std::env::set_var("DHAN_ACCESS_TOKEN", "live_token");
     std::env::remove_var("DHAN_SANDBOX_ACCESS_TOKEN");
@@ -643,4 +660,684 @@ fn test_mode_isolation_sandbox_cannot_use_live_base_url_or_token() {
     let live_ok = ModeConfig::resolve(ExecutionMode::Live, None).unwrap();
     assert_eq!(live_ok.base_url, dhan_api::exec::LIVE_BASE_URL);
     assert_eq!(live_ok.token.as_deref(), Some("live_token"));
+
+    // Restore environment variables
+    std::env::set_var("DHAN_SANDBOX_ACCESS_TOKEN", "mock_sandbox_token");
+    std::env::remove_var("LIVE_TRADING");
+    std::env::remove_var("DHAN_ACCESS_TOKEN");
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: Exit Replace Loop Mock Tests
+// ---------------------------------------------------------------------------
+
+// 1. exit fills before timeout (no replacement)
+#[test]
+fn test_exit_fills_before_timeout_no_replacement() {
+    let _env = init_mock_env();
+    let server = MockHttpServer::new(|method, path, _body| {
+        if method == "GET" && path == "/orders" {
+            (200, "[]")
+        } else if method == "GET" && path == "/positions" {
+            (200, r#"[{"securityId":"RELIANCE","netQty":10,"productType":"INTRADAY","buyQty":10,"sellQty":0}]"#)
+        } else if method == "POST" && path == "/orders" {
+            (200, r#"{"orderId":"EX-1","orderStatus":"TRANSIT"}"#)
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig {
+            timeout: Duration::from_millis(50),
+            max_rounds: 4,
+        },
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    let req = OrderRequest {
+        local_id: "EXIT-1".into(),
+        security_id: "RELIANCE".into(),
+        side: Side::Sell,
+        quantity: 10,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 1,
+    };
+
+    port.submit_order(req).unwrap();
+    port.process_queue_step();
+
+    // Verify order is submitted and awaiting pending
+    let loops = port.active_exit_loops();
+    assert_eq!(loops.get("RELIANCE").unwrap().phase, ExitLoopPhase::AwaitingPending);
+
+    // Feed PENDING update -> timer starts
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-1".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Open,
+        quantity: 10,
+        cum_traded_qty: 0,
+        remaining_qty: 10,
+        avg_price_paise: None,
+        last_traded_price_paise: None,
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    assert_eq!(port.active_exit_loops().get("RELIANCE").unwrap().phase, ExitLoopPhase::TimerRunning);
+
+    // Fill arrives before timeout expires
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-1".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Filled,
+        quantity: 10,
+        cum_traded_qty: 10,
+        remaining_qty: 0,
+        avg_price_paise: Some(250000),
+        last_traded_price_paise: Some(250000),
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    assert_eq!(port.active_exit_loops().get("RELIANCE").unwrap().phase, ExitLoopPhase::Terminal);
+
+    // Sleep past timeout and run check_exit_timeouts()
+    thread::sleep(Duration::from_millis(60));
+    port.check_exit_timeouts();
+
+    // Assert no replacement was placed
+    let (open_orders, _) = port.snapshot();
+    assert_eq!(open_orders.len(), 0);
+    assert_eq!(port.local_orders().len(), 1);
+}
+
+// 2. timeout then cancel then replacement fills
+#[test]
+fn test_exit_timeout_then_cancel_then_replacement_fills() {
+    let _env = init_mock_env();
+    let cancel_count = Arc::new(AtomicUsize::new(0));
+    let cc = Arc::clone(&cancel_count);
+    let post_count = Arc::new(AtomicUsize::new(0));
+    let pc = Arc::clone(&post_count);
+
+    let server = MockHttpServer::new(move |method, path, _body| {
+        if method == "GET" && path == "/orders" {
+            (200, "[]")
+        } else if method == "GET" && path == "/positions" {
+            (200, r#"[{"securityId":"TCS","netQty":50,"productType":"INTRADAY","buyQty":50,"sellQty":0}]"#)
+        } else if method == "POST" && path == "/orders" {
+            let n = pc.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == 1 {
+                (200, r#"{"orderId":"EX-TCS-1","orderStatus":"TRANSIT"}"#)
+            } else {
+                (200, r#"{"orderId":"EX-TCS-2","orderStatus":"TRANSIT"}"#)
+            }
+        } else if method == "DELETE" && path.starts_with("/orders/") {
+            cc.fetch_add(1, Ordering::SeqCst);
+            (200, r#"{"status":"success"}"#)
+        } else if method == "GET" && path.starts_with("/orders/external/") {
+            (200, r#"{"orderId":"EX-TCS-1","orderStatus":"CANCELLED","filledQty":0,"remainingQuantity":50}"#)
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig {
+            timeout: Duration::from_millis(10),
+            max_rounds: 4,
+        },
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    let req = OrderRequest {
+        local_id: "EXIT-TCS".into(),
+        security_id: "TCS".into(),
+        side: Side::Sell,
+        quantity: 50,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 1,
+    };
+
+    port.submit_order(req).unwrap();
+    port.process_queue_step();
+
+    // Transition to Open/Pending -> TimerRunning
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-TCS-1".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Open,
+        quantity: 50,
+        cum_traded_qty: 0,
+        remaining_qty: 50,
+        avg_price_paise: None,
+        last_traded_price_paise: None,
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    thread::sleep(Duration::from_millis(15));
+    // Timeout fires -> cancel sent -> lookup reports CANCELLED -> replacement placed
+    port.check_exit_timeouts();
+
+    assert!(cancel_count.load(Ordering::SeqCst) >= 1, "cancel must be sent on timeout");
+    assert_eq!(port.active_exit_loops().get("TCS").unwrap().round, 2, "round must be incremented to 2");
+    assert!(port.local_orders().contains_key("EXIT-TCS-R2"), "replacement order EXIT-TCS-R2 must be created");
+
+    // Feed fill for replacement
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-TCS-2".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Filled,
+        quantity: 50,
+        cum_traded_qty: 50,
+        remaining_qty: 0,
+        avg_price_paise: Some(350000),
+        last_traded_price_paise: Some(350000),
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    assert_eq!(port.active_exit_loops().get("TCS").unwrap().phase, ExitLoopPhase::Terminal);
+}
+
+// 3. cancel races with a fill (TRADED seen after cancel), no second order
+#[test]
+fn test_exit_cancel_races_with_fill_traded_no_second_order() {
+    let _env = init_mock_env();
+    let server = MockHttpServer::new(|method, path, _body| {
+        if method == "GET" && path == "/orders" {
+            (200, "[]")
+        } else if method == "GET" && path == "/positions" {
+            (200, r#"[{"securityId":"INFY","netQty":25,"productType":"INTRADAY","buyQty":25,"sellQty":0}]"#)
+        } else if method == "POST" && path == "/orders" {
+            (200, r#"{"orderId":"EX-INFY","orderStatus":"TRANSIT"}"#)
+        } else if method == "DELETE" && path.starts_with("/orders/") {
+            (200, r#"{"status":"success"}"#)
+        } else if method == "GET" && path.starts_with("/orders/external/") {
+            // Broker lookup reveals the order actually TRADED before cancel took effect
+            (200, r#"{"orderId":"EX-INFY","orderStatus":"TRADED","filledQty":25,"remainingQuantity":0}"#)
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig {
+            timeout: Duration::from_millis(5),
+            max_rounds: 4,
+        },
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    let req = OrderRequest {
+        local_id: "EXIT-INFY".into(),
+        security_id: "INFY".into(),
+        side: Side::Sell,
+        quantity: 25,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 1,
+    };
+
+    port.submit_order(req).unwrap();
+    port.process_queue_step();
+
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-INFY".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Open,
+        quantity: 25,
+        cum_traded_qty: 0,
+        remaining_qty: 25,
+        avg_price_paise: None,
+        last_traded_price_paise: None,
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    thread::sleep(Duration::from_millis(10));
+    port.check_exit_timeouts();
+
+    // Assert outcome stopped at TRADED and no round 2 order was placed
+    assert_eq!(port.active_exit_loops().get("INFY").unwrap().phase, ExitLoopPhase::Terminal);
+    assert!(!port.local_orders().contains_key("EXIT-INFY-R2"), "no second order must be placed when fill raced with cancel");
+    assert_eq!(port.local_orders().len(), 1);
+}
+
+// 4. partial fill then cancel, replacement uses the remaining confirmed quantity
+#[test]
+fn test_exit_partial_fill_then_cancel_replacement_uses_remaining() {
+    let _env = init_mock_env();
+    let placed_qty = Arc::new(AtomicUsize::new(0));
+    let pq = Arc::clone(&placed_qty);
+
+    let server = MockHttpServer::new(move |method, path, body| {
+        if method == "GET" && path == "/orders" {
+            (200, "[]")
+        } else if method == "GET" && path == "/positions" {
+            // Broker confirmed position reflects 40 shares filled -> 60 remaining
+            (200, r#"[{"securityId":"HDFC","netQty":60,"productType":"INTRADAY","buyQty":100,"sellQty":40}]"#)
+        } else if method == "POST" && path == "/orders" {
+            let body_json = body.split("\r\n\r\n").nth(1).unwrap_or(body);
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(body_json) {
+                if let Some(q) = json.get("quantity").and_then(|v| v.as_u64()) {
+                    pq.store(q as usize, Ordering::SeqCst);
+                }
+            }
+            (200, r#"{"orderId":"EX-HDFC","orderStatus":"TRANSIT"}"#)
+        } else if method == "DELETE" && path.starts_with("/orders/") {
+            (200, r#"{"status":"success"}"#)
+        } else if method == "GET" && path.starts_with("/orders/external/") {
+            (200, r#"{"orderId":"EX-HDFC","orderStatus":"CANCELLED","filledQty":40,"remainingQuantity":60}"#)
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig {
+            timeout: Duration::from_millis(5),
+            max_rounds: 4,
+        },
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    let req = OrderRequest {
+        local_id: "EXIT-HDFC".into(),
+        security_id: "HDFC".into(),
+        side: Side::Sell,
+        quantity: 100,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 1,
+    };
+
+    port.submit_order(req).unwrap();
+    port.process_queue_step();
+
+    // Partial fill arrives: 40 filled, 60 remaining
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-HDFC".into()),
+        correlation_id: None,
+        status: NormalizedStatus::PartiallyFilled,
+        quantity: 100,
+        cum_traded_qty: 40,
+        remaining_qty: 60,
+        avg_price_paise: Some(150000),
+        last_traded_price_paise: Some(150000),
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    thread::sleep(Duration::from_millis(10));
+    port.check_exit_timeouts();
+
+    // Replacement must be placed with quantity: 60 (remaining confirmed open quantity)
+    assert_eq!(placed_qty.load(Ordering::SeqCst), 60, "replacement must be sized from broker confirmed position (60)");
+    let r2 = port.local_orders().get("EXIT-HDFC-R2").expect("EXIT-HDFC-R2 must exist");
+    assert_eq!(r2.request.quantity, 60);
+}
+
+// 5. cancel outcome unknown, reconcile runs, no replacement until resolved
+#[test]
+fn test_exit_cancel_outcome_unknown_reconcile_runs_no_guess() {
+    let _env = init_mock_env();
+    let cancel_attempted = Arc::new(AtomicBool::new(false));
+    let ca = Arc::clone(&cancel_attempted);
+    let resolved_terminal = Arc::new(AtomicBool::new(false));
+    let rt_clone = Arc::clone(&resolved_terminal);
+
+    let server = MockHttpServer::new(move |method, path, _body| {
+        if method == "GET" && path == "/orders" {
+            if rt_clone.load(Ordering::SeqCst) {
+                (200, r#"[{"orderId":"EX-UNK","correlationId":"AMLN-TEST-0001","orderStatus":"CANCELLED","filledQty":0,"remainingQuantity":10}]"#)
+            } else {
+                (200, r#"[{"orderId":"EX-UNK","correlationId":"AMLN-TEST-0001","orderStatus":"PENDING","filledQty":0,"remainingQuantity":10}]"#)
+            }
+        } else if method == "GET" && path == "/positions" {
+            (200, r#"[{"securityId":"WIPRO","netQty":10,"productType":"INTRADAY","buyQty":10,"sellQty":0}]"#)
+        } else if method == "POST" && path == "/orders" {
+            (200, r#"{"orderId":"EX-UNK","orderStatus":"TRANSIT"}"#)
+        } else if method == "DELETE" && path.starts_with("/orders/") {
+            ca.store(true, Ordering::SeqCst);
+            // Cancel returns 500 server error (outcome unknown)
+            (500, r#"{"status":"failure","errorMessage":"Internal gateway error"}"#)
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig {
+            timeout: Duration::from_millis(5),
+            max_rounds: 4,
+        },
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    let req = OrderRequest {
+        local_id: "EXIT-WIPRO".into(),
+        security_id: "WIPRO".into(),
+        side: Side::Sell,
+        quantity: 10,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 1,
+    };
+
+    port.submit_order(req).unwrap();
+    port.process_queue_step();
+
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-UNK".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Open,
+        quantity: 10,
+        cum_traded_qty: 0,
+        remaining_qty: 10,
+        avg_price_paise: None,
+        last_traded_price_paise: None,
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    thread::sleep(Duration::from_millis(10));
+    // Timeout fires -> cancel fails with 500 -> enters Reconciling -> reconcile runs -> order is still PENDING
+    port.check_exit_timeouts();
+
+    assert!(cancel_attempted.load(Ordering::SeqCst));
+    assert_eq!(port.active_exit_loops().get("WIPRO").unwrap().phase, ExitLoopPhase::Reconciling);
+    assert!(!port.local_orders().contains_key("EXIT-WIPRO-R2"), "must not guess or place replacement while order is unresolved");
+
+    // Now reconcile discovers CANCELLED
+    resolved_terminal.store(true, Ordering::SeqCst);
+    port.check_exit_timeouts();
+
+    assert_eq!(port.active_exit_loops().get("WIPRO").unwrap().round, 2);
+    assert!(port.local_orders().contains_key("EXIT-WIPRO-R2"), "replacement placed after reconcile confirms terminal state");
+}
+
+// 6. max rounds reached, Halt emitted
+#[test]
+fn test_exit_max_rounds_reached_halt_emitted() {
+    let _env = init_mock_env();
+    let post_count = Arc::new(AtomicUsize::new(0));
+    let pc = Arc::clone(&post_count);
+
+    let server = MockHttpServer::new(move |method, path, _body| {
+        if method == "GET" && path == "/orders" {
+            (200, "[]")
+        } else if method == "GET" && path == "/positions" {
+            (200, r#"[{"securityId":"SBIN","netQty":10,"productType":"INTRADAY","buyQty":10,"sellQty":0}]"#)
+        } else if method == "POST" && path == "/orders" {
+            let n = pc.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == 1 {
+                (200, r#"{"orderId":"EX-SBIN-1","orderStatus":"TRANSIT"}"#)
+            } else {
+                (200, r#"{"orderId":"EX-SBIN-2","orderStatus":"TRANSIT"}"#)
+            }
+        } else if method == "DELETE" && path.starts_with("/orders/") {
+            (200, r#"{"status":"success"}"#)
+        } else if method == "GET" && path.starts_with("/orders/external/") {
+            if path.contains("0002") {
+                (200, r#"{"orderId":"EX-SBIN-2","correlationId":"AMLN-TEST-0002","orderStatus":"CANCELLED","filledQty":0,"remainingQuantity":10}"#)
+            } else {
+                (200, r#"{"orderId":"EX-SBIN-1","correlationId":"AMLN-TEST-0001","orderStatus":"CANCELLED","filledQty":0,"remainingQuantity":10}"#)
+            }
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig {
+            timeout: Duration::from_millis(5),
+            max_rounds: 2, // Max 2 rounds
+        },
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    let req = OrderRequest {
+        local_id: "EXIT-SBIN".into(),
+        security_id: "SBIN".into(),
+        side: Side::Sell,
+        quantity: 10,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 1,
+    };
+
+    port.submit_order(req).unwrap();
+    port.process_queue_step();
+
+    // Round 1 PENDING -> timeout -> cancel -> R2 placed
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-SBIN-1".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Open,
+        quantity: 10,
+        cum_traded_qty: 0,
+        remaining_qty: 10,
+        avg_price_paise: None,
+        last_traded_price_paise: None,
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    thread::sleep(Duration::from_millis(10));
+    port.check_exit_timeouts();
+    assert_eq!(port.active_exit_loops().get("SBIN").unwrap().round, 2);
+
+    // Round 2 PENDING -> timeout -> cancel -> max rounds (2) reached
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("EX-SBIN-2".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Open,
+        quantity: 10,
+        cum_traded_qty: 0,
+        remaining_qty: 10,
+        avg_price_paise: None,
+        last_traded_price_paise: None,
+        side: Some(Side::Sell),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    thread::sleep(Duration::from_millis(10));
+    port.check_exit_timeouts();
+
+    // Assert Halt emitted with reason ExitNotFilled
+    let events = port.drain_exec_events();
+    assert!(events.iter().any(|e| matches!(e, ExecEvent::Halt { ref reason } if reason == "ExitNotFilled")));
+    assert!(port.risk().is_entries_locked());
+    assert!(!port.local_orders().contains_key("EXIT-SBIN-R3"), "no round 3 order when max_rounds is 2");
+}
+
+// 7. second exit for the same symbol rejected while one is live
+#[test]
+fn test_second_exit_for_same_symbol_rejected_while_one_is_live() {
+    let _env = init_mock_env();
+    let server = MockHttpServer::new(|method, path, _body| {
+        if method == "GET" && path == "/orders" {
+            (200, "[]")
+        } else if method == "GET" && path == "/positions" {
+            (200, "[]")
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig::default(),
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    let exit1 = OrderRequest {
+        local_id: "EXIT-TATAMOTORS-1".into(),
+        security_id: "TATAMOTORS".into(),
+        side: Side::Sell,
+        quantity: 10,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 1,
+    };
+
+    let exit2 = OrderRequest {
+        local_id: "EXIT-TATAMOTORS-2".into(),
+        security_id: "TATAMOTORS".into(),
+        side: Side::Sell,
+        quantity: 10,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 2,
+    };
+
+    assert!(port.submit_order(exit1).is_ok());
+
+    // Second exit submit for same symbol while first is active must be rejected
+    let res2 = port.submit_order(exit2);
+    assert!(res2.is_err());
+    assert!(res2.unwrap_err().contains("active exit order already exists for symbol 'TATAMOTORS'"));
+}
+
+// 8. entries never go through this loop
+#[test]
+fn test_entries_never_go_through_exit_replace_loop() {
+    let _env = init_mock_env();
+    let server = MockHttpServer::new(|method, path, _body| {
+        if method == "GET" && path == "/orders" {
+            (200, "[]")
+        } else if method == "GET" && path == "/positions" {
+            (200, "[]")
+        } else if method == "POST" && path == "/orders" {
+            (200, r#"{"orderId":"ENTRY-ORD","orderStatus":"TRANSIT"}"#)
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig {
+            timeout: Duration::from_millis(5),
+            max_rounds: 4,
+        },
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    let entry_req = OrderRequest {
+        local_id: "ENTRY-1".into(),
+        security_id: "BAJFINANCE".into(),
+        side: Side::Buy,
+        quantity: 10,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Entry,
+        local_seq: 1,
+    };
+
+    port.submit_order(entry_req).unwrap();
+    port.process_queue_step();
+
+    // Entry orders are never tracked in active_exit_loops
+    assert!(!port.active_exit_loops().contains_key("BAJFINANCE"));
+
+    port.apply_update(&NormalizedOrderUpdate {
+        source: UpdateSource::Rest,
+        dhan_order_id: Some("ENTRY-ORD".into()),
+        correlation_id: None,
+        status: NormalizedStatus::Open,
+        quantity: 10,
+        cum_traded_qty: 0,
+        remaining_qty: 10,
+        avg_price_paise: None,
+        last_traded_price_paise: None,
+        side: Some(Side::Buy),
+        reject_reason: None,
+        update_time: None,
+    });
+
+    thread::sleep(Duration::from_millis(15));
+    port.check_exit_timeouts();
+
+    // Entry order remains Open, never cancelled or replaced
+    let tracker = port.local_orders().get("ENTRY-1").unwrap();
+    assert_eq!(tracker.state, OrderState::Open);
+    assert_eq!(port.local_orders().len(), 1);
 }
