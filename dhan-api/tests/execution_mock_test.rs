@@ -1341,3 +1341,58 @@ fn test_entries_never_go_through_exit_replace_loop() {
     assert_eq!(tracker.state, OrderState::Open);
     assert_eq!(port.local_orders().len(), 1);
 }
+
+// 9. rejected exit order does not permanently block future exits
+#[test]
+fn test_rejected_exit_order_does_not_permanently_block_future_exits() {
+    let _env = init_mock_env();
+    let server = MockHttpServer::new(|method, path, _body| {
+        if method == "POST" && path == "/orders" {
+            (400, r#"{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Insufficient margin"}"#)
+        } else {
+            (200, "{}")
+        }
+    });
+
+    let mode_cfg = ModeConfig::resolve(ExecutionMode::Sandbox, Some(server.addr.clone())).unwrap();
+    let port_cfg = DhanExecutionPortConfig {
+        client_id: "1000000000".into(),
+        mode_config: mode_cfg,
+        risk_config: RiskRailsConfig::default(),
+        wal_path: None,
+        tick_sizes_paise: BTreeMap::new(),
+        run_tag: "TEST".into(),
+        exit_replace_config: ExitReplaceConfig::default(),
+    };
+
+    let mut port = DhanExecutionPort::new(port_cfg).unwrap();
+    let exit1 = OrderRequest {
+        local_id: "EXIT-REJ-1".into(),
+        security_id: "TITAN".into(),
+        side: Side::Sell,
+        quantity: 10,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 1,
+    };
+
+    port.submit_order(exit1).unwrap();
+    port.process_queue_step();
+
+    // Order was rejected by broker on submit
+    assert_eq!(port.local_orders().get("EXIT-REJ-1").unwrap().state, OrderState::Rejected);
+    assert!(port.active_exit_loops().get("TITAN").unwrap().is_terminal());
+
+    // Second exit submit for same symbol must now be permitted
+    let exit2 = OrderRequest {
+        local_id: "EXIT-REJ-2".into(),
+        security_id: "TITAN".into(),
+        side: Side::Sell,
+        quantity: 10,
+        kind: OrderKind::Market,
+        intent: OrderIntent::Exit,
+        local_seq: 2,
+    };
+
+    assert!(port.submit_order(exit2).is_ok(), "subsequent exit must be allowed once previous exit ended terminal");
+}

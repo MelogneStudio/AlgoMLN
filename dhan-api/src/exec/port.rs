@@ -1,5 +1,6 @@
 use crate::exec::{
     correlation::CorrelationGenerator,
+    error::ErrorClass,
     normalize::NormalizedOrderUpdate,
     queue::{QueueAction, SubmissionQueue},
     reconciler::Reconciler,
@@ -233,7 +234,13 @@ impl DhanExecutionPort {
             );
         }
 
-        self.queue.enqueue_place(req)?;
+        if let Err(e) = self.queue.enqueue_place(req.clone()) {
+            if req.intent == OrderIntent::Exit {
+                self.active_exit_loops.remove(&req.security_id);
+            }
+            self.local_orders.remove(&local_id);
+            return Err(e.to_string());
+        }
         // Non-blocking: returns LocalOrderId immediately per Section 3
         Ok(local_id)
     }
@@ -297,6 +304,26 @@ impl DhanExecutionPort {
                                 self.outgoing_events.push_back(sub_ev);
                             }
                         }
+                        Err(crate::exec::rest::ExecRestError::Auth(msg)) => {
+                            if let Some(tracker) = self.local_orders.get_mut(&req.local_id) {
+                                tracker.state = OrderState::Rejected;
+                                let _ = self.wal.append(tracker);
+                                self.risk.lock_entries(&format!("fatal auth: {msg}"));
+                                self.outgoing_events.push_back(ExecEvent::Halt {
+                                    reason: format!("fatal auth: {msg}"),
+                                });
+                                self.outgoing_events.push_back(ExecEvent::Rejected {
+                                    local_id: req.local_id.clone(),
+                                    reason: msg,
+                                    error_class: ErrorClass::FatalAuth,
+                                });
+                            }
+                            if req.intent == OrderIntent::Exit {
+                                if let Some(exit_loop) = self.active_exit_loops.get_mut(&req.security_id) {
+                                    exit_loop.phase = ExitLoopPhase::Terminal;
+                                }
+                            }
+                        }
                         Err(crate::exec::rest::ExecRestError::Rejected { class, message, .. }) => {
                             if let Some(tracker) = self.local_orders.get_mut(&req.local_id) {
                                 tracker.state = OrderState::Rejected;
@@ -312,6 +339,15 @@ impl DhanExecutionPort {
                                     reason: message,
                                     error_class: class,
                                 });
+                            }
+                            if req.intent == OrderIntent::Exit {
+                                if let Some(exit_loop) = self.active_exit_loops.get_mut(&req.security_id) {
+                                    println!(
+                                        "EXIT_REPLACE: symbol={}, round={}, old_order_id={}, outcome=REJECTED, new_order_id=none",
+                                        exit_loop.symbol, exit_loop.round, exit_loop.current_local_id
+                                    );
+                                    exit_loop.phase = ExitLoopPhase::Terminal;
+                                }
                             }
                         }
                         Err(crate::exec::rest::ExecRestError::Throttle(_)) => {
@@ -408,6 +444,15 @@ impl DhanExecutionPort {
                             println!(
                                 "EXIT_REPLACE: symbol={}, round={}, old_order_id={}, outcome=TRADED, new_order_id=none",
                                 exit_loop.symbol, exit_loop.round, exit_loop.current_local_id
+                            );
+                            exit_loop.phase = ExitLoopPhase::Terminal;
+                        }
+                        OrderState::Rejected | OrderState::Cancelled | OrderState::Expired
+                            if exit_loop.phase == ExitLoopPhase::AwaitingPending =>
+                        {
+                            println!(
+                                "EXIT_REPLACE: symbol={}, round={}, old_order_id={}, outcome={:?}, new_order_id=none",
+                                exit_loop.symbol, exit_loop.round, exit_loop.current_local_id, new_state
                             );
                             exit_loop.phase = ExitLoopPhase::Terminal;
                         }
