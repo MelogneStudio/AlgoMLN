@@ -847,7 +847,7 @@ impl<'a> Lexer<'a> {
         // Exponent only triggers when `e`/`E` is followed by digits or `[+-]` + digits.
         if matches!(self.peek(), Some(b'e' | b'E')) {
             let has_signed_digit = matches!(self.peek_at(1), Some(b'+' | b'-'))
-                && matches!(self.peek_at(2), Some(b'0'..=b'9' | b'_'));
+                && matches!(self.peek_at(2), Some(b'0'..=b'9'));
             let has_digit = matches!(self.peek_at(1), Some(b'0'..=b'9'));
             if has_digit || has_signed_digit {
                 has_exp = true;
@@ -1173,6 +1173,8 @@ mod tests {
     fn l16_unknown_number_suffix() {
         assert_lex_err("5min", "E0004");
         assert_lex_err("3x", "E0004");
+        assert_lex_err("1e_3", "E0004");
+        assert_lex_err("1e-_3", "E0004");
     }
 
     #[test]
