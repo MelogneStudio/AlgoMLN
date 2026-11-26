@@ -1,0 +1,5 @@
+# Café strategy — naïve momentum with € thresholds
+label = "αβγ — café\nline2"
+alt = 'résumé\t₹'
+entry = close > open
+exit = close < open

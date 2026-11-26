@@ -1,0 +1,8 @@
+---
+source: mln-lang/tests/goldens.rs
+expression: dumped
+---
+(assign daily_ema (call ema (at close 1d) 20))
+(assign hourly_high (call highest (at high 1h) 10))
+(assign entry (and (cmp close > daily_ema) (cmp (at close 1d) > (at open 1d))))
+(assign exit (cmp close < hourly_high))

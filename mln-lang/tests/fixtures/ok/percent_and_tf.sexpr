@@ -1,0 +1,8 @@
+(assign risk 1.5%)
+(assign target 40%)
+(assign tf_fast 5m)
+(assign tf_med 15m)
+(assign tf_hr 1h)
+(assign tf_day 1d)
+(assign tf_wk 2w)
+(assign scaled (if (cmp close > (at open 1d)) (* close (+ 1 risk)) close))

@@ -1,0 +1,14 @@
+---
+source: mln-lang/tests/goldens.rs
+expression: dumped
+---
+(assign ma50 (call sma close 50))
+(assign ma150 (call sma close 150))
+(assign ma200 (call sma close 200))
+(assign hi52 (call highest high 252))
+(assign lo52 (call lowest low 252))
+(assign trend_ok (and (and (cmp close > ma50) (cmp ma50 > ma150)) (cmp ma150 > ma200)))
+(assign near_high (and (cmp close >= (* hi52 0.75)) (cmp close >= (* lo52 1.3))))
+(assign tight_range (cmp (/ (- (call highest high 10) (call lowest low 10)) close) < 8%))
+(assign entry (and (and trend_ok near_high) tight_range))
+(assign exit (cmp close < ma50))

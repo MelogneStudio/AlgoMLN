@@ -264,16 +264,19 @@ impl<'a> Lexer<'a> {
     fn handle_line_start(&mut self) {
         let indent_start = self.pos;
         let mut spaces = 0usize;
+        let mut tab_width = 0usize;
         let mut first_tab: Option<Span> = None;
 
         while let Some(b) = self.peek() {
             if b == b' ' {
                 spaces += 1;
+                tab_width += 1;
                 self.pos += 1;
             } else if b == b'\t' {
                 if first_tab.is_none() {
                     first_tab = Some(Span::new(self.pos as u32, (self.pos + 1) as u32));
                 }
+                tab_width += 4;
                 self.pos += 1;
             } else {
                 break;
@@ -295,21 +298,21 @@ impl<'a> Lexer<'a> {
 
         self.at_line_start = false;
 
+        let indent_span = Span::new(indent_start as u32, self.pos as u32);
+        let had_tab = first_tab.is_some();
         if let Some(tab_span) = first_tab {
-            self.seen_first_stmt = true;
             self.diags.push(Diagnostic::error(
                 "E0010",
                 "tabs are not allowed in indentation; use 4 spaces per level",
                 tab_span,
             ));
-            return;
         }
 
-        let indent_span = Span::new(indent_start as u32, self.pos as u32);
+        let effective = if had_tab { tab_width } else { spaces };
 
         if !self.seen_first_stmt {
             self.seen_first_stmt = true;
-            if spaces > 0 {
+            if effective > 0 && !had_tab {
                 self.diags.push(Diagnostic::error(
                     "E0013",
                     "the first statement line cannot be indented",
@@ -320,44 +323,37 @@ impl<'a> Lexer<'a> {
         }
 
         let current = *self.indent_stack.last().unwrap_or(&0);
-        if spaces == current {
+        if effective == current {
             return;
         }
 
-        if spaces > current {
-            let diff = spaces - current;
-            if diff == 4 {
-                self.indent_stack.push(spaces);
-                self.tokens.push(Token {
-                    kind: TokenKind::Ind,
-                    span: indent_span,
-                });
-            } else if diff % 4 == 0 {
-                self.diags.push(Diagnostic::error(
-                    "E0011",
-                    format!("indentation jumped from {current} to {spaces} spaces (expected +4)"),
-                    indent_span,
-                ));
-                self.indent_stack.push(spaces);
-                self.tokens.push(Token {
-                    kind: TokenKind::Ind,
-                    span: indent_span,
-                });
-            } else {
-                self.diags.push(Diagnostic::error(
-                    "E0012",
-                    format!("indentation of {spaces} spaces is not a multiple of 4"),
-                    indent_span,
-                ));
-                self.indent_stack.push(spaces);
-                self.tokens.push(Token {
-                    kind: TokenKind::Ind,
-                    span: indent_span,
-                });
+        if effective > current {
+            if !had_tab {
+                let diff = effective - current;
+                if diff != 4 && diff % 4 == 0 {
+                    self.diags.push(Diagnostic::error(
+                        "E0011",
+                        format!(
+                            "indentation jumped from {current} to {effective} spaces (expected +4)"
+                        ),
+                        indent_span,
+                    ));
+                } else if diff != 4 {
+                    self.diags.push(Diagnostic::error(
+                        "E0012",
+                        format!("indentation of {effective} spaces is not a multiple of 4"),
+                        indent_span,
+                    ));
+                }
             }
+            self.indent_stack.push(effective);
+            self.tokens.push(Token {
+                kind: TokenKind::Ind,
+                span: indent_span,
+            });
         } else {
             while let Some(&top) = self.indent_stack.last() {
-                if top <= spaces {
+                if top <= effective {
                     break;
                 }
                 self.indent_stack.pop();
@@ -367,10 +363,10 @@ impl<'a> Lexer<'a> {
                 });
             }
             let top = *self.indent_stack.last().unwrap_or(&0);
-            if top != spaces {
+            if top != effective && !had_tab {
                 self.diags.push(Diagnostic::error(
                     "E0012",
-                    format!("indentation of {spaces} spaces does not match any outer block"),
+                    format!("indentation of {effective} spaces does not match any outer block"),
                     indent_span,
                 ));
             }

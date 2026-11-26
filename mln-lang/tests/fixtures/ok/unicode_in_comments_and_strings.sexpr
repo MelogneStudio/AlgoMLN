@@ -1,0 +1,4 @@
+(assign label "αβγ — café\nline2")
+(assign alt "résumé\t₹")
+(assign entry (cmp close > open))
+(assign exit (cmp close < open))

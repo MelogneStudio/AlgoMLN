@@ -1,0 +1,4 @@
+daily_ema = ema(close @ 1d, 20)
+hourly_high = highest(high @ 1h, 10)
+entry = close > daily_ema and close @ 1d > open @ 1d
+exit = close < hourly_high

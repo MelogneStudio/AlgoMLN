@@ -1,0 +1,4 @@
+(def band_width (src (n 20) (mult 2)) (body (assign mid (call sma src n)) (assign dev (* (call std src n) mult))) (return (/ (* dev 2) mid)))
+(assign bw (call band_width close (kw n 14)))
+(assign entry (cmp bw < 10%))
+(assign exit (cmp bw > 25%))

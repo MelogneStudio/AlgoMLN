@@ -1,0 +1,7 @@
+---
+source: mln-lang/tests/goldens.rs
+expression: dumped
+---
+(assign a 1)
+(def helper (x) (body (assign y (+ x 1))) (return y))
+(assign b (call helper a))

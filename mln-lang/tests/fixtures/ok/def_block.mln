@@ -1,0 +1,8 @@
+def band_width(src, n=20, mult=2.0):
+    mid = sma(src, n)
+    dev = std(src, n) * mult
+    return dev * 2 / mid
+
+bw = band_width(close, n=14)
+entry = bw < 10%
+exit = bw > 25%

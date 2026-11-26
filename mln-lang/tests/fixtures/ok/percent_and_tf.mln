@@ -1,0 +1,8 @@
+risk = 1.50%
+target = 40%
+tf_fast = 5m
+tf_med = 15m
+tf_hr = 1h
+tf_day = 1d
+tf_wk = 2w
+scaled = close * (1 + risk) if close > open @ 1d else close

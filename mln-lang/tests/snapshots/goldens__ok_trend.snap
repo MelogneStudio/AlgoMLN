@@ -1,0 +1,8 @@
+---
+source: mln-lang/tests/goldens.rs
+expression: dumped
+---
+(assign fast (call ema close 12))
+(assign slow (call ema close 26))
+(assign entry (call crossover fast slow))
+(assign exit (call crossunder fast slow))

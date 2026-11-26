@@ -1,4 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+mln-lang/tests/fixtures/ok/crlf.mln text eol=crlf
 docs/dhan-api/raw/** linguist-generated=true
 docs_source/** linguist-generated=true

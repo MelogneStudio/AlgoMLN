@@ -1,0 +1,10 @@
+ma50 = sma(close, 50)
+ma150 = sma(close, 150)
+ma200 = sma(close, 200)
+hi52 = highest(high, 252)
+lo52 = lowest(low, 252)
+trend_ok = close > ma50 and ma50 > ma150 and ma150 > ma200
+near_high = close >= hi52 * 0.75 and close >= lo52 * 1.30
+tight_range = (highest(high, 10) - lowest(low, 10)) / close < 8%
+entry = trend_ok and near_high and tight_range
+exit = close < ma50

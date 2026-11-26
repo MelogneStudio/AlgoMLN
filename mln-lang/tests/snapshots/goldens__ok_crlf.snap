@@ -1,0 +1,8 @@
+---
+source: mln-lang/tests/goldens.rs
+expression: dumped
+---
+(assign a 1)
+(assign b (+ a 2))
+(assign entry (cmp b > 2))
+(assign exit (cmp b < 0))

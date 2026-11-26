@@ -1,0 +1,12 @@
+# Leading comment
+
+a = 1   # trailing comment
+
+
+def helper(x):
+    # comment inside block
+
+    y = x + 1
+    return y
+
+b = helper(a)

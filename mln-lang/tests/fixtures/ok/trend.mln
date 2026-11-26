@@ -1,0 +1,4 @@
+fast = ema(close, 12)
+slow = ema(close, 26)
+entry = crossover(fast, slow)
+exit = crossunder(fast, slow)

@@ -1,0 +1,4 @@
+a = 1
+b = a + 2
+entry = b > 2
+exit = b < 0
