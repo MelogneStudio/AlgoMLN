@@ -189,8 +189,12 @@ pub struct DefInstance {
 pub struct OutputWarmup {
     pub name: String,
     pub clock: Tf,
-    /// Leading NaN bars in the expression's own clock (or dominant non-zero clock).
+    /// Leading NaN bars in the expression's own clock.
     pub own_clock_bars: u64,
+    /// Clock contributing the largest base-bar warm-up estimate.
+    pub primary_clock: Tf,
+    /// Leading NaN bars in `primary_clock`.
+    pub primary_clock_bars: u64,
     /// Per-clock warm-up bars across every clock feeding this output.
     pub by_clock: BTreeMap<Tf, u64>,
     /// Conservative estimate in base-clock bars.
