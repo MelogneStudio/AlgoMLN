@@ -1,0 +1,10 @@
+[package]
+name = "mln-std"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "LangMelogne (.mln) standard operator registry and implementations"
+license = "MIT"
+
+[dependencies]
+rust_decimal = "1"

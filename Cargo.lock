@@ -1424,6 +1424,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mln-std"
+version = "0.1.0"
+dependencies = [
+ "rust_decimal",
+]
+
+[[package]]
 name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
