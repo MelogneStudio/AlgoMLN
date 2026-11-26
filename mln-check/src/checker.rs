@@ -185,7 +185,8 @@ impl<'a> Checker<'a> {
             edges.insert(name.clone(), callees);
         }
 
-        let names: Vec<String> = self.defs.keys().cloned().collect();
+        let mut names: Vec<String> = self.defs.keys().cloned().collect();
+        names.sort_by_key(|n| self.defs[n].def.span.start);
         let mut state: HashMap<String, VisitState> = HashMap::new();
         let mut stack: Vec<String> = Vec::new();
 
@@ -316,12 +317,13 @@ impl<'a> Checker<'a> {
 
         // Validate uncalled non-recursive `def`s once with symbolic `Num` parameters,
         // and emit `W0201` if they are clean and unused.
-        let uncalled_defs: Vec<(String, &'a Def)> = self
+        let mut uncalled_defs: Vec<(String, &'a Def)> = self
             .defs
             .iter()
             .filter(|(_, e)| !e.used && !e.recursive && !e.poisoned_name)
             .map(|(k, e)| (k.clone(), e.def))
             .collect();
+        uncalled_defs.sort_by_key(|(_, def)| def.span.start);
         for (def_name, def) in uncalled_defs {
             let mut param_bindings = Vec::with_capacity(def.params.len());
             for p in &def.params {

@@ -257,3 +257,23 @@ fn def_call_uses_lexical_scoping_not_caller_locals() {
         out_later_local.diags
     );
 }
+
+#[test]
+fn mutual_recursion_and_uncalled_defs_are_deterministic() {
+    let src = "def a(x) = b(x)\ndef b(x) = a(x)\nentry = true\nexit = false";
+    let first = run_check(src);
+    assert_has_code(&first, "E0210");
+    for _ in 0..20 {
+        let again = run_check(src);
+        assert_eq!(first.diags, again.diags);
+    }
+
+    let uncalled_src =
+        "def helper(x) = x + 1\ndef first_u(x) = helper(x)\ndef second_u(x) = helper(x)\nentry = true\nexit = false";
+    let first_u = run_check(uncalled_src);
+    for _ in 0..20 {
+        let again_u = run_check(uncalled_src);
+        assert_eq!(first_u.diags, again_u.diags);
+        assert_eq!(first_u.program.def_instances, again_u.program.def_instances);
+    }
+}
