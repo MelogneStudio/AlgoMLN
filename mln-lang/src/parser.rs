@@ -549,11 +549,16 @@ impl Parser {
                             .last()
                             .map(|s| s.span())
                             .unwrap_or_else(|| def_span.join(colon_span));
-                        self.diags.push(Diagnostic::error(
-                            "E0118",
-                            format!("`def {}` block is missing its final `return`", name.name),
-                            end_span,
-                        ));
+                        let diag_span = def_span.join(colon_span);
+                        if !self.lex_diag_starts.contains(&diag_span.start)
+                            && !self.diags.iter().any(|d| d.span.start == diag_span.start)
+                        {
+                            self.diags.push(Diagnostic::error(
+                                "E0118",
+                                format!("`def {}` block is missing its final `return`", name.name),
+                                diag_span,
+                            ));
+                        }
                         Expr::Error(Span::empty(end_span.end))
                     }
                 };
@@ -1484,6 +1489,17 @@ mod tests {
         assert_parse_err("def f(x):\n    def g(y) = y\n    return x", "E0117");
         assert_parse_err("def f(x):\n    a = x + 1", "E0118");
         assert_parse_err("def f(x):\n    x + 1\n    return x", "E0119");
+
+        for src in ["def f(x):\n    %", "def f(x):\n    1 = x"] {
+            let out = assert_parse_err(src, "E0118");
+            let starts: HashSet<u32> = out.diags.iter().map(|d| d.span.start).collect();
+            assert_eq!(
+                starts.len(),
+                out.diags.len(),
+                "duplicate diagnostic start offsets in {:?}",
+                out.diags
+            );
+        }
     }
 
     #[test]
