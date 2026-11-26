@@ -151,7 +151,6 @@ pub fn render(diag: &Diagnostic, src: &str) -> String {
 }
 
 /// Sorts diagnostics deterministically by `(span.start, code)` and caps at `MAX_DIAGNOSTICS` + `E0199`.
-#[allow(dead_code)]
 pub(crate) fn finalize_diagnostics(diags: &mut Vec<Diagnostic>, eof_offset: u32) {
     diags.sort_by(|a, b| {
         a.span
