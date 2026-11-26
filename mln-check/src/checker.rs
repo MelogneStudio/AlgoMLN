@@ -1004,6 +1004,7 @@ impl<'a> Checker<'a> {
             if c.ty != Ty::Error {
                 self.emit_error("E0301", "expression is not callable", callee.span());
             }
+            self.check_call_args(args, ambient, self_assign_target);
             return self.err_expr(span);
         };
 
@@ -1013,6 +1014,7 @@ impl<'a> Checker<'a> {
 
         if self.lookup_local(&id.name).is_some() {
             self.emit_error("E0301", format!("`{}` is not callable", id.name), id.span);
+            self.check_call_args(args, ambient, self_assign_target);
             return self.err_expr(span);
         }
         if self.is_declared_later_local(&id.name) {
@@ -1021,6 +1023,7 @@ impl<'a> Checker<'a> {
                 format!("use of `{}` before definition", id.name),
                 id.span,
             );
+            self.check_call_args(args, ambient, self_assign_target);
             return self.err_expr(span);
         }
 
@@ -1029,12 +1032,13 @@ impl<'a> Checker<'a> {
                 entry.used = true;
             }
             if def_entry.recursive || def_entry.poisoned_name {
+                self.check_call_args(args, ambient, self_assign_target);
                 return self.err_expr(span);
             }
             return self.check_def_call(def_entry.def, args, span, ambient, self_assign_target);
         }
 
-        // Check arguments even if unknown, or check if `id` is a non-callable variable.
+        // Check arguments even if unknown or non-callable.
         if self.lookup_global(&id.name).is_some() || BUILTIN_SERIES.contains(&id.name.as_str()) {
             self.emit_error("E0301", format!("`{}` is not callable", id.name), id.span);
         } else if self_assign_target == Some(id.name.as_str())
@@ -1048,24 +1052,32 @@ impl<'a> Checker<'a> {
         } else {
             self.emit_error("E0200", format!("unknown function `{}`", id.name), id.span);
         }
+        self.check_call_args(args, ambient, self_assign_target);
         self.err_expr(span)
     }
 
-    fn check_builtin_call(
+    fn check_call_args(&mut self, args: &'a [Arg], ambient: Tf, self_assign_target: Option<&str>) {
+        for arg in args {
+            let _ = self.check_expr(&arg.value, ambient, self_assign_target);
+        }
+    }
+
+    fn bind_call_args(
         &mut self,
-        op: OpSpec,
+        callee_name: &str,
+        params: &[(&str, bool)],
         args: &'a [Arg],
         span: Span,
         ambient: Tf,
         self_assign_target: Option<&str>,
-    ) -> CheckedExpr {
-        let param_count = op.params.len();
+    ) -> Option<Vec<Option<&'a Expr>>> {
+        let param_count = params.len();
         let mut bound: Vec<Option<&'a Expr>> = vec![None; param_count];
         let mut sig_error = false;
 
         for (i, arg) in args.iter().enumerate() {
             if let Some(kw) = &arg.name {
-                if let Some(idx) = op.params.iter().position(|p| p.name == kw.name) {
+                if let Some(idx) = params.iter().position(|(name, _)| *name == kw.name) {
                     if bound[idx].is_some() {
                         self.emit_error(
                             "E0301",
@@ -1079,7 +1091,7 @@ impl<'a> Checker<'a> {
                 } else {
                     self.emit_error(
                         "E0302",
-                        format!("unknown keyword argument `{}` for `{}`", kw.name, op.name),
+                        format!("unknown keyword argument `{}` for `{callee_name}`", kw.name),
                         kw.span,
                     );
                     sig_error = true;
@@ -1095,8 +1107,7 @@ impl<'a> Checker<'a> {
                 self.emit_error(
                     "E0301",
                     format!(
-                        "`{}` takes at most {param_count} argument(s), got {}",
-                        op.name,
+                        "`{callee_name}` takes at most {param_count} argument(s), got {}",
                         args.len()
                     ),
                     span,
@@ -1106,11 +1117,11 @@ impl<'a> Checker<'a> {
             }
         }
 
-        for (idx, param) in op.params.iter().enumerate() {
-            if bound[idx].is_none() && param.default.is_none() {
+        for (idx, (name, has_default)) in params.iter().enumerate() {
+            if bound[idx].is_none() && !has_default {
                 self.emit_error(
                     "E0301",
-                    format!("`{}` missing required argument `{}`", op.name, param.name),
+                    format!("`{callee_name}` missing required argument `{name}`"),
                     span,
                 );
                 sig_error = true;
@@ -1118,12 +1129,32 @@ impl<'a> Checker<'a> {
         }
 
         if sig_error {
-            // Still check provided arg expressions for inner undefined names.
-            for arg in args {
-                let _ = self.check_expr(&arg.value, ambient, self_assign_target);
-            }
-            return self.err_expr(span);
+            self.check_call_args(args, ambient, self_assign_target);
+            None
+        } else {
+            Some(bound)
         }
+    }
+
+    fn check_builtin_call(
+        &mut self,
+        op: OpSpec,
+        args: &'a [Arg],
+        span: Span,
+        ambient: Tf,
+        self_assign_target: Option<&str>,
+    ) -> CheckedExpr {
+        let param_count = op.params.len();
+        let params: Vec<(&str, bool)> = op
+            .params
+            .iter()
+            .map(|p| (p.name, p.default.is_some()))
+            .collect();
+        let Some(bound) =
+            self.bind_call_args(op.name, &params, args, span, ambient, self_assign_target)
+        else {
+            return self.err_expr(span);
+        };
 
         let mut int_args: Vec<Option<u64>> = vec![None; param_count];
         let mut series_clocks: Vec<Clock> = Vec::new();
@@ -1291,76 +1322,26 @@ impl<'a> Checker<'a> {
     ) -> CheckedExpr {
         if self.call_depth >= MAX_CALL_DEPTH {
             self.emit_error("E0210", "def call nesting exceeds limit", span);
+            self.check_call_args(args, ambient, self_assign_target);
             return self.err_expr(span);
         }
 
         let param_count = def.params.len();
-        let mut bound: Vec<Option<&'a Expr>> = vec![None; param_count];
-        let mut sig_error = false;
-
-        for (i, arg) in args.iter().enumerate() {
-            if let Some(kw) = &arg.name {
-                if let Some(idx) = def.params.iter().position(|p| p.name.name == kw.name) {
-                    if bound[idx].is_some() {
-                        self.emit_error(
-                            "E0301",
-                            format!("argument `{}` provided more than once", kw.name),
-                            arg.span,
-                        );
-                        sig_error = true;
-                    } else {
-                        bound[idx] = Some(&arg.value);
-                    }
-                } else {
-                    self.emit_error(
-                        "E0302",
-                        format!(
-                            "unknown keyword argument `{}` for `{}`",
-                            kw.name, def.name.name
-                        ),
-                        kw.span,
-                    );
-                    sig_error = true;
-                }
-            } else if i < param_count {
-                if bound[i].is_some() {
-                    self.emit_error("E0301", "duplicate argument", arg.span);
-                    sig_error = true;
-                } else {
-                    bound[i] = Some(&arg.value);
-                }
-            } else {
-                self.emit_error(
-                    "E0301",
-                    format!(
-                        "`{}` takes at most {param_count} argument(s), got {}",
-                        def.name.name,
-                        args.len()
-                    ),
-                    span,
-                );
-                sig_error = true;
-                break;
-            }
-        }
-
-        for (idx, param) in def.params.iter().enumerate() {
-            if bound[idx].is_none() && param.default.is_none() {
-                self.emit_error(
-                    "E0301",
-                    format!(
-                        "`{}` missing required argument `{}`",
-                        def.name.name, param.name.name
-                    ),
-                    span,
-                );
-                sig_error = true;
-            }
-        }
-
-        if sig_error {
+        let params: Vec<(&str, bool)> = def
+            .params
+            .iter()
+            .map(|p| (p.name.name.as_str(), p.default.is_some()))
+            .collect();
+        let Some(bound) = self.bind_call_args(
+            &def.name.name,
+            &params,
+            args,
+            span,
+            ambient,
+            self_assign_target,
+        ) else {
             return self.err_expr(span);
-        }
+        };
 
         let mut param_bindings = Vec::with_capacity(param_count);
         let mut arg_types = Vec::with_capacity(param_count);

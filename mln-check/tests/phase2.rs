@@ -513,3 +513,23 @@ fn redefinition_e0201_points_to_second_definition_between_assign_and_def() {
     let assign_offset = def_first.find("a = 1").unwrap() as u32;
     assert_eq!(e0201_2[0].span.start, assign_offset);
 }
+
+#[test]
+fn invalid_calls_still_check_argument_expressions() {
+    let unknown_fn = run_check("entry = missing_fn(missing_arg) > 0\nexit = true");
+    let e0200s: Vec<_> = unknown_fn
+        .diags
+        .iter()
+        .filter(|d| d.code == "E0200")
+        .collect();
+    assert_eq!(
+        e0200s.len(),
+        2,
+        "expected E0200 for both callee and arg: {:?}",
+        unknown_fn.diags
+    );
+
+    let bad_def_arity = run_check("def f(x) = x\nentry = f(1, missing_arg) > 0\nexit = true");
+    assert_has_code(&bad_def_arity, "E0301");
+    assert_has_code(&bad_def_arity, "E0200");
+}
