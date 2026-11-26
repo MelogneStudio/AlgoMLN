@@ -899,7 +899,7 @@ impl<'a> Checker<'a> {
             }
             Expr::At { base, tf, span } => {
                 let target_tf = Tf::from(*tf);
-                if target_tf < ambient {
+                if target_tf.minutes() < ambient.minutes() {
                     self.emit_error(
                         "E0401",
                         format!(
@@ -923,7 +923,7 @@ impl<'a> Checker<'a> {
                         self.err_expr(*span)
                     }
                     Clock::Tf(c) => {
-                        if c < target_tf {
+                        if c.minutes() < target_tf.minutes() {
                             self.emit_error(
                                 "E0401",
                                 format!(
@@ -1493,7 +1493,13 @@ fn combine_clocks(clocks: &[Clock]) -> Clock {
     for &c in clocks {
         if let Clock::Tf(tf) = c {
             finest = Some(match finest {
-                Some(prev) => prev.min(tf),
+                Some(prev) => {
+                    if tf.minutes() < prev.minutes() {
+                        tf
+                    } else {
+                        prev
+                    }
+                }
                 None => tf,
             });
         }

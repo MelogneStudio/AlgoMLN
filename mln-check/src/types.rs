@@ -43,6 +43,7 @@ impl Ord for Tf {
         self.minutes()
             .cmp(&other.minutes())
             .then_with(|| self.n.cmp(&other.n))
+            .then_with(|| (self.unit as u8).cmp(&(other.unit as u8)))
     }
 }
 
@@ -217,4 +218,28 @@ pub struct CheckedProgram {
     pub stmts: Vec<CheckedStmt>,
     pub def_instances: Vec<DefInstance>,
     pub warmup: WarmupReport,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn tf_ord_is_consistent_with_eq_for_equivalent_durations() {
+        let m60 = Tf::new(60, TfUnit::Minute);
+        let h1 = Tf::new(1, TfUnit::Hour);
+        assert_ne!(m60, h1);
+        assert_eq!(m60.minutes(), h1.minutes());
+        assert_ne!(m60.cmp(&h1), Ordering::Equal);
+        assert_eq!(m60.cmp(&h1), h1.cmp(&m60).reverse());
+        assert_eq!(m60.cmp(&m60), Ordering::Equal);
+        assert_eq!(h1.cmp(&h1), Ordering::Equal);
+
+        let mut map = BTreeMap::new();
+        map.insert(m60, 1);
+        map.insert(h1, 2);
+        assert_eq!(map.get(&m60), Some(&1));
+        assert_eq!(map.get(&h1), Some(&2));
+    }
 }

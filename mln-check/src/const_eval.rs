@@ -67,14 +67,18 @@ pub fn fold_compare_pair(op: CmpOp, lhs: &ConstVal, rhs: &ConstVal) -> Option<bo
             CmpOp::NotEq => Some(a != b),
             _ => None,
         },
-        (ConstVal::Tf(a), ConstVal::Tf(b)) => Some(match op {
-            CmpOp::Eq => a == b,
-            CmpOp::NotEq => a != b,
-            CmpOp::Lt => a < b,
-            CmpOp::LtEq => a <= b,
-            CmpOp::Gt => a > b,
-            CmpOp::GtEq => a >= b,
-        }),
+        (ConstVal::Tf(a), ConstVal::Tf(b)) => {
+            let am = a.minutes();
+            let bm = b.minutes();
+            Some(match op {
+                CmpOp::Eq => am == bm,
+                CmpOp::NotEq => am != bm,
+                CmpOp::Lt => am < bm,
+                CmpOp::LtEq => am <= bm,
+                CmpOp::Gt => am > bm,
+                CmpOp::GtEq => am >= bm,
+            })
+        }
         (ConstVal::Str(a), ConstVal::Str(b)) => match op {
             CmpOp::Eq => Some(a == b),
             CmpOp::NotEq => Some(a != b),
@@ -123,5 +127,20 @@ mod tests {
         assert_eq!(neg.as_exact_int(), Some(-1));
 
         assert!(fold_binary(BinOp::Div, &ten, &ConstVal::Dec(Decimal::ZERO, false)).is_none());
+    }
+
+    #[test]
+    fn fold_timeframe_comparisons_by_minutes() {
+        use crate::types::Tf;
+        use mln_lang::TfUnit;
+
+        let m60 = ConstVal::Tf(Tf::new(60, TfUnit::Minute));
+        let h1 = ConstVal::Tf(Tf::new(1, TfUnit::Hour));
+        let d1 = ConstVal::Tf(Tf::new(1, TfUnit::Day));
+        assert_eq!(fold_compare_pair(CmpOp::Eq, &m60, &h1), Some(true));
+        assert_eq!(fold_compare_pair(CmpOp::NotEq, &m60, &h1), Some(false));
+        assert_eq!(fold_compare_pair(CmpOp::Lt, &h1, &m60), Some(false));
+        assert_eq!(fold_compare_pair(CmpOp::LtEq, &h1, &m60), Some(true));
+        assert_eq!(fold_compare_pair(CmpOp::Gt, &d1, &m60), Some(true));
     }
 }

@@ -305,3 +305,20 @@ fn uncalled_polymorphic_and_windowed_defs_do_not_false_error() {
     let bad_default = run_check("def f(x, n = nope) = ema(x, n)\nentry = true\nexit = false");
     assert_has_code(&bad_default, "E0200");
 }
+
+#[test]
+fn equivalent_timeframes_do_not_trigger_e0401() {
+    let parsed_1h = parse("entry = close @ 1h > open\nexit = true");
+    let out_60m = check_with_base(&parsed_1h.program, Tf::new(60, TfUnit::Minute));
+    assert!(out_60m.is_ok(), "unexpected errors: {:?}", out_60m.diags);
+
+    let parsed_60m = parse("entry = close @ 60m > open\nexit = true");
+    let out_1h = check_with_base(&parsed_60m.program, Tf::new(1, TfUnit::Hour));
+    assert!(out_1h.is_ok(), "unexpected errors: {:?}", out_1h.diags);
+
+    let nested = run_check("entry = (close @ 1h) @ 60m > open\nexit = true");
+    assert!(nested.is_ok(), "unexpected errors: {:?}", nested.diags);
+
+    let cmp_tf = run_check("entry = 1h == 60m and not (1h < 60m)\nexit = true");
+    assert!(cmp_tf.is_ok(), "unexpected errors: {:?}", cmp_tf.diags);
+}
