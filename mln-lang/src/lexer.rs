@@ -184,7 +184,6 @@ pub fn tokens_str(tokens: &[Token]) -> String {
 
 /// Tokenizes `src` into tokens and diagnostics. Total: never panics or hangs.
 pub fn lex(src: &str) -> LexOutput {
-    let eof_offset = src.len().min(u32::MAX as usize) as u32;
     if src.len() > MAX_SOURCE_BYTES {
         let diag = Diagnostic::error(
             "E0017",
@@ -198,12 +197,13 @@ pub fn lex(src: &str) -> LexOutput {
         return LexOutput {
             tokens: vec![Token {
                 kind: TokenKind::Eof,
-                span: Span::empty(eof_offset),
+                span: Span::empty(0),
             }],
             diags: vec![diag],
         };
     }
 
+    let eof_offset = src.len() as u32;
     let mut lexer = Lexer::new(src);
     lexer.run();
     finalize_diagnostics(&mut lexer.diags, eof_offset);
@@ -1377,6 +1377,7 @@ mod tests {
         let src = "x".repeat(MAX_SOURCE_BYTES + 1);
         let out = assert_lex_err(&src, "E0017");
         assert_eq!(tokens_str(&out.tokens), "EOF");
+        assert_eq!(out.tokens[0].span, Span::empty(0));
     }
 
     #[test]

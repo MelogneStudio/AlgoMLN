@@ -20,7 +20,7 @@ pub struct ParseOutput {
 /// Always returns a `Program` (with `Error` nodes where recovery occurred) and never panics.
 pub fn parse(src: &str) -> ParseOutput {
     let lex_out = lex(src);
-    let eof_offset = src.len().min(u32::MAX as usize) as u32;
+    let eof_offset = lex_out.tokens.last().map_or(0, |t| t.span.end);
     let mut parser = Parser::new(lex_out.tokens, lex_out.diags);
     let program = parser.parse_program();
     finalize_diagnostics(&mut parser.diags, eof_offset);
@@ -152,7 +152,10 @@ impl Parser {
         if !matches!(self.peek_kind(), TokenKind::Ind) {
             return;
         }
-        let mut ind_depth: usize = 0;
+        self.skip_indented_rest(0);
+    }
+
+    fn skip_indented_rest(&mut self, mut ind_depth: usize) {
         loop {
             let kind = &self.tokens[self.pos.min(self.tokens.len() - 1)].kind;
             match kind {
@@ -217,25 +220,7 @@ impl Parser {
                 self.emit_stmt_error(Diagnostic::error("E0155", "unexpected indent", span));
                 self.recover_to_stmt_end();
                 // Skip remaining lines in this unexpected indented block.
-                let mut ind_depth: usize = 1;
-                loop {
-                    let kind = &self.tokens[self.pos.min(self.tokens.len() - 1)].kind;
-                    match kind {
-                        TokenKind::Ind => {
-                            ind_depth += 1;
-                            self.pos += 1;
-                        }
-                        TokenKind::Ded => {
-                            self.pos += 1;
-                            ind_depth -= 1;
-                            if ind_depth == 0 {
-                                break;
-                            }
-                        }
-                        TokenKind::Eof => break,
-                        _ => self.pos += 1,
-                    }
-                }
+                self.skip_indented_rest(1);
                 Stmt::Error(span)
             }
             TokenKind::Kw(Kw::Def) => self.parse_def(in_def),
@@ -509,26 +494,7 @@ impl Parser {
                                     trailing_span.join(ret_span),
                                 ));
                                 // Drain the remainder of this `def` block up to matching `DED`.
-                                let mut ind_depth: usize = 1;
-                                loop {
-                                    let kind =
-                                        &self.tokens[self.pos.min(self.tokens.len() - 1)].kind;
-                                    match kind {
-                                        TokenKind::Ind => {
-                                            ind_depth += 1;
-                                            self.pos += 1;
-                                        }
-                                        TokenKind::Ded => {
-                                            self.pos += 1;
-                                            ind_depth -= 1;
-                                            if ind_depth == 0 {
-                                                break;
-                                            }
-                                        }
-                                        TokenKind::Eof => break,
-                                        _ => self.pos += 1,
-                                    }
-                                }
+                                self.skip_indented_rest(1);
                                 break;
                             }
                             if matches!(self.peek_kind(), TokenKind::Ded) {
