@@ -625,8 +625,10 @@ fn f08_depth_bomb_and_large_inputs_under_1s() {
     }
     let t1 = Instant::now();
     let out2 = parse(&big_expr);
-    assert!(t1.elapsed().as_secs_f64() < 1.0);
     assert!(out2.diags.is_empty());
+    let dumped = dump(&out2.program);
+    assert!(!dumped.is_empty());
+    assert!(t1.elapsed().as_secs_f64() < 1.0);
 
     // 50,000-statement program
     let mut big_prog = String::new();
