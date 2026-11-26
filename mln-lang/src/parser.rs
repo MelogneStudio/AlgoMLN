@@ -586,6 +586,7 @@ impl Parser {
                     err_span,
                 ));
                 self.recover_to_stmt_end();
+                self.skip_indented_block();
                 Stmt::Error(def_span.join(err_span))
             }
         }
@@ -1500,6 +1501,14 @@ mod tests {
                 out.diags
             );
         }
+
+        let bad_hdr = assert_parse_err("def f(x) -> int:\n    return x\ny = 1", "E0100");
+        assert!(
+            !bad_hdr.diags.iter().any(|d| d.code == "E0155"),
+            "unexpected cascading E0155: {:?}",
+            bad_hdr.diags
+        );
+        assert_eq!(bad_hdr.program.stmts.len(), 2);
     }
 
     #[test]
