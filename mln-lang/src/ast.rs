@@ -198,3 +198,61 @@ impl Expr {
         }
     }
 }
+
+impl Drop for Expr {
+    fn drop(&mut self) {
+        let mut stack: Vec<Expr> = Vec::new();
+        drain_children(self, &mut stack);
+        while let Some(mut node) = stack.pop() {
+            drain_children(&mut node, &mut stack);
+        }
+    }
+}
+
+fn drain_children(expr: &mut Expr, stack: &mut Vec<Expr>) {
+    let dummy = || Expr::Bool(false, Span::empty(0));
+    match expr {
+        Expr::Unary { e, .. } | Expr::Not(e, _) => {
+            stack.push(std::mem::replace(e.as_mut(), dummy()));
+        }
+        Expr::Binary { l, r, .. } | Expr::And(l, r, _) | Expr::Or(l, r, _) => {
+            stack.push(std::mem::replace(l.as_mut(), dummy()));
+            stack.push(std::mem::replace(r.as_mut(), dummy()));
+        }
+        Expr::Compare { first, rest, .. } => {
+            stack.push(std::mem::replace(first.as_mut(), dummy()));
+            for (_, rhs) in std::mem::take(rest) {
+                stack.push(rhs);
+            }
+        }
+        Expr::IfElse {
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            stack.push(std::mem::replace(cond.as_mut(), dummy()));
+            stack.push(std::mem::replace(then.as_mut(), dummy()));
+            stack.push(std::mem::replace(otherwise.as_mut(), dummy()));
+        }
+        Expr::Call { callee, args, .. } => {
+            stack.push(std::mem::replace(callee.as_mut(), dummy()));
+            for arg in std::mem::take(args) {
+                stack.push(arg.value);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            stack.push(std::mem::replace(base.as_mut(), dummy()));
+            stack.push(std::mem::replace(index.as_mut(), dummy()));
+        }
+        Expr::Attr { base, .. } | Expr::At { base, .. } => {
+            stack.push(std::mem::replace(base.as_mut(), dummy()));
+        }
+        Expr::Num { .. }
+        | Expr::Timeframe(_)
+        | Expr::Str(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Name(_)
+        | Expr::Error(_) => {}
+    }
+}
