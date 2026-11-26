@@ -948,6 +948,15 @@ impl Parser {
                         ));
                         return Expr::Error(expr.span().join(rbrack_span));
                     }
+                    if matches!(self.peek_kind(), TokenKind::Colon) {
+                        let colon_span = self.bump().span;
+                        self.emit_stmt_error(Diagnostic::error(
+                            "E0113",
+                            "slices are not supported",
+                            colon_span,
+                        ));
+                        return Expr::Error(expr.span().join(colon_span));
+                    }
                     if !self.enter_depth(lbrack_span) {
                         return Expr::Error(expr.span().join(lbrack_span));
                     }
@@ -1379,6 +1388,8 @@ mod tests {
     fn p28_empty_index_and_slice() {
         assert_parse_err("x = close[]", "E0112");
         assert_parse_err("x = close[1:2]", "E0113");
+        assert_parse_err("x = close[:2]", "E0113");
+        assert_parse_err("x = close[:]", "E0113");
     }
 
     #[test]
