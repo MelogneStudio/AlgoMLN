@@ -599,7 +599,7 @@ impl<'a> Checker<'a> {
                     return self.err_expr(id.span);
                 }
                 if self_assign_target == Some(id.name.as_str())
-                    || (self.scopes.is_empty() && self.declared_top.contains_key(&id.name))
+                    || self.declared_top.contains_key(&id.name)
                 {
                     self.emit_error(
                         "E0202",
@@ -1011,7 +1011,7 @@ impl<'a> Checker<'a> {
         if self.lookup_global(&id.name).is_some() || BUILTIN_SERIES.contains(&id.name.as_str()) {
             self.emit_error("E0301", format!("`{}` is not callable", id.name), id.span);
         } else if self_assign_target == Some(id.name.as_str())
-            || (self.scopes.is_empty() && self.declared_top.contains_key(&id.name))
+            || self.declared_top.contains_key(&id.name)
         {
             self.emit_error(
                 "E0202",

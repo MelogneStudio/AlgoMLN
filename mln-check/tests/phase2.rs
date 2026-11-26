@@ -341,3 +341,32 @@ fn later_local_in_def_triggers_e0202_even_when_global_exists() {
     );
     assert_has_code(&out_call, "E0202");
 }
+
+#[test]
+fn def_referencing_later_top_level_variable_triggers_e0202() {
+    let out = run_check(
+        "def f(x) = x + later_top\n\
+         entry = f(close) > 0\n\
+         later_top = 1\n\
+         exit = later_top > 0",
+    );
+    assert_has_code(&out, "E0202");
+    assert!(
+        !out.diags.iter().any(|d| d.code == "E0200"),
+        "expected E0202 instead of E0200: {:?}",
+        out.diags
+    );
+
+    let out_call = run_check(
+        "def f(x) = later_top(x)\n\
+         entry = f(close) > 0\n\
+         later_top = 1\n\
+         exit = later_top > 0",
+    );
+    assert_has_code(&out_call, "E0202");
+    assert!(
+        !out_call.diags.iter().any(|d| d.code == "E0200"),
+        "expected E0202 instead of E0200: {:?}",
+        out_call.diags
+    );
+}
