@@ -1248,10 +1248,13 @@ impl<'a> Checker<'a> {
             return self.err_expr(span);
         }
 
-        let call_clock = combine_clocks(&series_clocks);
+        let op_warmup = op.warmup.compute(&int_args);
+        let call_clock = match combine_clocks(&series_clocks) {
+            Clock::Constant if op_warmup > 0 || op.state_bytes > 0 => Clock::Tf(ambient),
+            c => c,
+        };
         let warmup_refs: Vec<&BTreeMap<Tf, u64>> = series_warmups.iter().collect();
         let mut warmups = merge_warmups(&warmup_refs);
-        let op_warmup = op.warmup.compute(&int_args);
         if op_warmup > 0 {
             let target_clock = match call_clock {
                 Clock::Tf(tf) => tf,

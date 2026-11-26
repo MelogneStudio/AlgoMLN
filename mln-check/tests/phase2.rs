@@ -452,3 +452,43 @@ fn ifelse_does_not_leak_const_val_when_non_constant() {
         13
     );
 }
+
+#[test]
+fn stateful_and_warming_builtins_with_constant_inputs_get_ambient_clock() {
+    let ema_at = run_check("entry = ema(10, 50) @ 1d > 0\nexit = true");
+    assert!(ema_at.is_ok(), "unexpected errors: {:?}", ema_at.diags);
+    let ema_wu = ema_at.program.warmup.entry.as_ref().unwrap();
+    assert_eq!(ema_wu.clock, Tf::new(1, TfUnit::Day));
+    assert_eq!(ema_wu.own_clock_bars, 49);
+
+    let cumsum_at = run_check("entry = cumsum(1) @ 1d > 0\nexit = true");
+    assert!(
+        cumsum_at.is_ok(),
+        "unexpected errors: {:?}",
+        cumsum_at.diags
+    );
+    assert_eq!(
+        cumsum_at.program.warmup.entry.as_ref().unwrap().clock,
+        Tf::new(1, TfUnit::Day)
+    );
+
+    let cumsum_idx = run_check("entry = cumsum(1)[2] > 0\nexit = true");
+    assert!(
+        cumsum_idx.is_ok(),
+        "unexpected errors: {:?}",
+        cumsum_idx.diags
+    );
+    assert_eq!(
+        cumsum_idx
+            .program
+            .warmup
+            .entry
+            .as_ref()
+            .unwrap()
+            .own_clock_bars,
+        2
+    );
+
+    let pure_const_at = run_check("entry = abs(-5) @ 1d > 0\nexit = true");
+    assert_has_code(&pure_const_at, "E0402");
+}
