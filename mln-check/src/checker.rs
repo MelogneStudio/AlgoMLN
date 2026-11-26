@@ -61,6 +61,7 @@ struct DefEntry<'a> {
     used: bool,
     recursive: bool,
     poisoned_name: bool,
+    checked_defaults: Vec<Option<(CheckedExpr, bool)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +162,7 @@ impl<'a> Checker<'a> {
                             used: false,
                             recursive: false,
                             poisoned_name: false,
+                            checked_defaults: vec![None; d.params.len()],
                         },
                     );
                 }
@@ -298,13 +300,24 @@ impl<'a> Checker<'a> {
                             entry.poisoned_name = true;
                         }
                     }
-                    for p in &d.params {
+                    for (idx, p) in d.params.iter().enumerate() {
                         if self.is_builtin(&p.name.name) {
                             self.emit_error(
                                 "E0203",
                                 format!("parameter `{}` cannot shadow a built-in", p.name.name),
                                 p.name.span,
                             );
+                        }
+                        if let Some(default_expr) = &p.default {
+                            if self
+                                .defs
+                                .get(&d.name.name)
+                                .is_some_and(|e| e.def.span == d.span)
+                            {
+                                let _ = self.check_def_default(d, idx, ambient);
+                            } else {
+                                let _ = self.check_expr(default_expr, ambient, None);
+                            }
                         }
                     }
                     checked_stmts.push(CheckedStmt::DefDecl {
@@ -332,9 +345,9 @@ impl<'a> Checker<'a> {
         self.record_def_instances = false;
         for (def_name, def) in uncalled_defs {
             let mut param_bindings = Vec::with_capacity(def.params.len());
-            for p in &def.params {
-                let b = if let Some(d_expr) = &p.default {
-                    let ce = self.check_expr(d_expr, ambient, None);
+            for (idx, p) in def.params.iter().enumerate() {
+                let b = if p.default.is_some() {
+                    let ce = self.check_def_default(def, idx, ambient);
                     Binding {
                         ty: ce.ty,
                         clock: ce.clock,
@@ -1332,13 +1345,7 @@ impl<'a> Checker<'a> {
             let ce = if let Some(arg_expr) = bound[idx] {
                 self.check_expr(arg_expr, ambient, self_assign_target)
             } else {
-                let default_expr = param.default.as_ref().expect("checked above");
-                let saved_scopes = std::mem::take(&mut self.scopes);
-                let saved_declared = std::mem::take(&mut self.local_declared);
-                let ce = self.check_expr(default_expr, ambient, None);
-                self.scopes = saved_scopes;
-                self.local_declared = saved_declared;
-                ce
+                self.check_def_default(def, idx, ambient)
             };
             arg_types.push(ce.ty);
             param_bindings.push((
@@ -1462,6 +1469,53 @@ impl<'a> Checker<'a> {
         }
 
         ret
+    }
+
+    fn check_def_default(&mut self, def: &'a Def, idx: usize, ambient: Tf) -> CheckedExpr {
+        let default_expr = def.params[idx]
+            .default
+            .as_ref()
+            .expect("default parameter expression must exist");
+        let cached = self
+            .defs
+            .get(&def.name.name)
+            .filter(|e| e.def.span == def.span)
+            .and_then(|e| e.checked_defaults.get(idx))
+            .and_then(|opt| opt.clone());
+
+        let (base_ce, had_error) = match cached {
+            Some(pair) => pair,
+            None => {
+                let saved_scopes = std::mem::take(&mut self.scopes);
+                let saved_declared = std::mem::take(&mut self.local_declared);
+                let diags_before = self.diags.len();
+                let ce = self.check_expr(default_expr, self.config.base_clock, None);
+                let had_err = ce.ty == Ty::Error || self.diags.len() > diags_before;
+                self.scopes = saved_scopes;
+                self.local_declared = saved_declared;
+                if let Some(entry) = self
+                    .defs
+                    .get_mut(&def.name.name)
+                    .filter(|e| e.def.span == def.span)
+                {
+                    if let Some(slot) = entry.checked_defaults.get_mut(idx) {
+                        *slot = Some((ce.clone(), had_err));
+                    }
+                }
+                (ce, had_err)
+            }
+        };
+
+        if had_error || ambient == self.config.base_clock {
+            return base_ce;
+        }
+
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_declared = std::mem::take(&mut self.local_declared);
+        let ce = self.check_expr(default_expr, ambient, None);
+        self.scopes = saved_scopes;
+        self.local_declared = saved_declared;
+        ce
     }
 }
 

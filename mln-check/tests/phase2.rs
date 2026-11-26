@@ -383,3 +383,31 @@ fn unused_local_inside_def_emits_w0201_once() {
     assert_eq!(w0201s.len(), 1, "expected 1 W0201, got {:?}", out.diags);
     assert!(w0201s[0].message.contains("unused"));
 }
+
+#[test]
+fn default_param_expr_is_checked_even_when_all_calls_pass_arg() {
+    let out = run_check(
+        "def f(x, n = true + 1) = ema(x, n)\n\
+         entry = f(close, 14) > 0\n\
+         exit = true",
+    );
+    assert_has_code(&out, "E0300");
+
+    // When omitted at multiple call sites, the invalid default reports E0300 once.
+    let out_omitted = run_check(
+        "def f(x, n = true + 1) = ema(x, n)\n\
+         entry = f(close) > f(open)\n\
+         exit = true",
+    );
+    let e0300s: Vec<_> = out_omitted
+        .diags
+        .iter()
+        .filter(|d| d.code == "E0300")
+        .collect();
+    assert_eq!(
+        e0300s.len(),
+        1,
+        "expected 1 E0300, got {:?}",
+        out_omitted.diags
+    );
+}
