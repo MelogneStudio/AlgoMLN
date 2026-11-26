@@ -225,3 +225,35 @@ proptest! {
         let _ = check_default(&parsed.program);
     }
 }
+
+#[test]
+fn def_call_uses_lexical_scoping_not_caller_locals() {
+    let out = run_check(
+        "def inner(x) = x + secret\n\
+         def outer(secret) = inner(secret)\n\
+         entry = outer(1) > 0\n\
+         exit = true",
+    );
+    assert_has_code(&out, "E0200");
+
+    let out_default = run_check(
+        "def inner(x, y = secret) = x + y\n\
+         def outer(secret) = inner(secret)\n\
+         entry = outer(1) > 0\n\
+         exit = true",
+    );
+    assert_has_code(&out_default, "E0200");
+
+    let out_later_local = run_check(
+        "def inner(x) = x + later\n\
+         def outer(x):\n    y = inner(x)\n    later = 1\n    return y + later\n\
+         entry = outer(1) > 0\n\
+         exit = true",
+    );
+    assert_has_code(&out_later_local, "E0200");
+    assert!(
+        !out_later_local.diags.iter().any(|d| d.code == "E0202"),
+        "caller local should not trigger E0202 in callee: {:?}",
+        out_later_local.diags
+    );
+}

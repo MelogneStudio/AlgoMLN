@@ -493,7 +493,7 @@ impl<'a> Checker<'a> {
     }
 
     fn lookup_var(&mut self, name: &str) -> Option<Binding> {
-        for scope in self.scopes.iter_mut().rev() {
+        if let Some(scope) = self.scopes.last_mut() {
             if let Some(b) = scope.get_mut(name) {
                 b.used = true;
                 return Some(b.clone());
@@ -508,9 +508,8 @@ impl<'a> Checker<'a> {
 
     fn is_declared_later_local(&self, name: &str) -> bool {
         self.local_declared
-            .iter()
-            .rev()
-            .any(|m| m.contains_key(name))
+            .last()
+            .is_some_and(|m| m.contains_key(name))
     }
 
     fn check_expr(
@@ -1298,7 +1297,12 @@ impl<'a> Checker<'a> {
                 self.check_expr(arg_expr, ambient, self_assign_target)
             } else {
                 let default_expr = param.default.as_ref().expect("checked above");
-                self.check_expr(default_expr, ambient, None)
+                let saved_scopes = std::mem::take(&mut self.scopes);
+                let saved_declared = std::mem::take(&mut self.local_declared);
+                let ce = self.check_expr(default_expr, ambient, None);
+                self.scopes = saved_scopes;
+                self.local_declared = saved_declared;
+                ce
             };
             arg_types.push(ce.ty);
             param_bindings.push((
