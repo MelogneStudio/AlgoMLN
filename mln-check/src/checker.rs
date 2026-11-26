@@ -1568,8 +1568,69 @@ fn collect_calls_in_expr(expr: &Expr, out: &mut Vec<(String, Span)>) {
     }
 }
 
+fn expr_has_error(root: &Expr) -> bool {
+    let mut stack = vec![root];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            Expr::Error(_) => return true,
+            Expr::Unary { e, .. }
+            | Expr::Not(e, _)
+            | Expr::At { base: e, .. }
+            | Expr::Attr { base: e, .. } => stack.push(e),
+            Expr::Binary { l, r, .. } | Expr::And(l, r, _) | Expr::Or(l, r, _) => {
+                stack.push(l);
+                stack.push(r);
+            }
+            Expr::Compare { first, rest, .. } => {
+                stack.push(first);
+                for (_, rhs) in rest {
+                    stack.push(rhs);
+                }
+            }
+            Expr::IfElse {
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                stack.push(cond);
+                stack.push(then);
+                stack.push(otherwise);
+            }
+            Expr::Call { callee, args, .. } => {
+                stack.push(callee);
+                for arg in args {
+                    stack.push(&arg.value);
+                }
+            }
+            Expr::Index { base, index, .. } => {
+                stack.push(base);
+                stack.push(index);
+            }
+            Expr::Num { .. }
+            | Expr::Timeframe(_)
+            | Expr::Str(_, _)
+            | Expr::Bool(_, _)
+            | Expr::Name(_) => {}
+        }
+    }
+    false
+}
+
+fn stmt_has_error(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Error(_) => true,
+        Stmt::Assign { value, .. } => expr_has_error(value),
+        Stmt::Def(d) => def_has_error(d),
+    }
+}
+
 fn def_has_error(def: &Def) -> bool {
-    matches!(def.ret, Expr::Error(_)) || def.body.iter().any(|s| matches!(s, Stmt::Error(_)))
+    def.params
+        .iter()
+        .any(|p| p.default.as_ref().is_some_and(expr_has_error))
+        || def.body.iter().any(stmt_has_error)
+        || expr_has_error(&def.ret)
 }
 
 fn types_comparable(op: CmpOp, a: Ty, b: Ty) -> bool {

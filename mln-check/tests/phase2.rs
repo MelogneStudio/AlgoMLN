@@ -411,3 +411,18 @@ fn default_param_expr_is_checked_even_when_all_calls_pass_arg() {
         out_omitted.diags
     );
 }
+
+#[test]
+fn nested_error_in_def_suppresses_extra_w0201() {
+    let p1 = parse("def f(x) = 1 +\nentry = true\nexit = true");
+    let c1 = check_default(&p1.program);
+    assert!(c1.diags.is_empty(), "got extra diags: {:?}", c1.diags);
+
+    let p2 = parse("def f(x):\n    a = 1 +\n    return a\nentry = true\nexit = true");
+    let c2 = check_default(&p2.program);
+    assert!(c2.diags.is_empty(), "got extra diags: {:?}", c2.diags);
+
+    let p3 = parse("def f(x, n = 1 +) = x\nentry = true\nexit = true");
+    let c3 = check_default(&p3.program);
+    assert!(c3.diags.is_empty(), "got extra diags: {:?}", c3.diags);
+}
