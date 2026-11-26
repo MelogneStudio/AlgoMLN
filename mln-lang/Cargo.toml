@@ -1,0 +1,14 @@
+[package]
+name = "mln-lang"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "LangMelogne (.mln) front-end: lexer, parser, AST, and diagnostics"
+license = "MIT"
+
+[dependencies]
+rust_decimal = "1"
+
+[dev-dependencies]
+insta = "1"
+proptest = "1"
