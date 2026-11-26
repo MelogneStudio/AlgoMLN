@@ -426,3 +426,29 @@ fn nested_error_in_def_suppresses_extra_w0201() {
     let c3 = check_default(&p3.program);
     assert!(c3.diags.is_empty(), "got extra diags: {:?}", c3.diags);
 }
+
+#[test]
+fn ifelse_does_not_leak_const_val_when_non_constant() {
+    let bad_window = run_check("entry = ema(close, 1 if true else close) > 0\nexit = true");
+    assert_has_code(&bad_window, "E0303");
+
+    let bad_index = run_check("entry = close[1 if true else close] > 0\nexit = true");
+    assert_has_code(&bad_index, "E0311");
+
+    let good_window = run_check("entry = ema(close, 14 if true else 20) > 0\nexit = true");
+    assert!(
+        good_window.is_ok(),
+        "unexpected errors: {:?}",
+        good_window.diags
+    );
+    assert_eq!(
+        good_window
+            .program
+            .warmup
+            .entry
+            .as_ref()
+            .unwrap()
+            .own_clock_bars,
+        13
+    );
+}

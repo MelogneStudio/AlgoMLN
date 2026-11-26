@@ -856,14 +856,21 @@ impl<'a> Checker<'a> {
                         return self.err_expr(*span);
                     }
                 };
-                let const_val = match &cc.const_val {
-                    Some(ConstVal::Bool(true)) => ct.const_val.clone(),
-                    Some(ConstVal::Bool(false)) => co.const_val.clone(),
-                    _ => None,
+                let clock = combine_clocks(&[cc.clock, ct.clock, co.clock]);
+                let const_val = if clock == Clock::Constant
+                    && matches!(ty, Ty::Dec | Ty::Bool | Ty::Tf | Ty::Str)
+                {
+                    match &cc.const_val {
+                        Some(ConstVal::Bool(true)) => ct.const_val.clone(),
+                        Some(ConstVal::Bool(false)) => co.const_val.clone(),
+                        _ => None,
+                    }
+                } else {
+                    None
                 };
                 CheckedExpr {
                     ty,
-                    clock: combine_clocks(&[cc.clock, ct.clock, co.clock]),
+                    clock,
                     const_val,
                     warmups: merge_warmups(&[&cc.warmups, &ct.warmups, &co.warmups]),
                     span: *span,
@@ -883,11 +890,12 @@ impl<'a> Checker<'a> {
                     );
                     return self.err_expr(*span);
                 }
-                let Some(cv) = &ci.const_val else {
-                    self.emit_error("E0311", "index must be a constant integer", ci.span);
-                    return self.err_expr(*span);
+                let k = if ci.ty == Ty::Dec && ci.clock == Clock::Constant {
+                    ci.const_val.as_ref().and_then(ConstVal::as_exact_int)
+                } else {
+                    None
                 };
-                let Some(k) = cv.as_exact_int() else {
+                let Some(k) = k else {
                     self.emit_error("E0311", "index must be a constant integer", ci.span);
                     return self.err_expr(*span);
                 };
@@ -1159,7 +1167,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                     ParamTy::ConstPosInt => {
-                        let k = ce.const_val.as_ref().and_then(ConstVal::as_exact_int);
+                        let k = if ce.ty == Ty::Dec && ce.clock == Clock::Constant {
+                            ce.const_val.as_ref().and_then(ConstVal::as_exact_int)
+                        } else {
+                            None
+                        };
                         if let Some(k) = k.filter(|&v| v >= 1) {
                             int_args[idx] = Some(k as u64);
                         } else {
@@ -1175,7 +1187,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                     ParamTy::ConstNonNegInt => {
-                        let k = ce.const_val.as_ref().and_then(ConstVal::as_exact_int);
+                        let k = if ce.ty == Ty::Dec && ce.clock == Clock::Constant {
+                            ce.const_val.as_ref().and_then(ConstVal::as_exact_int)
+                        } else {
+                            None
+                        };
                         if let Some(k) = k.filter(|&v| v >= 0) {
                             int_args[idx] = Some(k as u64);
                         } else {
