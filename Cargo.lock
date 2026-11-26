@@ -1425,6 +1425,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mln-exec"
+version = "0.1.0"
+dependencies = [
+ "mln-check",
+ "mln-ir",
+ "mln-lang",
+ "mln-std",
+ "rust_decimal",
+]
+
+[[package]]
 name = "mln-ir"
 version = "0.1.0"
 dependencies = [

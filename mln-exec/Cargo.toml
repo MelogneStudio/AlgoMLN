@@ -1,0 +1,14 @@
+[package]
+name = "mln-exec"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "LangMelogne (.mln) oracle reference interpreter and incremental executor"
+license = "MIT"
+
+[dependencies]
+mln-lang = { path = "../mln-lang" }
+mln-std = { path = "../mln-std" }
+mln-check = { path = "../mln-check" }
+mln-ir = { path = "../mln-ir" }
+rust_decimal = "1"

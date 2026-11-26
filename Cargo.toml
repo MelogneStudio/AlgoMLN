@@ -34,7 +34,7 @@ harness = false
 path = "src/lib.rs"
 
 [workspace]
-members = ["dhan-api", "data", "cli", "dhan-token", "mln-lang", "mln-std", "mln-check", "mln-ir"]
+members = ["dhan-api", "data", "cli", "dhan-token", "mln-lang", "mln-std", "mln-check", "mln-ir", "mln-exec"]
 exclude = ["fuzz"]
 
 [profile.release]
