@@ -1,0 +1,16 @@
+[package]
+name = "mln-ir"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "LangMelogne (.mln) stream DAG intermediate representation and CSE lowering"
+license = "MIT"
+
+[dependencies]
+mln-lang = { path = "../mln-lang" }
+mln-std = { path = "../mln-std" }
+mln-check = { path = "../mln-check" }
+rust_decimal = "1"
+
+[dev-dependencies]
+insta = "1"

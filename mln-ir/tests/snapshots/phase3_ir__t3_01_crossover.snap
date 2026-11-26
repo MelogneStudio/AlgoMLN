@@ -1,0 +1,11 @@
+---
+source: mln-ir/tests/phase3_ir.rs
+expression: dump_ir(&graph)
+---
+n0 = series(close) @base
+n1 = ema(n0, 12) @base
+n2 = ema(n0, 26) @base
+n3 = crossover(n1, n2) @base
+n4 = crossunder(n1, n2) @base
+entry = n3
+exit = n4

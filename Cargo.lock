@@ -1425,6 +1425,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mln-ir"
+version = "0.1.0"
+dependencies = [
+ "insta",
+ "mln-check",
+ "mln-lang",
+ "mln-std",
+ "rust_decimal",
+]
+
+[[package]]
 name = "mln-lang"
 version = "0.1.0"
 dependencies = [
