@@ -499,18 +499,17 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn lookup_var(&mut self, name: &str) -> Option<Binding> {
-        if let Some(scope) = self.scopes.last_mut() {
-            if let Some(b) = scope.get_mut(name) {
-                b.used = true;
-                return Some(b.clone());
-            }
-        }
-        if let Some(b) = self.globals.get_mut(name) {
-            b.used = true;
-            return Some(b.clone());
-        }
-        None
+    fn lookup_local(&mut self, name: &str) -> Option<Binding> {
+        let scope = self.scopes.last_mut()?;
+        let b = scope.get_mut(name)?;
+        b.used = true;
+        Some(b.clone())
+    }
+
+    fn lookup_global(&mut self, name: &str) -> Option<Binding> {
+        let b = self.globals.get_mut(name)?;
+        b.used = true;
+        Some(b.clone())
     }
 
     fn is_declared_later_local(&self, name: &str) -> bool {
@@ -556,7 +555,24 @@ impl<'a> Checker<'a> {
             },
             Expr::Error(span) => self.err_expr(*span),
             Expr::Name(id) => {
-                if let Some(b) = self.lookup_var(&id.name) {
+                if let Some(b) = self.lookup_local(&id.name) {
+                    return CheckedExpr {
+                        ty: b.ty,
+                        clock: b.clock,
+                        const_val: b.const_val,
+                        warmups: b.warmups,
+                        span: id.span,
+                    };
+                }
+                if self.is_declared_later_local(&id.name) {
+                    self.emit_error(
+                        "E0202",
+                        format!("use of `{}` before definition", id.name),
+                        id.span,
+                    );
+                    return self.err_expr(id.span);
+                }
+                if let Some(b) = self.lookup_global(&id.name) {
                     return CheckedExpr {
                         ty: b.ty,
                         clock: b.clock,
@@ -583,7 +599,6 @@ impl<'a> Checker<'a> {
                     return self.err_expr(id.span);
                 }
                 if self_assign_target == Some(id.name.as_str())
-                    || self.is_declared_later_local(&id.name)
                     || (self.scopes.is_empty() && self.declared_top.contains_key(&id.name))
                 {
                     self.emit_error(
@@ -969,6 +984,19 @@ impl<'a> Checker<'a> {
             return self.check_builtin_call(op, args, span, ambient, self_assign_target);
         }
 
+        if self.lookup_local(&id.name).is_some() {
+            self.emit_error("E0301", format!("`{}` is not callable", id.name), id.span);
+            return self.err_expr(span);
+        }
+        if self.is_declared_later_local(&id.name) {
+            self.emit_error(
+                "E0202",
+                format!("use of `{}` before definition", id.name),
+                id.span,
+            );
+            return self.err_expr(span);
+        }
+
         if let Some(def_entry) = self.defs.get(&id.name).cloned() {
             if let Some(entry) = self.defs.get_mut(&id.name) {
                 entry.used = true;
@@ -980,10 +1008,9 @@ impl<'a> Checker<'a> {
         }
 
         // Check arguments even if unknown, or check if `id` is a non-callable variable.
-        if self.lookup_var(&id.name).is_some() || BUILTIN_SERIES.contains(&id.name.as_str()) {
+        if self.lookup_global(&id.name).is_some() || BUILTIN_SERIES.contains(&id.name.as_str()) {
             self.emit_error("E0301", format!("`{}` is not callable", id.name), id.span);
         } else if self_assign_target == Some(id.name.as_str())
-            || self.is_declared_later_local(&id.name)
             || (self.scopes.is_empty() && self.declared_top.contains_key(&id.name))
         {
             self.emit_error(

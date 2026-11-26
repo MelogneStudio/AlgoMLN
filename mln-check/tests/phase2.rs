@@ -322,3 +322,22 @@ fn equivalent_timeframes_do_not_trigger_e0401() {
     let cmp_tf = run_check("entry = 1h == 60m and not (1h < 60m)\nexit = true");
     assert!(cmp_tf.is_ok(), "unexpected errors: {:?}", cmp_tf.diags);
 }
+
+#[test]
+fn later_local_in_def_triggers_e0202_even_when_global_exists() {
+    let out = run_check(
+        "a = 10\n\
+         def f(x):\n    b = a + 1\n    a = x\n    return b\n\
+         entry = f(close) > a\n\
+         exit = true",
+    );
+    assert_has_code(&out, "E0202");
+
+    let out_call = run_check(
+        "a = 10\n\
+         def f(x):\n    b = a()\n    a = x\n    return b\n\
+         entry = f(close) > a\n\
+         exit = true",
+    );
+    assert_has_code(&out_call, "E0202");
+}
