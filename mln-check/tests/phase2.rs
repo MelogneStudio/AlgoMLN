@@ -277,3 +277,31 @@ fn mutual_recursion_and_uncalled_defs_are_deterministic() {
         assert_eq!(first_u.program.def_instances, again_u.program.def_instances);
     }
 }
+
+#[test]
+fn uncalled_polymorphic_and_windowed_defs_do_not_false_error() {
+    let out = run_check(
+        "def my_ema(x, n) = ema(x, n)\n\
+         def lag(x, k) = x[k]\n\
+         def both(a, b) = a and b\n\
+         entry = close > open\n\
+         exit = false",
+    );
+    assert!(out.is_ok(), "unexpected errors: {:?}", out.diags);
+    assert_eq!(out.diags.len(), 3);
+    assert!(out.diags.iter().all(|d| d.code == "W0201"));
+
+    let bad_name = run_check("def f(x) = x + nope\nentry = true\nexit = false");
+    assert_has_code(&bad_name, "E0200");
+
+    let bad_before =
+        run_check("def f(x):\n    y = y + 1\n    return x\nentry = true\nexit = false");
+    assert_has_code(&bad_before, "E0202");
+
+    let bad_shadow =
+        run_check("def f(x):\n    close = 1\n    return x\nentry = true\nexit = false");
+    assert_has_code(&bad_shadow, "E0203");
+
+    let bad_default = run_check("def f(x, n = nope) = ema(x, n)\nentry = true\nexit = false");
+    assert_has_code(&bad_default, "E0200");
+}

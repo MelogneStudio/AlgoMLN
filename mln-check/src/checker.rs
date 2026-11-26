@@ -81,6 +81,7 @@ struct Checker<'a> {
     local_declared: Vec<HashMap<String, Span>>,
     checked_stmts: Vec<CheckedStmt>,
     def_instances: Vec<DefInstance>,
+    record_def_instances: bool,
     call_depth: usize,
     has_parse_error: bool,
 }
@@ -99,6 +100,7 @@ impl<'a> Checker<'a> {
             local_declared: Vec::new(),
             checked_stmts: Vec::new(),
             def_instances: Vec::new(),
+            record_def_instances: true,
             call_depth: 0,
             has_parse_error: false,
         }
@@ -315,8 +317,9 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Validate uncalled non-recursive `def`s once with symbolic `Num` parameters,
-        // and emit `W0201` if they are clean and unused.
+        // Validate uncalled non-recursive `def`s once with symbolic `Ty::Error` parameters
+        // (so polymorphic/windowed helpers are not falsely rejected), and emit `W0201` if
+        // they are clean and unused.
         let mut uncalled_defs: Vec<(String, &'a Def)> = self
             .defs
             .iter()
@@ -324,6 +327,7 @@ impl<'a> Checker<'a> {
             .map(|(k, e)| (k.clone(), e.def))
             .collect();
         uncalled_defs.sort_by_key(|(_, def)| def.span.start);
+        self.record_def_instances = false;
         for (def_name, def) in uncalled_defs {
             let mut param_bindings = Vec::with_capacity(def.params.len());
             for p in &def.params {
@@ -339,8 +343,8 @@ impl<'a> Checker<'a> {
                     }
                 } else {
                     Binding {
-                        ty: Ty::Num,
-                        clock: Clock::Tf(ambient),
+                        ty: Ty::Error,
+                        clock: Clock::Constant,
                         const_val: None,
                         warmups: BTreeMap::new(),
                         span: p.name.span,
@@ -358,6 +362,7 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        self.record_def_instances = true;
 
         // Emit `W0201` for unused top-level variables (excluding `entry`, `exit`, and `Ty::Error`).
         let mut unused_vars: Vec<(Span, String)> = self
@@ -1324,16 +1329,18 @@ impl<'a> Checker<'a> {
         let ret = self.check_def_body(def, &param_bindings, ambient);
         self.call_depth -= 1;
 
-        let instance_id = self.def_instances.len();
-        self.def_instances.push(DefInstance {
-            id: instance_id,
-            def_name: def.name.name.clone(),
-            call_span: span,
-            clock: ret.clock,
-            arg_types,
-            ret_ty: ret.ty,
-            warmups: ret.warmups.clone(),
-        });
+        if self.record_def_instances {
+            let instance_id = self.def_instances.len();
+            self.def_instances.push(DefInstance {
+                id: instance_id,
+                def_name: def.name.name.clone(),
+                call_span: span,
+                clock: ret.clock,
+                arg_types,
+                ret_ty: ret.ty,
+                warmups: ret.warmups.clone(),
+            });
+        }
 
         CheckedExpr {
             ty: ret.ty,
