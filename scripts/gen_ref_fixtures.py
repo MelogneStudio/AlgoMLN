@@ -100,6 +100,35 @@ def linreg_arr(w: np.ndarray) -> tuple[float, float]:
     return (slope, intercept)
 
 
+def two_pass_cov(x: np.ndarray, y: np.ndarray) -> float:
+    mx = float(np.mean(x))
+    my = float(np.mean(y))
+    return float(np.sum((x - mx) * (y - my)) / (len(x) - 1))
+
+
+def two_pass_corr(x: np.ndarray, y: np.ndarray) -> float:
+    mx = float(np.mean(x))
+    my = float(np.mean(y))
+    dx = x - mx
+    dy = y - my
+    den = float(np.sqrt(np.sum(dx * dx) * np.sum(dy * dy)))
+    if den == 0.0:
+        return np.nan
+    return float(np.sum(dx * dy) / den)
+
+
+def rolling_pair(s1: pd.Series, s2: pd.Series, n: int, fn) -> pd.Series:
+    a = s1.to_numpy(dtype=np.float64)
+    b = s2.to_numpy(dtype=np.float64)
+    out = np.full(len(a), np.nan, dtype=np.float64)
+    for t in range(n - 1, len(a)):
+        wa = a[t + 1 - n : t + 1]
+        wb = b[t + 1 - n : t + 1]
+        if np.all(np.isfinite(wa)) and np.all(np.isfinite(wb)):
+            out[t] = fn(wa, wb)
+    return pd.Series(out, index=s1.index)
+
+
 def compute_crossover(a: pd.Series, b: pd.Series, cross_up: bool) -> pd.Series:
     a0 = a.shift(1)
     b0 = b.shift(1)
@@ -151,6 +180,9 @@ def main() -> None:
     weights10 = np.arange(1, 11, dtype=np.float64)
     denom10 = float(np.sum(weights10))
 
+    std20 = c.rolling(20).apply(lambda w: float(np.std(w, ddof=1)), raw=True)
+    var20 = c.rolling(20).apply(lambda w: float(np.var(w, ddof=1)), raw=True)
+
     series_map: dict[str, pd.Series] = {
         "abs": (c - o).abs(),
         "sqrt": np.sqrt(c),
@@ -177,8 +209,8 @@ def main() -> None:
         "sum": v.rolling(20).sum(),
         "mean": c.rolling(20).mean(),
         "sma": c.rolling(20).mean(),
-        "std": c.rolling(20).std(ddof=1),
-        "var": c.rolling(20).var(ddof=1),
+        "std": std20,
+        "var": var20,
         "ema": ema12,
         "rma": rma(c, 14),
         "wma": c.rolling(10).apply(lambda w: float(np.dot(w, weights10) / denom10), raw=True),
@@ -188,9 +220,9 @@ def main() -> None:
         "tr": true_range(df),
         "atr": rma(true_range(df), 14),
         "macd": macd_line - macd_sig,
-        "bollinger": c.rolling(20).mean() + 2.0 * c.rolling(20).std(ddof=1),
-        "corr": c.rolling(20).corr(v),
-        "cov": c.rolling(20).cov(v),
+        "bollinger": c.rolling(20).mean() + 2.0 * std20,
+        "corr": rolling_pair(c, v, 20, two_pass_corr),
+        "cov": rolling_pair(c, v, 20, two_pass_cov),
         "linreg_slope": c.rolling(20).apply(lambda w: linreg_arr(w)[0], raw=True),
         "linreg_intercept": c.rolling(20).apply(lambda w: linreg_arr(w)[1], raw=True),
         "percentile_rank": c.rolling(20).apply(
