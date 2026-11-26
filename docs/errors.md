@@ -45,3 +45,21 @@ Stable error and warning codes for the LangMelogne (`.mln`) compiler. A code's m
 - **E0154** — Augmented assignment is not supported. Operators like `+=`, `-=`, `*=`, `/=` are not supported; write `x = x + ...`.
 - **E0155** — Unexpected indent. An indented block appeared where no block was opened.
 - **E0199** — Too many errors. Diagnostic reporting stopped after 50 errors.
+
+## Phase 2: Checker (`E02xx`, `W02xx`, `E03xx`, `E04xx`)
+
+- **E0200** — Unknown identifier. A variable or function name is not defined in the current scope or builtin registry.
+- **E0201** — Redefinition of name. A variable or `def` name is defined more than once in the same scope.
+- **E0202** — Use before definition. A variable is referenced before it has been assigned (including self-referential `a = a + 1`).
+- **E0203** — Shadowing a builtin. A user variable, `def`, or parameter has the same name as a built-in series or operator.
+- **E0210** — Recursive `def`. A `def` function calls itself directly or indirectly.
+- **E0220** — Missing required output. A program must define both `entry` and `exit`.
+- **W0201** — Unused name. A defined variable or `def` helper is never referenced by `entry`, `exit`, or another used definition.
+- **E0300** — Type mismatch. Operand or output types are incompatible (for example, `entry` is not `Bool`, `close and 1`, or `1d + 1`).
+- **E0301** — Wrong call arity. A function call has too few or too many arguments, or attempts to call a non-function.
+- **E0302** — Unknown keyword argument. A call passes a keyword name not present in the callee's parameter list.
+- **E0303** — Argument type mismatch. An argument's type or non-constness does not match the parameter requirement.
+- **E0310** — Negative index. Indexing `x[k]` with `k < 0` is rejected because it would read future bars.
+- **E0311** — Non-constant index. Indexing `x[k]` requires `k` to be a constant integer.
+- **E0401** — Finer clock inside coarser clock. A finer-timeframe series cannot be evaluated inside a coarser-timeframe expression.
+- **E0402** — `@` applied to constant. Timeframe resampling `@ tf` cannot be applied to a constant expression.

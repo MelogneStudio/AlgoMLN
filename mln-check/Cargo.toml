@@ -1,0 +1,12 @@
+[package]
+name = "mln-check"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "LangMelogne (.mln) static checker: names, types, constant folding, clocks, and warm-up"
+license = "MIT"
+
+[dependencies]
+mln-lang = { path = "../mln-lang" }
+mln-std = { path = "../mln-std" }
+rust_decimal = "1"
