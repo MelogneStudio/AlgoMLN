@@ -329,7 +329,7 @@ pub const TIER1_OPS: &[OpSpec] = &[
         0,
         CostClass::Constant,
         NanRule::Propagate,
-        "mod(bar_idx, 5)",
+        "mod(volume, 5)",
         "tests/fixtures/ref/mod.csv"
     ),
     op!(
@@ -640,6 +640,11 @@ mod tests {
         for op in TIER1_OPS {
             assert!(names.insert(op.name), "duplicate op {}", op.name);
             assert!(!op.doc_example.is_empty());
+            assert!(
+                !op.doc_example.contains("bar_idx"),
+                "doc_example for {} references undefined bar_idx",
+                op.name
+            );
             assert!(!op.fixture_path.is_empty());
         }
         let reg = tier1_registry();

@@ -89,7 +89,9 @@ impl WarmupRule {
                 let f = int_args.get(fast).and_then(|v| *v).unwrap_or(12);
                 let s = int_args.get(slow).and_then(|v| *v).unwrap_or(26);
                 let sig = int_args.get(signal).and_then(|v| *v).unwrap_or(9);
-                f.max(s).saturating_sub(1) + sig.saturating_sub(1)
+                f.max(s)
+                    .saturating_sub(1)
+                    .saturating_add(sig.saturating_sub(1))
             }
         }
     }
@@ -156,5 +158,23 @@ impl OpRegistry {
     /// Returns all registered operators.
     pub fn all(&self) -> &[OpSpec] {
         &self.ops
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macd_warmup_saturates_on_large_inputs() {
+        let rule = WarmupRule::Macd {
+            fast: 1,
+            slow: 2,
+            signal: 3,
+        };
+        assert_eq!(
+            rule.compute(&[None, Some(u64::MAX), Some(26), Some(u64::MAX)]),
+            u64::MAX
+        );
     }
 }
