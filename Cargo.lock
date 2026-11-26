@@ -1415,6 +1415,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mln-check"
+version = "0.1.0"
+dependencies = [
+ "mln-lang",
+ "mln-std",
+ "proptest",
+ "rust_decimal",
+]
+
+[[package]]
 name = "mln-lang"
 version = "0.1.0"
 dependencies = [
