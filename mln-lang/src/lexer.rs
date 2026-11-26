@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use rust_decimal::Decimal;
 
-use crate::diag::{finalize_diagnostics, line_col, Diagnostic};
+use crate::diag::{finalize_diagnostics, Diagnostic, MAX_DIAGNOSTICS};
 use crate::span::Span;
 
 /// Maximum allowed source size in bytes (1 MiB).
@@ -596,15 +596,43 @@ impl<'a> Lexer<'a> {
             });
         }
 
-        for (open_byte, open_span) in self.bracket_stack.drain(..) {
-            let (line, col) = line_col(self.src, open_span.start);
-            let ch = open_byte as char;
-            self.diags.push(Diagnostic::error(
-                "E0015",
-                format!("unclosed `{ch}` opened at {line}:{col}"),
-                Span::empty(eof as u32),
-            ));
+        let max_needed = (MAX_DIAGNOSTICS + 1).saturating_sub(self.diags.len());
+        if max_needed > 0 && !self.bracket_stack.is_empty() {
+            let count = self.bracket_stack.len().min(max_needed);
+            let mut line: u32 = 1;
+            let mut col: u32 = 1;
+            let mut i = 0usize;
+            for &(open_byte, open_span) in &self.bracket_stack[..count] {
+                let target = (open_span.start as usize).min(self.src.len());
+                while i < target {
+                    let ch = self.src[i..].chars().next().expect("valid UTF-8 slice");
+                    let ch_len = ch.len_utf8();
+                    if ch == '\r' {
+                        if i + 1 < target && self.bytes.get(i + 1) == Some(&b'\n') {
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
+                        line += 1;
+                        col = 1;
+                        continue;
+                    } else if ch == '\n' {
+                        line += 1;
+                        col = 1;
+                    } else {
+                        col += 1;
+                    }
+                    i += ch_len;
+                }
+                let ch = open_byte as char;
+                self.diags.push(Diagnostic::error(
+                    "E0015",
+                    format!("unclosed `{ch}` opened at {line}:{col}"),
+                    Span::empty(eof as u32),
+                ));
+            }
         }
+        self.bracket_stack.clear();
 
         self.tokens.push(Token {
             kind: TokenKind::Eof,
@@ -1347,5 +1375,22 @@ mod tests {
         let src = "x".repeat(MAX_SOURCE_BYTES + 1);
         let out = assert_lex_err(&src, "E0017");
         assert_eq!(tokens_str(&out.tokens), "EOF");
+    }
+
+    #[test]
+    fn l47_many_unclosed_brackets_is_linear_and_capped() {
+        let src = "(".repeat(MAX_SOURCE_BYTES);
+        let t0 = std::time::Instant::now();
+        let out = lex(&src);
+        assert!(
+            t0.elapsed().as_secs_f64() < 1.0,
+            "lexing 1 MiB of unclosed `(` took too long: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(out.diags.len(), MAX_DIAGNOSTICS + 1);
+        assert!(out.diags[..MAX_DIAGNOSTICS]
+            .iter()
+            .all(|d| d.code == "E0015"));
+        assert_eq!(out.diags[MAX_DIAGNOSTICS].code, "E0199");
     }
 }
