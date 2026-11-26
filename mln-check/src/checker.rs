@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use mln_lang::{Arg, CmpOp, Def, Diagnostic, Expr, Program, Severity, Span, Stmt};
 use mln_std::{tier1_registry, OpRegistry, OpSpec, ParamTy, ReturnTy};
@@ -81,6 +81,7 @@ struct Checker<'a> {
     local_declared: Vec<HashMap<String, Span>>,
     checked_stmts: Vec<CheckedStmt>,
     def_instances: Vec<DefInstance>,
+    warned_local_spans: HashSet<(u32, u32)>,
     record_def_instances: bool,
     call_depth: usize,
     has_parse_error: bool,
@@ -100,6 +101,7 @@ impl<'a> Checker<'a> {
             local_declared: Vec::new(),
             checked_stmts: Vec::new(),
             def_instances: Vec::new(),
+            warned_local_spans: HashSet::new(),
             record_def_instances: true,
             call_depth: 0,
             has_parse_error: false,
@@ -1445,9 +1447,19 @@ impl<'a> Checker<'a> {
         let finished_scope = self.scopes.pop().expect("active scope");
         self.local_declared.pop();
 
-        // Warn on unused locals inside the def body (not params, and only once on first check if desired;
-        // skipping duplicate W0201 across call sites keeps diagnostics clean).
-        let _ = finished_scope;
+        if !def_has_error(def) {
+            let mut unused_locals: Vec<(Span, String)> = finished_scope
+                .into_iter()
+                .filter(|(_, b)| !b.used && b.ty != Ty::Error)
+                .map(|(name, b)| (b.span, name))
+                .collect();
+            unused_locals.sort_by_key(|(s, _)| s.start);
+            for (span, name) in unused_locals {
+                if self.warned_local_spans.insert((span.start, span.end)) {
+                    self.emit_warning("W0201", format!("unused variable `{name}`"), span);
+                }
+            }
+        }
 
         ret
     }

@@ -370,3 +370,16 @@ fn def_referencing_later_top_level_variable_triggers_e0202() {
         out_call.diags
     );
 }
+
+#[test]
+fn unused_local_inside_def_emits_w0201_once() {
+    let out = run_check(
+        "def f(x):\n    unused = x + 1\n    return x\n\
+         entry = f(close) > f(open)\n\
+         exit = true",
+    );
+    assert!(out.is_ok(), "unexpected errors: {:?}", out.diags);
+    let w0201s: Vec<_> = out.diags.iter().filter(|d| d.code == "W0201").collect();
+    assert_eq!(w0201s.len(), 1, "expected 1 W0201, got {:?}", out.diags);
+    assert!(w0201s[0].message.contains("unused"));
+}
