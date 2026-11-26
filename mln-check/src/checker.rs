@@ -136,6 +136,7 @@ impl<'a> Checker<'a> {
                         .or_insert(name.span);
                 }
                 Stmt::Def(d) => {
+                    let assigned_earlier = self.declared_top.contains_key(&d.name.name);
                     self.declared_top
                         .entry(d.name.name.clone())
                         .or_insert(d.name.span);
@@ -161,7 +162,7 @@ impl<'a> Checker<'a> {
                             def: d,
                             used: false,
                             recursive: false,
-                            poisoned_name: false,
+                            poisoned_name: assigned_earlier,
                             checked_defaults: vec![None; d.params.len()],
                         },
                     );
@@ -263,7 +264,10 @@ impl<'a> Checker<'a> {
                             name.span,
                         );
                     } else if self.globals.contains_key(&name.name)
-                        || self.defs.contains_key(&name.name)
+                        || self
+                            .defs
+                            .get(&name.name)
+                            .is_some_and(|e| e.def.span.start < name.span.start)
                     {
                         self.emit_error(
                             "E0201",

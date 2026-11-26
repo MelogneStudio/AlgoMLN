@@ -492,3 +492,24 @@ fn stateful_and_warming_builtins_with_constant_inputs_get_ambient_clock() {
     let pure_const_at = run_check("entry = abs(-5) @ 1d > 0\nexit = true");
     assert_has_code(&pure_const_at, "E0402");
 }
+
+#[test]
+fn redefinition_e0201_points_to_second_definition_between_assign_and_def() {
+    let assign_first = "a = 1\ndef a(x) = x\nentry = a > 0\nexit = true";
+    let out1 = run_check(assign_first);
+    let e0201_1: Vec<_> = out1.diags.iter().filter(|d| d.code == "E0201").collect();
+    assert_eq!(e0201_1.len(), 1, "expected 1 E0201, got {:?}", out1.diags);
+    let def_offset = assign_first.find("def a").unwrap() as u32;
+    assert!(
+        e0201_1[0].span.start >= def_offset,
+        "expected E0201 on `def a`, got {:?}",
+        e0201_1[0]
+    );
+
+    let def_first = "def a(x) = x\na = 1\nentry = a(1) > 0\nexit = true";
+    let out2 = run_check(def_first);
+    let e0201_2: Vec<_> = out2.diags.iter().filter(|d| d.code == "E0201").collect();
+    assert_eq!(e0201_2.len(), 1, "expected 1 E0201, got {:?}", out2.diags);
+    let assign_offset = def_first.find("a = 1").unwrap() as u32;
+    assert_eq!(e0201_2[0].span.start, assign_offset);
+}
