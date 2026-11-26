@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use rust_decimal::Decimal;
 
-use crate::diag::{finalize_diagnostics, Diagnostic};
+use crate::diag::{finalize_diagnostics, line_col, Diagnostic};
 use crate::span::Span;
 
 /// Maximum allowed source size in bytes (1 MiB).
@@ -219,6 +219,10 @@ struct Lexer<'a> {
     pos: usize,
     tokens: Vec<Token>,
     diags: Vec<Diagnostic>,
+    indent_stack: Vec<usize>,
+    bracket_stack: Vec<(u8, Span)>,
+    at_line_start: bool,
+    seen_first_stmt: bool,
     emitted_py_kw_on_line: bool,
     line_has_tokens: bool,
 }
@@ -232,6 +236,10 @@ impl<'a> Lexer<'a> {
             pos,
             tokens: Vec::new(),
             diags: Vec::new(),
+            indent_stack: vec![0],
+            bracket_stack: Vec::new(),
+            at_line_start: true,
+            seen_first_stmt: false,
             emitted_py_kw_on_line: false,
             line_has_tokens: false,
         }
@@ -253,18 +261,152 @@ impl<'a> Lexer<'a> {
         self.line_has_tokens = true;
     }
 
+    fn handle_line_start(&mut self) {
+        let indent_start = self.pos;
+        let mut spaces = 0usize;
+        let mut first_tab: Option<Span> = None;
+
+        while let Some(b) = self.peek() {
+            if b == b' ' {
+                spaces += 1;
+                self.pos += 1;
+            } else if b == b'\t' {
+                if first_tab.is_none() {
+                    first_tab = Some(Span::new(self.pos as u32, (self.pos + 1) as u32));
+                }
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Blank lines and comment-only lines produce no tokens and do not affect indentation.
+        match self.peek() {
+            None | Some(b'\n' | b'#') => {
+                self.at_line_start = false;
+                return;
+            }
+            Some(b'\r') if self.peek_at(1) == Some(b'\n') => {
+                self.at_line_start = false;
+                return;
+            }
+            _ => {}
+        }
+
+        self.at_line_start = false;
+
+        if let Some(tab_span) = first_tab {
+            self.seen_first_stmt = true;
+            self.diags.push(Diagnostic::error(
+                "E0010",
+                "tabs are not allowed in indentation; use 4 spaces per level",
+                tab_span,
+            ));
+            return;
+        }
+
+        let indent_span = Span::new(indent_start as u32, self.pos as u32);
+
+        if !self.seen_first_stmt {
+            self.seen_first_stmt = true;
+            if spaces > 0 {
+                self.diags.push(Diagnostic::error(
+                    "E0013",
+                    "the first statement line cannot be indented",
+                    indent_span,
+                ));
+            }
+            return;
+        }
+
+        let current = *self.indent_stack.last().unwrap_or(&0);
+        if spaces == current {
+            return;
+        }
+
+        if spaces > current {
+            let diff = spaces - current;
+            if diff == 4 {
+                self.indent_stack.push(spaces);
+                self.tokens.push(Token {
+                    kind: TokenKind::Ind,
+                    span: indent_span,
+                });
+            } else if diff % 4 == 0 {
+                self.diags.push(Diagnostic::error(
+                    "E0011",
+                    format!("indentation jumped from {current} to {spaces} spaces (expected +4)"),
+                    indent_span,
+                ));
+                self.indent_stack.push(spaces);
+                self.tokens.push(Token {
+                    kind: TokenKind::Ind,
+                    span: indent_span,
+                });
+            } else {
+                self.diags.push(Diagnostic::error(
+                    "E0012",
+                    format!("indentation of {spaces} spaces is not a multiple of 4"),
+                    indent_span,
+                ));
+                self.indent_stack.push(spaces);
+                self.tokens.push(Token {
+                    kind: TokenKind::Ind,
+                    span: indent_span,
+                });
+            }
+        } else {
+            while let Some(&top) = self.indent_stack.last() {
+                if top <= spaces {
+                    break;
+                }
+                self.indent_stack.pop();
+                self.tokens.push(Token {
+                    kind: TokenKind::Ded,
+                    span: Span::empty(self.pos as u32),
+                });
+            }
+            let top = *self.indent_stack.last().unwrap_or(&0);
+            if top != spaces {
+                self.diags.push(Diagnostic::error(
+                    "E0012",
+                    format!("indentation of {spaces} spaces does not match any outer block"),
+                    indent_span,
+                ));
+            }
+        }
+    }
+
     fn run(&mut self) {
         while self.pos < self.bytes.len() {
+            if self.at_line_start && self.bracket_stack.is_empty() {
+                self.handle_line_start();
+                if self.pos >= self.bytes.len() {
+                    break;
+                }
+            }
+
             let b = self.bytes[self.pos];
             match b {
-                b' ' | b'\t' => {
-                    // Temporary whitespace skip before Step 3 adds indentation tracking.
+                b' ' => {
                     self.pos += 1;
+                }
+                b'\t' => {
+                    let start = self.pos;
+                    self.pos += 1;
+                    if self.bracket_stack.is_empty() {
+                        self.diags.push(Diagnostic::error(
+                            "E0010",
+                            "tabs are not allowed; use spaces",
+                            Span::new(start as u32, self.pos as u32),
+                        ));
+                    }
                 }
                 b'\r' => {
                     if self.peek_at(1) == Some(b'\n') {
-                        self.finish_line(self.pos, self.pos + 2);
+                        let start = self.pos;
                         self.pos += 2;
+                        self.handle_newline(start, self.pos);
                     } else {
                         let start = self.pos;
                         self.pos += 1;
@@ -277,8 +419,9 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'\n' => {
-                    self.finish_line(self.pos, self.pos + 1);
+                    let start = self.pos;
                     self.pos += 1;
+                    self.handle_newline(start, self.pos);
                 }
                 b'#' => {
                     while self.pos < self.bytes.len()
@@ -403,10 +546,22 @@ impl<'a> Lexer<'a> {
                     self.push_token(TokenKind::Err, start, self.pos);
                 }
                 b'@' => self.push_single(TokenKind::At),
-                b'(' => self.push_single(TokenKind::LParen),
-                b')' => self.push_single(TokenKind::RParen),
-                b'[' => self.push_single(TokenKind::LBracket),
-                b']' => self.push_single(TokenKind::RBracket),
+                b'(' => {
+                    let start = self.pos;
+                    self.pos += 1;
+                    let span = Span::new(start as u32, self.pos as u32);
+                    self.bracket_stack.push((b'(', span));
+                    self.push_token(TokenKind::LParen, start, self.pos);
+                }
+                b'[' => {
+                    let start = self.pos;
+                    self.pos += 1;
+                    let span = Span::new(start as u32, self.pos as u32);
+                    self.bracket_stack.push((b'[', span));
+                    self.push_token(TokenKind::LBracket, start, self.pos);
+                }
+                b')' => self.handle_close_bracket(b')', b'(', TokenKind::RParen),
+                b']' => self.handle_close_bracket(b']', b'[', TokenKind::RBracket),
                 b',' => self.push_single(TokenKind::Comma),
                 b':' => self.push_single(TokenKind::Colon),
                 b';' => self.push_single(TokenKind::Semi),
@@ -432,23 +587,64 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        let eof = self.bytes.len();
         if self.line_has_tokens {
-            let eof = self.bytes.len();
             self.push_token(TokenKind::Nl, eof, eof);
         }
-        let eof = self.bytes.len();
+
+        while self.indent_stack.len() > 1 {
+            self.indent_stack.pop();
+            self.tokens.push(Token {
+                kind: TokenKind::Ded,
+                span: Span::empty(eof as u32),
+            });
+        }
+
+        for (open_byte, open_span) in self.bracket_stack.drain(..) {
+            let (line, col) = line_col(self.src, open_span.start);
+            let ch = open_byte as char;
+            self.diags.push(Diagnostic::error(
+                "E0015",
+                format!("unclosed `{ch}` opened at {line}:{col}"),
+                Span::empty(eof as u32),
+            ));
+        }
+
         self.tokens.push(Token {
             kind: TokenKind::Eof,
             span: Span::empty(eof as u32),
         });
     }
 
-    fn finish_line(&mut self, nl_start: usize, nl_end: usize) {
+    fn handle_newline(&mut self, nl_start: usize, nl_end: usize) {
+        if !self.bracket_stack.is_empty() {
+            // Inside `()` and `[]`, newlines and indentation are ignored.
+            return;
+        }
         if self.line_has_tokens {
             self.push_token(TokenKind::Nl, nl_start, nl_end);
         }
         self.line_has_tokens = false;
         self.emitted_py_kw_on_line = false;
+        self.at_line_start = true;
+    }
+
+    fn handle_close_bracket(&mut self, close_byte: u8, expected_open: u8, kind: TokenKind) {
+        let start = self.pos;
+        self.pos += 1;
+        let span = Span::new(start as u32, self.pos as u32);
+        if self.bracket_stack.last().map(|(b, _)| *b) == Some(expected_open) {
+            self.bracket_stack.pop();
+            self.push_token(kind, start, self.pos);
+        } else {
+            let ch = close_byte as char;
+            self.diags.push(Diagnostic::error(
+                "E0014",
+                format!("unmatched closing `{ch}`"),
+                span,
+            ));
+            self.push_token(TokenKind::Err, start, self.pos);
+        }
     }
 
     fn push_single(&mut self, kind: TokenKind) {
@@ -1069,8 +1265,91 @@ mod tests {
     }
 
     #[test]
+    fn l34_def_block_indent_dedent() {
+        assert_eq!(
+            lex_str("def f(x):\n    return x\ny = 1"),
+            "KW(def) ID(f) ( ID(x) ) : NL IND KW(return) ID(x) NL DED ID(y) = NUM(1) NL EOF"
+        );
+    }
+
+    #[test]
+    fn l35_nested_indents_and_double_dedent() {
+        assert_eq!(
+            lex_str("a:\n    b\n        c\nd"),
+            "ID(a) : NL IND ID(b) NL IND ID(c) NL DED DED ID(d) NL EOF"
+        );
+    }
+
+    #[test]
+    fn l36_tab_in_indentation() {
+        assert_lex_err("a:\n\tb", "E0010");
+    }
+
+    #[test]
+    fn l37_indent_not_multiple_of_4() {
+        assert_lex_err("a:\n  b", "E0012");
+    }
+
+    #[test]
+    fn l38_indent_jumps_more_than_one_level() {
+        assert_lex_err("a:\n        b", "E0011");
+    }
+
+    #[test]
+    fn l39_indented_first_line() {
+        assert_lex_err("   x = 1 ", "E0013");
+    }
+
+    #[test]
+    fn l40_newlines_and_indent_ignored_in_parens() {
+        assert_eq!(lex_str("f(a,\n      b)"), "ID(f) ( ID(a) , ID(b) ) NL EOF");
+    }
+
+    #[test]
+    fn l41_unmatched_closing_bracket() {
+        assert_lex_err("x = 1)", "E0014");
+    }
+
+    #[test]
+    fn l42_unclosed_bracket_at_eof() {
+        let src = "x = (1";
+        let out = assert_lex_err(src, "E0015");
+        let e0015 = out.diags.iter().find(|d| d.code == "E0015").unwrap();
+        assert_eq!(e0015.span, Span::empty(src.len() as u32));
+        assert!(
+            e0015.message.contains("1:5"),
+            "expected opening 1:5 in message, got: {}",
+            e0015.message
+        );
+    }
+
+    #[test]
+    fn l43_exact_spans() {
+        let out = lex("ab = 12");
+        assert!(out.diags.is_empty());
+        assert_eq!(out.tokens[0].span, Span::new(0, 2));
+        assert_eq!(out.tokens[1].span, Span::new(3, 4));
+        assert_eq!(out.tokens[2].span, Span::new(5, 7));
+    }
+
+    #[test]
+    fn l44_trailing_spaces_and_whitespace_only_line_in_block() {
+        assert_eq!(
+            lex_str("a:   \n    x = 1   \n    \n    y = 2   "),
+            "ID(a) : NL IND ID(x) = NUM(1) NL ID(y) = NUM(2) NL DED EOF"
+        );
+    }
+
+    #[test]
     fn l45_attr_and_at_tf() {
         assert_eq!(lex_str("a.b.c"), "ID(a) . ID(b) . ID(c) NL EOF");
         assert_eq!(lex_str("close@1d"), "ID(close) @ TF(1d) NL EOF");
+    }
+
+    #[test]
+    fn l46_source_too_large() {
+        let src = "x".repeat(MAX_SOURCE_BYTES + 1);
+        let out = assert_lex_err(&src, "E0017");
+        assert_eq!(tokens_str(&out.tokens), "EOF");
     }
 }
