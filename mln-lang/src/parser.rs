@@ -717,12 +717,16 @@ impl Parser {
 
     fn parse_expr(&mut self) -> Expr {
         let then_expr = self.parse_or();
-        if matches!(self.peek_kind(), TokenKind::Kw(Kw::If)) {
+        if !self.stmt_has_error && matches!(self.peek_kind(), TokenKind::Kw(Kw::If)) {
             let if_span = self.bump().span;
             if !self.enter_depth(if_span) {
                 return Expr::Error(then_expr.span().join(if_span));
             }
             let cond = self.parse_or();
+            if self.stmt_has_error {
+                self.depth -= 1;
+                return Expr::Error(then_expr.span().join(cond.span()));
+            }
             if !matches!(self.peek_kind(), TokenKind::Kw(Kw::Else)) {
                 let span = self.current_span();
                 if !self.saw_err_token_in_stmt {
@@ -752,7 +756,7 @@ impl Parser {
 
     fn parse_or(&mut self) -> Expr {
         let mut lhs = self.parse_and();
-        while matches!(self.peek_kind(), TokenKind::Kw(Kw::Or)) {
+        while !self.stmt_has_error && matches!(self.peek_kind(), TokenKind::Kw(Kw::Or)) {
             self.bump();
             let rhs = self.parse_and();
             let span = lhs.span().join(rhs.span());
@@ -763,7 +767,7 @@ impl Parser {
 
     fn parse_and(&mut self) -> Expr {
         let mut lhs = self.parse_not();
-        while matches!(self.peek_kind(), TokenKind::Kw(Kw::And)) {
+        while !self.stmt_has_error && matches!(self.peek_kind(), TokenKind::Kw(Kw::And)) {
             self.bump();
             let rhs = self.parse_not();
             let span = lhs.span().join(rhs.span());
@@ -790,15 +794,18 @@ impl Parser {
     fn parse_comparison(&mut self) -> Expr {
         let first = self.parse_arith();
         let mut rest = Vec::new();
-        while let Some(op) = match self.peek_kind() {
-            TokenKind::EqEq => Some(CmpOp::Eq),
-            TokenKind::BangEq => Some(CmpOp::NotEq),
-            TokenKind::Lt => Some(CmpOp::Lt),
-            TokenKind::LtEq => Some(CmpOp::LtEq),
-            TokenKind::Gt => Some(CmpOp::Gt),
-            TokenKind::GtEq => Some(CmpOp::GtEq),
-            _ => None,
-        } {
+        while !self.stmt_has_error {
+            let Some(op) = (match self.peek_kind() {
+                TokenKind::EqEq => Some(CmpOp::Eq),
+                TokenKind::BangEq => Some(CmpOp::NotEq),
+                TokenKind::Lt => Some(CmpOp::Lt),
+                TokenKind::LtEq => Some(CmpOp::LtEq),
+                TokenKind::Gt => Some(CmpOp::Gt),
+                TokenKind::GtEq => Some(CmpOp::GtEq),
+                _ => None,
+            }) else {
+                break;
+            };
             self.bump();
             let rhs = self.parse_arith();
             rest.push((op, rhs));
@@ -817,11 +824,14 @@ impl Parser {
 
     fn parse_arith(&mut self) -> Expr {
         let mut lhs = self.parse_term();
-        while let Some(op) = match self.peek_kind() {
-            TokenKind::Plus => Some(BinOp::Add),
-            TokenKind::Minus => Some(BinOp::Sub),
-            _ => None,
-        } {
+        while !self.stmt_has_error {
+            let Some(op) = (match self.peek_kind() {
+                TokenKind::Plus => Some(BinOp::Add),
+                TokenKind::Minus => Some(BinOp::Sub),
+                _ => None,
+            }) else {
+                break;
+            };
             self.bump();
             let rhs = self.parse_term();
             let span = lhs.span().join(rhs.span());
@@ -837,11 +847,14 @@ impl Parser {
 
     fn parse_term(&mut self) -> Expr {
         let mut lhs = self.parse_unary();
-        while let Some(op) = match self.peek_kind() {
-            TokenKind::Star => Some(BinOp::Mul),
-            TokenKind::Slash => Some(BinOp::Div),
-            _ => None,
-        } {
+        while !self.stmt_has_error {
+            let Some(op) = (match self.peek_kind() {
+                TokenKind::Star => Some(BinOp::Mul),
+                TokenKind::Slash => Some(BinOp::Div),
+                _ => None,
+            }) else {
+                break;
+            };
             self.bump();
             let rhs = self.parse_unary();
             let span = lhs.span().join(rhs.span());
@@ -1520,5 +1533,73 @@ mod tests {
     fn p50_empty_and_comment_only_programs() {
         assert_eq!(parse_dump(""), "");
         assert_eq!(parse_dump("# just a comment\n\n# another"), "");
+    }
+
+    #[test]
+    fn p51_unexpected_indent_recovery() {
+        let out = assert_parse_err("x = 1\n    y = 2", "E0155");
+        assert_eq!(dump(&out.program), "(assign x 1)\n(error)");
+    }
+
+    #[test]
+    fn p52_missing_rhs_recovers_next_line() {
+        let out = parse("x = \ny = 2");
+        assert_eq!(out.diags.len(), 1);
+        assert_eq!(out.diags[0].code, "E0101");
+        assert_eq!(dump(&out.program), "(assign x (error))\n(assign y 2)");
+    }
+
+    #[test]
+    fn p53_unclosed_paren_before_next_assign() {
+        let src = "x = (1 + \ny = 2";
+        let out = parse(src);
+        assert!(!out.diags.is_empty());
+        assert_eq!(out.diags[0].code, "E0103");
+        let eq_offset = src.rfind('=').unwrap() as u32;
+        assert_eq!(out.diags[0].span, Span::new(eq_offset, eq_offset + 1));
+    }
+
+    #[test]
+    fn p54_unclosed_paren_no_duplicate_e0103() {
+        let out = parse("x = (1");
+        assert_eq!(out.diags.len(), 1);
+        assert_eq!(out.diags[0].code, "E0015");
+    }
+
+    #[test]
+    fn p55_nesting_limit_64_vs_65() {
+        let ok_src = format!("x = {}1{}", "(".repeat(64), ")".repeat(64));
+        let ok_out = parse(&ok_src);
+        assert!(
+            ok_out.diags.is_empty(),
+            "64 parens should succeed, got {:?}",
+            ok_out.diags
+        );
+
+        let bad_src = format!("x = {}1{}", "(".repeat(65), ")".repeat(65));
+        let bad_out = parse(&bad_src);
+        assert_eq!(bad_out.diags.len(), 1);
+        assert_eq!(bad_out.diags[0].code, "E0120");
+    }
+
+    #[test]
+    fn p56_keyword_misuse() {
+        assert_parse_err("def = 1", "E0102");
+        assert_parse_err("x = and", "E0101");
+    }
+
+    #[test]
+    fn p57_python_for_loop_recovery() {
+        let out = parse("for x in y\nz = 1");
+        assert_eq!(out.diags.len(), 1);
+        assert_eq!(out.diags[0].code, "E0021");
+        assert_eq!(dump(&out.program), "(error)\n(assign z 1)");
+    }
+
+    #[test]
+    fn p58_three_bad_statements_in_order() {
+        let out = parse("1 = x\nx += 1\nema(close, 5)");
+        let codes: Vec<&str> = out.diags.iter().map(|d| d.code).collect();
+        assert_eq!(codes, vec!["E0153", "E0154", "E0152"]);
     }
 }
