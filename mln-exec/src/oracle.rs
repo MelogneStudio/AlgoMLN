@@ -51,13 +51,15 @@ pub enum ValueSeries {
     Str(Vec<String>),
 }
 
-/// Errors produced during oracle evaluation.
+/// Errors produced during oracle or incremental execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecError {
     LengthMismatch,
     ParseOrCheckFailed(String),
     UnsupportedOp(String),
     InvalidNode(String),
+    InvalidBar(String),
+    SnapshotMismatch,
 }
 
 impl fmt::Display for ExecError {
@@ -67,6 +69,10 @@ impl fmt::Display for ExecError {
             ExecError::ParseOrCheckFailed(msg) => write!(f, "front-end failed: {msg}"),
             ExecError::UnsupportedOp(op) => write!(f, "unsupported operator `{op}`"),
             ExecError::InvalidNode(msg) => write!(f, "invalid IR node: {msg}"),
+            ExecError::InvalidBar(msg) => write!(f, "invalid bar: {msg}"),
+            ExecError::SnapshotMismatch => {
+                f.write_str("snapshot does not match this executor's IR graph")
+            }
         }
     }
 }
