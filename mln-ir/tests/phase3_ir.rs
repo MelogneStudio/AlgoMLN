@@ -1,5 +1,7 @@
-use mln_ir::{dump_ir, lower_default, IrOp};
+use mln_check::{CheckConfig, CheckedProgram};
+use mln_ir::{dump_ir, lower, lower_default, IrConst, IrOp};
 use mln_lang::parse;
+use mln_std::tier1_registry;
 
 #[test]
 fn t3_01_crossover_ir_dump_snapshot() {
@@ -59,4 +61,36 @@ exit = a < b
         "expected 2 ema nodes, got:\n{}",
         dump_ir(&graph)
     );
+}
+
+#[test]
+fn eval_const_only_supports_compare_and_strict_ifelse() {
+    let src = "\
+def f(a, b) = ema(close, 10 if a > b else 20)
+entry = f(2, 1) > close[1 if 2 > 1 else 2]
+exit = ema(close, 10 if 2 > 1 else 20) > 0
+";
+    let parsed = parse(src);
+    assert!(parsed.diags.is_empty(), "parse diags: {:?}", parsed.diags);
+    let graph = lower_default(&parsed.program).expect("lower succeeds");
+    let ema_node = graph
+        .nodes
+        .iter()
+        .find(|n| n.op == IrOp::Builtin("ema"))
+        .expect("ema node");
+    assert_eq!(ema_node.const_args, vec![IrConst::Int(10)]);
+    let lag_node = graph
+        .nodes
+        .iter()
+        .find(|n| matches!(n.op, IrOp::Lag(_)))
+        .expect("lag node");
+    assert_eq!(lag_node.op, IrOp::Lag(1));
+
+    // Unchecked non-constant IfElse branch must be rejected by eval_const_only.
+    let bad_parsed = parse("entry = ema(close, 10 if true else close) > 0\nexit = true");
+    let reg = tier1_registry();
+    let checked = mln_check::check(&bad_parsed.program, &reg, &CheckConfig::default());
+    assert!(!checked.is_ok());
+    let dummy_checked: CheckedProgram = checked.program;
+    assert!(lower(&bad_parsed.program, &dummy_checked, &reg).is_err());
 }

@@ -608,6 +608,26 @@ impl<'a> Lowerer<'a> {
                 };
                 Ok(fold_ir_binary(*op, &cl, &cr))
             }
+            Expr::Compare { first, rest, .. } => {
+                if rest.is_empty() {
+                    return Ok(None);
+                }
+                let Some(mut prev) = self.eval_const_only(first)? else {
+                    return Ok(None);
+                };
+                let mut acc = true;
+                for (op, rhs) in rest {
+                    let Some(cur) = self.eval_const_only(rhs)? else {
+                        return Ok(None);
+                    };
+                    let Some(res) = fold_ir_cmp(*op, &prev, &cur) else {
+                        return Ok(None);
+                    };
+                    acc = acc && res;
+                    prev = cur;
+                }
+                Ok(Some(IrConst::Bool(acc)))
+            }
             Expr::Not(e, _) => Ok(self.eval_const_only(e)?.as_ref().and_then(fold_ir_not)),
             Expr::And(l, r, _) => {
                 let (Some(cl), Some(cr)) = (self.eval_const_only(l)?, self.eval_const_only(r)?)
@@ -628,11 +648,19 @@ impl<'a> Lowerer<'a> {
                 then,
                 otherwise,
                 ..
-            } => match self.eval_const_only(cond)? {
-                Some(IrConst::Bool(true)) => self.eval_const_only(then),
-                Some(IrConst::Bool(false)) => self.eval_const_only(otherwise),
-                _ => Ok(None),
-            },
+            } => {
+                let (Some(IrConst::Bool(b)), Some(vt), Some(vo)) = (
+                    self.eval_const_only(cond)?,
+                    self.eval_const_only(then)?,
+                    self.eval_const_only(otherwise)?,
+                ) else {
+                    return Ok(None);
+                };
+                if !same_const_kind(&vt, &vo) {
+                    return Ok(None);
+                }
+                Ok(Some(if b { vt } else { vo }))
+            }
             _ => Ok(None),
         }
     }
@@ -699,4 +727,16 @@ fn fold_ir_and(lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
 
 fn fold_ir_or(lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
     fold_or(&to_check_const(lhs), &to_check_const(rhs)).map(from_check_const)
+}
+
+fn same_const_kind(a: &IrConst, b: &IrConst) -> bool {
+    matches!(
+        (a, b),
+        (
+            IrConst::Dec { .. } | IrConst::Int(_),
+            IrConst::Dec { .. } | IrConst::Int(_)
+        ) | (IrConst::Bool(_), IrConst::Bool(_))
+            | (IrConst::Tf(_), IrConst::Tf(_))
+            | (IrConst::Str(_), IrConst::Str(_))
+    )
 }
