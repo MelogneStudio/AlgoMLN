@@ -149,7 +149,8 @@ impl Executor {
         Ok(out)
     }
 
-    /// Processes a chunk of bars bar-by-bar into `out` (zero allocation if `out` has capacity).
+    /// Appends outputs for `bars` bar-by-bar into `out` (zero allocation when
+    /// `out.capacity() - out.len() >= bars.len()`).
     pub fn run_chunk_into(
         &mut self,
         bars: &[Bar],

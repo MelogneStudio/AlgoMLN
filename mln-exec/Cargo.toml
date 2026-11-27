@@ -12,3 +12,7 @@ mln-std = { path = "../mln-std" }
 mln-check = { path = "../mln-check" }
 mln-ir = { path = "../mln-ir" }
 rust_decimal = "1"
+
+[dev-dependencies]
+proptest = "1"
+criterion = "0.5"
