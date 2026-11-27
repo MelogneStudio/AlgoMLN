@@ -1,5 +1,4 @@
 //! Per-node incremental state structs, bar validation, and snapshots.
-#![allow(dead_code)]
 
 use mln_check::Tf;
 use mln_std::eval::clean;

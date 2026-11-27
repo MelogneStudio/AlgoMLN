@@ -1,5 +1,4 @@
 //! Pre-allocated, zero-step-allocation sliding-window and lag buffers.
-#![allow(dead_code)]
 
 use mln_std::eval::clean;
 
