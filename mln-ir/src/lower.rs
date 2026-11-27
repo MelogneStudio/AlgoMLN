@@ -237,7 +237,7 @@ impl<'a> Lowerer<'a> {
                     return Err(IrError::Unsupported("empty comparison"));
                 }
                 let mut prev = self.lower_expr(first, ambient)?;
-                let mut cmp_nodes = Vec::with_capacity(rest.len());
+                let mut cmp_pairs = Vec::with_capacity(rest.len());
                 let mut all_const = prev.const_val.is_some();
                 let mut const_acc = true;
                 for (op, rhs) in rest {
@@ -254,25 +254,33 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                     let cclock = combine_ir_clocks(&[prev.clock, cur.clock], self.base_clock);
-                    let cmp_id = self.graph.intern(
-                        IrOp::Compare(*op),
-                        vec![prev.node, cur.node],
-                        Vec::new(),
-                        cclock,
-                        IrTy::Bool,
-                    );
-                    cmp_nodes.push((cmp_id, cclock));
+                    cmp_pairs.push((prev.node, cur.node, *op, cclock));
                     prev = cur;
                 }
                 if all_const {
                     return Ok(self.intern_const(IrConst::Bool(const_acc), IrTy::Bool));
                 }
-                let (mut acc_id, mut acc_clock) = cmp_nodes[0];
-                for &(rhs_id, rhs_clock) in &cmp_nodes[1..] {
-                    acc_clock = combine_ir_clocks(&[acc_clock, rhs_clock], self.base_clock);
+                let first_pair = cmp_pairs[0];
+                let mut acc_clock = first_pair.3;
+                let mut acc_id = self.graph.intern(
+                    IrOp::Compare(first_pair.2),
+                    vec![first_pair.0, first_pair.1],
+                    Vec::new(),
+                    acc_clock,
+                    IrTy::Bool,
+                );
+                for &(lhs_id, rhs_id, op, cclock) in &cmp_pairs[1..] {
+                    let cmp_id = self.graph.intern(
+                        IrOp::Compare(op),
+                        vec![lhs_id, rhs_id],
+                        Vec::new(),
+                        cclock,
+                        IrTy::Bool,
+                    );
+                    acc_clock = combine_ir_clocks(&[acc_clock, cclock], self.base_clock);
                     acc_id = self.graph.intern(
                         IrOp::And,
-                        vec![acc_id, rhs_id],
+                        vec![acc_id, cmp_id],
                         Vec::new(),
                         acc_clock,
                         IrTy::Bool,

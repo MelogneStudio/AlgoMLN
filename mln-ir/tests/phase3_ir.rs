@@ -213,3 +213,22 @@ fn lower_returns_err_instead_of_panicking_on_unchecked_inputs() {
     let checked = mln_check::check(&empty_cmp, &reg, &CheckConfig::default());
     assert!(lower(&empty_cmp, &checked.program, &reg).is_err());
 }
+
+#[test]
+fn constant_compare_does_not_intern_dead_compare_nodes() {
+    let p = parse("entry = 2 > 1\nexit = 1 < 2 < 3");
+    let graph = lower_default(&p.program).expect("lower succeeds");
+    assert!(
+        !graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, IrOp::Compare(_) | IrOp::And)),
+        "constant comparison should not intern Compare or And nodes:\n{}",
+        dump_ir(&graph)
+    );
+    assert_eq!(graph.entry, graph.exit);
+    assert_eq!(
+        graph.nodes[graph.entry.0 as usize].op,
+        IrOp::Const(IrConst::Bool(true))
+    );
+}
