@@ -466,7 +466,13 @@ impl<'a> Lowerer<'a> {
                     inputs.push(val.node);
                     input_clocks.push(val.clock);
                 }
-                ParamTy::ConstPosInt | ParamTy::ConstNonNegInt => {
+                ParamTy::ConstPosInt | ParamTy::ConstNonNegInt | ParamTy::ConstIntMin(_) => {
+                    let min_val = match param.ty {
+                        ParamTy::ConstPosInt => 1,
+                        ParamTy::ConstNonNegInt => 0,
+                        ParamTy::ConstIntMin(m) => m,
+                        _ => unreachable!(),
+                    };
                     let int_val = if let Some(arg_expr) = bound[idx] {
                         let Some(c) = self.eval_const_only(arg_expr)? else {
                             return Err(IrError::Unsupported("non-const int param"));
@@ -478,14 +484,8 @@ impl<'a> Lowerer<'a> {
                             _ => return Err(IrError::Unsupported("missing default")),
                         }
                     };
-                    match param.ty {
-                        ParamTy::ConstPosInt if int_val < 1 => {
-                            return Err(IrError::Unsupported("non-positive int param"));
-                        }
-                        ParamTy::ConstNonNegInt if int_val < 0 => {
-                            return Err(IrError::Unsupported("negative int param"));
-                        }
-                        _ => {}
+                    if int_val < min_val {
+                        return Err(IrError::Unsupported("int param below minimum"));
                     }
                     if let Ok(u) = u64::try_from(int_val) {
                         int_args[idx] = Some(u);

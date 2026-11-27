@@ -96,6 +96,19 @@ const P_XN: &[ParamSpec] = &[
     },
 ];
 
+const P_XN_MIN2: &[ParamSpec] = &[
+    ParamSpec {
+        name: "x",
+        ty: ParamTy::Num,
+        default: None,
+    },
+    ParamSpec {
+        name: "n",
+        ty: ParamTy::ConstIntMin(2),
+        default: None,
+    },
+];
+
 const P_RSI: &[ParamSpec] = &[
     ParamSpec {
         name: "x",
@@ -122,7 +135,7 @@ const P_XYN: &[ParamSpec] = &[
     },
     ParamSpec {
         name: "n",
-        ty: ParamTy::ConstPosInt,
+        ty: ParamTy::ConstIntMin(2),
         default: None,
     },
 ];
@@ -199,7 +212,7 @@ const P_BOLLINGER: &[ParamSpec] = &[
     },
     ParamSpec {
         name: "n",
-        ty: ParamTy::ConstPosInt,
+        ty: ParamTy::ConstIntMin(2),
         default: Some(ParamDefault::Int(20)),
     },
     ParamSpec {
@@ -400,7 +413,7 @@ pub const TIER1_OPS: &[OpSpec] = &[
     ),
     op!(
         "std",
-        P_XN,
+        P_XN_MIN2,
         ReturnTy::Num,
         WarmupRule::ParamMinusOne(1),
         32,
@@ -411,7 +424,7 @@ pub const TIER1_OPS: &[OpSpec] = &[
     ),
     op!(
         "var",
-        P_XN,
+        P_XN_MIN2,
         ReturnTy::Num,
         WarmupRule::ParamMinusOne(1),
         32,
@@ -558,7 +571,7 @@ pub const TIER1_OPS: &[OpSpec] = &[
     ),
     op!(
         "linreg_slope",
-        P_XN,
+        P_XN_MIN2,
         ReturnTy::Num,
         WarmupRule::ParamMinusOne(1),
         32,
@@ -569,7 +582,7 @@ pub const TIER1_OPS: &[OpSpec] = &[
     ),
     op!(
         "linreg_intercept",
-        P_XN,
+        P_XN_MIN2,
         ReturnTy::Num,
         WarmupRule::ParamMinusOne(1),
         32,

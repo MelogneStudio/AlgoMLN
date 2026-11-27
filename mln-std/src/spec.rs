@@ -11,6 +11,8 @@ pub enum ParamTy {
     Bool,
     /// Constant positive integer (`>= 1`, e.g. rolling window `n`).
     ConstPosInt,
+    /// Constant integer with minimum bound `min` (`>= min`, e.g. `n >= 2` for variance/regression).
+    ConstIntMin(i64),
     /// Constant non-negative integer (`>= 0`, e.g. lag `k`).
     ConstNonNegInt,
     /// Constant decimal number (`Dec`).

@@ -533,3 +533,34 @@ fn invalid_calls_still_check_argument_expressions() {
     assert_has_code(&bad_def_arity, "E0301");
     assert_has_code(&bad_def_arity, "E0200");
 }
+
+#[test]
+fn variance_and_regression_ops_require_min_window_2() {
+    for expr in [
+        "std(close, 1)",
+        "var(close, 1)",
+        "bollinger(close, 1)",
+        "cov(close, open, 1)",
+        "corr(close, open, 1)",
+        "linreg_slope(close, 1)",
+        "linreg_intercept(close, 1)",
+    ] {
+        let src = format!("entry = {expr} > 0\nexit = true");
+        let out = run_check(&src);
+        assert_has_code(&out, "E0303");
+    }
+
+    for expr in [
+        "std(close, 2)",
+        "var(close, 2)",
+        "bollinger(close, 2)",
+        "cov(close, open, 2)",
+        "corr(close, open, 2)",
+        "linreg_slope(close, 2)",
+        "linreg_intercept(close, 2)",
+    ] {
+        let src = format!("entry = {expr} > 0\nexit = true");
+        let out = run_check(&src);
+        assert!(out.is_ok(), "unexpected errors for {expr}: {:?}", out.diags);
+    }
+}

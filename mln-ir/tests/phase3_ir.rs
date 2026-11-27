@@ -1,5 +1,5 @@
 use mln_check::{CheckConfig, CheckedProgram, Tf};
-use mln_ir::{dump_ir, lower, lower_default, IrClock, IrConst, IrOp};
+use mln_ir::{dump_ir, lower, lower_default, IrClock, IrConst, IrError, IrOp};
 use mln_lang::{parse, Expr, Ident, Program, Span, Stmt, TfUnit};
 use mln_std::tier1_registry;
 
@@ -315,5 +315,20 @@ exit = ema(close, b) > 0
     assert_eq!(
         graph.nodes.iter().filter(|n| n.op == IrOp::IfElse).count(),
         1
+    );
+}
+
+#[test]
+fn min_window_2_enforced_in_lowering() {
+    let parsed = parse("entry = std(close, 1) > 0\nexit = true");
+    let err = lower_default(&parsed.program).expect_err("std(close, 1) should fail check");
+    assert!(matches!(err, IrError::CheckFailed(_)), "got {err:?}");
+    let reg = tier1_registry();
+    let checked = mln_check::check(&parsed.program, &reg, &CheckConfig::default());
+    let direct_err = lower(&parsed.program, &checked.program, &reg)
+        .expect_err("std(close, 1) should fail direct lowering");
+    assert!(
+        matches!(direct_err, IrError::Unsupported(_)),
+        "got {direct_err:?}"
     );
 }

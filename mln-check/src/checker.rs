@@ -1201,39 +1201,35 @@ impl<'a> Checker<'a> {
                             series_warmups.push(ce.warmups);
                         }
                     }
-                    ParamTy::ConstPosInt => {
+                    ParamTy::ConstPosInt | ParamTy::ConstNonNegInt | ParamTy::ConstIntMin(_) => {
+                        let min_val = match param.ty {
+                            ParamTy::ConstPosInt => 1,
+                            ParamTy::ConstNonNegInt => 0,
+                            ParamTy::ConstIntMin(m) => m,
+                            _ => unreachable!(),
+                        };
                         let k = if ce.ty == Ty::Dec && ce.clock == Clock::Constant {
                             ce.const_val.as_ref().and_then(ConstVal::as_exact_int)
                         } else {
                             None
                         };
-                        if let Some(k) = k.filter(|&v| v >= 1) {
+                        if let Some(k) = k.filter(|&v| v >= min_val) {
                             int_args[idx] = Some(k as u64);
                         } else {
+                            let desc = match param.ty {
+                                ParamTy::ConstPosInt => "a constant positive integer".to_string(),
+                                ParamTy::ConstNonNegInt => {
+                                    "a constant non-negative integer".to_string()
+                                }
+                                ParamTy::ConstIntMin(m) => {
+                                    format!("a constant integer >= {m}")
+                                }
+                                _ => unreachable!(),
+                            };
                             self.emit_error(
                                 "E0303",
                                 format!(
-                                    "argument `{}` to `{}` must be a constant positive integer",
-                                    param.name, op.name
-                                ),
-                                ce.span,
-                            );
-                            any_err = true;
-                        }
-                    }
-                    ParamTy::ConstNonNegInt => {
-                        let k = if ce.ty == Ty::Dec && ce.clock == Clock::Constant {
-                            ce.const_val.as_ref().and_then(ConstVal::as_exact_int)
-                        } else {
-                            None
-                        };
-                        if let Some(k) = k.filter(|&v| v >= 0) {
-                            int_args[idx] = Some(k as u64);
-                        } else {
-                            self.emit_error(
-                                "E0303",
-                                format!(
-                                    "argument `{}` to `{}` must be a constant non-negative integer",
+                                    "argument `{}` to `{}` must be {desc}",
                                     param.name, op.name
                                 ),
                                 ce.span,
