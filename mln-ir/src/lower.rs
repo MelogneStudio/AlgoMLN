@@ -70,6 +70,8 @@ pub fn lower(
     Ok(lowerer.graph)
 }
 
+const MAX_CALL_DEPTH: usize = 64;
+
 #[derive(Debug, Clone)]
 struct IrValue {
     node: NodeId,
@@ -85,6 +87,8 @@ struct Lowerer<'a> {
     defs: HashMap<String, &'a Def>,
     globals: HashMap<String, IrValue>,
     locals: Vec<HashMap<String, IrValue>>,
+    active_defs: Vec<String>,
+    call_depth: usize,
 }
 
 impl<'a> Lowerer<'a> {
@@ -96,6 +100,8 @@ impl<'a> Lowerer<'a> {
             defs: HashMap::new(),
             globals: HashMap::new(),
             locals: Vec::new(),
+            active_defs: Vec::new(),
+            call_depth: 0,
         }
     }
 
@@ -227,6 +233,9 @@ impl<'a> Lowerer<'a> {
                 })
             }
             Expr::Compare { first, rest, .. } => {
+                if rest.is_empty() {
+                    return Err(IrError::Unsupported("empty comparison"));
+                }
                 let mut prev = self.lower_expr(first, ambient)?;
                 let mut cmp_nodes = Vec::with_capacity(rest.len());
                 let mut all_const = prev.const_val.is_some();
@@ -379,7 +388,21 @@ impl<'a> Lowerer<'a> {
             }
             Expr::At { base, tf, .. } => {
                 let target_tf = Tf::from(*tf);
+                if target_tf.minutes() < ambient.minutes() {
+                    return Err(IrError::Unsupported(
+                        "finer clock cannot be used inside coarser clock",
+                    ));
+                }
                 let vb = self.lower_expr(base, target_tf)?;
+                match vb.clock.resolve_tf(self.base_clock) {
+                    None => return Err(IrError::Unsupported("@ applied to constant")),
+                    Some(c_tf) if c_tf.minutes() < target_tf.minutes() => {
+                        return Err(IrError::Unsupported(
+                            "finer clock cannot be aligned to coarser clock",
+                        ));
+                    }
+                    Some(_) => {}
+                }
                 Ok(IrValue {
                     node: vb.node,
                     ty: vb.ty,
@@ -419,19 +442,8 @@ impl<'a> Lowerer<'a> {
         args: &'a [Arg],
         ambient: Tf,
     ) -> Result<IrValue, IrError> {
-        let mut bound: Vec<Option<&'a Expr>> = vec![None; op.params.len()];
-        for (i, arg) in args.iter().enumerate() {
-            if let Some(kw) = &arg.name {
-                let idx = op
-                    .params
-                    .iter()
-                    .position(|p| p.name == kw.name)
-                    .ok_or(IrError::Unsupported("unknown kwarg"))?;
-                bound[idx] = Some(&arg.value);
-            } else {
-                bound[i] = Some(&arg.value);
-            }
-        }
+        let param_names: Vec<&str> = op.params.iter().map(|p| p.name).collect();
+        let bound = bind_call_args(&param_names, args)?;
 
         let mut inputs = Vec::new();
         let mut const_args = Vec::new();
@@ -536,19 +548,13 @@ impl<'a> Lowerer<'a> {
         args: &'a [Arg],
         ambient: Tf,
     ) -> Result<IrValue, IrError> {
-        let mut bound: Vec<Option<&'a Expr>> = vec![None; def.params.len()];
-        for (i, arg) in args.iter().enumerate() {
-            if let Some(kw) = &arg.name {
-                let idx = def
-                    .params
-                    .iter()
-                    .position(|p| p.name.name == kw.name)
-                    .ok_or(IrError::Unsupported("unknown kwarg"))?;
-                bound[idx] = Some(&arg.value);
-            } else {
-                bound[i] = Some(&arg.value);
-            }
+        if self.call_depth >= MAX_CALL_DEPTH || self.active_defs.iter().any(|n| n == &def.name.name)
+        {
+            return Err(IrError::Unsupported("recursive def call"));
         }
+
+        let param_names: Vec<&str> = def.params.iter().map(|p| p.name.name.as_str()).collect();
+        let bound = bind_call_args(&param_names, args)?;
 
         let mut new_scope = HashMap::new();
         for (idx, param) in def.params.iter().enumerate() {
@@ -570,19 +576,26 @@ impl<'a> Lowerer<'a> {
 
         let saved_locals = std::mem::take(&mut self.locals);
         self.locals.push(new_scope);
+        self.active_defs.push(def.name.name.clone());
+        self.call_depth += 1;
 
-        for stmt in &def.body {
-            if let Stmt::Assign { name, value, .. } = stmt {
-                let val = self.lower_expr(value, ambient)?;
-                self.locals
-                    .last_mut()
-                    .expect("active local scope")
-                    .insert(name.name.clone(), val);
+        let res = (|| -> Result<IrValue, IrError> {
+            for stmt in &def.body {
+                if let Stmt::Assign { name, value, .. } = stmt {
+                    let val = self.lower_expr(value, ambient)?;
+                    self.locals
+                        .last_mut()
+                        .expect("active local scope")
+                        .insert(name.name.clone(), val);
+                }
             }
-        }
-        let ret = self.lower_expr(&def.ret, ambient);
+            self.lower_expr(&def.ret, ambient)
+        })();
+
+        self.call_depth -= 1;
+        self.active_defs.pop();
         self.locals = saved_locals;
-        ret
+        res
     }
 
     fn eval_const_only(&self, expr: &'a Expr) -> Result<Option<IrConst>, IrError> {
@@ -675,6 +688,34 @@ impl<'a> Lowerer<'a> {
             _ => Ok(None),
         }
     }
+}
+
+fn bind_call_args<'a>(
+    param_names: &[&str],
+    args: &'a [Arg],
+) -> Result<Vec<Option<&'a Expr>>, IrError> {
+    let mut bound: Vec<Option<&'a Expr>> = vec![None; param_names.len()];
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(kw) = &arg.name {
+            let idx = param_names
+                .iter()
+                .position(|&name| name == kw.name)
+                .ok_or(IrError::Unsupported("unknown kwarg"))?;
+            if bound[idx].is_some() {
+                return Err(IrError::Unsupported("duplicate argument"));
+            }
+            bound[idx] = Some(&arg.value);
+        } else {
+            let slot = bound
+                .get_mut(i)
+                .ok_or(IrError::Unsupported("too many arguments"))?;
+            if slot.is_some() {
+                return Err(IrError::Unsupported("duplicate argument"));
+            }
+            *slot = Some(&arg.value);
+        }
+    }
+    Ok(bound)
 }
 
 fn combine_ir_clocks(clocks: &[IrClock], base_clock: Tf) -> IrClock {

@@ -1,6 +1,6 @@
 use mln_check::{CheckConfig, CheckedProgram, Tf};
 use mln_ir::{dump_ir, lower, lower_default, IrClock, IrConst, IrOp};
-use mln_lang::{parse, TfUnit};
+use mln_lang::{parse, Expr, Ident, Program, Span, Stmt, TfUnit};
 use mln_std::tier1_registry;
 
 #[test]
@@ -164,4 +164,52 @@ fn equivalent_timeframes_canonicalize_and_cse_with_base() {
         "close @ 60m and close @ 1h should CSE:\n{}",
         dump_ir(&g2)
     );
+}
+
+#[test]
+fn lower_returns_err_instead_of_panicking_on_unchecked_inputs() {
+    let reg = tier1_registry();
+    for bad in [
+        "def f(x) = f(x)\nentry = f(close) > 0\nexit = true",
+        "entry = ema(close, 12, 99) > 0\nexit = true",
+        "def f(x) = x\nentry = f(close, 99) > 0\nexit = true",
+        "entry = (5 @ 1d) > 0\nexit = true",
+    ] {
+        let p = parse(bad);
+        let checked = mln_check::check(&p.program, &reg, &CheckConfig::default());
+        assert!(!checked.is_ok(), "expected check error for {bad}");
+        assert!(
+            lower(&p.program, &checked.program, &reg).is_err(),
+            "expected lower Err for {bad}"
+        );
+    }
+
+    // Synthetic AST with empty Compare.rest must not panic.
+    let s = Span::empty(0);
+    let empty_cmp = Program {
+        stmts: vec![
+            Stmt::Assign {
+                name: Ident {
+                    name: "entry".to_string(),
+                    span: s,
+                },
+                value: Expr::Compare {
+                    first: Box::new(Expr::Bool(true, s)),
+                    rest: Vec::new(),
+                    span: s,
+                },
+                span: s,
+            },
+            Stmt::Assign {
+                name: Ident {
+                    name: "exit".to_string(),
+                    span: s,
+                },
+                value: Expr::Bool(true, s),
+                span: s,
+            },
+        ],
+    };
+    let checked = mln_check::check(&empty_cmp, &reg, &CheckConfig::default());
+    assert!(lower(&empty_cmp, &checked.program, &reg).is_err());
 }
