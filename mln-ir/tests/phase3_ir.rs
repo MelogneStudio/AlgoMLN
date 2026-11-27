@@ -1,6 +1,6 @@
-use mln_check::{CheckConfig, CheckedProgram};
-use mln_ir::{dump_ir, lower, lower_default, IrConst, IrOp};
-use mln_lang::parse;
+use mln_check::{CheckConfig, CheckedProgram, Tf};
+use mln_ir::{dump_ir, lower, lower_default, IrClock, IrConst, IrOp};
+use mln_lang::{parse, TfUnit};
 use mln_std::tier1_registry;
 
 #[test]
@@ -126,4 +126,42 @@ fn index_and_int_params_check_exact_scale_and_preserve_const_lag() {
             "expected lower error for {bad}"
         );
     }
+}
+
+#[test]
+fn equivalent_timeframes_canonicalize_and_cse_with_base() {
+    let reg = tier1_registry();
+    let cfg_60m = CheckConfig {
+        base_clock: Tf::new(60, TfUnit::Minute),
+    };
+    let p1 = parse("entry = (close @ 1h) > close\nexit = true");
+    let c1 = mln_check::check(&p1.program, &reg, &cfg_60m);
+    assert!(c1.is_ok(), "check diags: {:?}", c1.diags);
+    let g1 = lower(&p1.program, &c1.program, &reg).expect("lower succeeds");
+    let series_count = g1
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, IrOp::Series(_)))
+        .count();
+    assert_eq!(
+        series_count,
+        1,
+        "close @ 1h should CSE with close @base when base=60m:\n{}",
+        dump_ir(&g1)
+    );
+    assert_eq!(g1.nodes[0].clock, IrClock::Base);
+
+    let p2 = parse("a = close @ 60m\nb = close @ 1h\nentry = a > b\nexit = true");
+    let g2 = lower_default(&p2.program).expect("lower succeeds");
+    let series_count_2 = g2
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, IrOp::Series(_)))
+        .count();
+    assert_eq!(
+        series_count_2,
+        1,
+        "close @ 60m and close @ 1h should CSE:\n{}",
+        dump_ir(&g2)
+    );
 }

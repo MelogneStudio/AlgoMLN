@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use mln_check::Tf;
-use mln_lang::{BinOp, CmpOp, UnOp};
+use mln_lang::{BinOp, CmpOp, TfUnit, UnOp};
 use rust_decimal::Decimal;
 
 /// Index of a node in an [`IrGraph`].
@@ -66,13 +66,34 @@ pub enum IrClock {
     Tf(Tf),
 }
 
+/// Canonicalizes equivalent timeframe durations (for example `60m` -> `1h`).
+pub fn canonical_tf(tf: Tf) -> Tf {
+    let mins = tf.minutes();
+    if mins == 0 {
+        return Tf::new(0, TfUnit::Minute);
+    }
+    for (mult, unit) in [
+        (10_080u64, TfUnit::Week),
+        (1_440u64, TfUnit::Day),
+        (60u64, TfUnit::Hour),
+        (1u64, TfUnit::Minute),
+    ] {
+        if mins % mult == 0 {
+            if let Ok(n) = u32::try_from(mins / mult) {
+                return Tf::new(n, unit);
+            }
+        }
+    }
+    tf
+}
+
 impl IrClock {
     /// Converts a checker [`mln_check::Clock`] into an [`IrClock`] relative to `base_clock`.
     pub fn from_check(clock: mln_check::Clock, base_clock: Tf) -> Self {
         match clock {
             mln_check::Clock::Constant => IrClock::Constant,
-            mln_check::Clock::Tf(tf) if tf == base_clock => IrClock::Base,
-            mln_check::Clock::Tf(tf) => IrClock::Tf(tf),
+            mln_check::Clock::Tf(tf) if tf.minutes() == base_clock.minutes() => IrClock::Base,
+            mln_check::Clock::Tf(tf) => IrClock::Tf(canonical_tf(tf)),
         }
     }
 
@@ -188,5 +209,26 @@ impl IrGraph {
         });
         self.cse.insert(key, id);
         id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ir_clock_canonicalizes_equivalent_durations() {
+        let m60 = Tf::new(60, TfUnit::Minute);
+        let h1 = Tf::new(1, TfUnit::Hour);
+        let m1 = Tf::new(1, TfUnit::Minute);
+
+        assert_eq!(
+            IrClock::from_check(mln_check::Clock::Tf(h1), m60),
+            IrClock::Base
+        );
+        assert_eq!(
+            IrClock::from_check(mln_check::Clock::Tf(m60), m1),
+            IrClock::Tf(h1)
+        );
     }
 }

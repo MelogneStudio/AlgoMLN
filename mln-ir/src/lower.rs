@@ -100,11 +100,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn clock_from_tf(&self, tf: Tf) -> IrClock {
-        if tf == self.base_clock {
-            IrClock::Base
-        } else {
-            IrClock::Tf(tf)
-        }
+        IrClock::from_check(mln_check::Clock::Tf(tf), self.base_clock)
     }
 
     fn lower_program(&mut self, program: &'a Program) -> Result<(), IrError> {
@@ -692,8 +688,7 @@ fn combine_ir_clocks(clocks: &[IrClock], base_clock: Tf) -> IrClock {
         }
     }
     match finest {
-        Some(tf) if tf == base_clock => IrClock::Base,
-        Some(tf) => IrClock::Tf(tf),
+        Some(tf) => IrClock::from_check(mln_check::Clock::Tf(tf), base_clock),
         None => IrClock::Constant,
     }
 }
@@ -768,5 +763,35 @@ fn const_exact_int(c: &IrConst) -> Option<i64> {
         }
         IrConst::Int(i) => Some(*i),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mln_lang::TfUnit;
+
+    #[test]
+    fn combine_ir_clocks_is_order_independent_for_equivalent_durations() {
+        let m60 = Tf::new(60, TfUnit::Minute);
+        let h1 = Tf::new(1, TfUnit::Hour);
+        let m1 = Tf::new(1, TfUnit::Minute);
+
+        assert_eq!(
+            combine_ir_clocks(&[IrClock::Base, IrClock::Tf(h1)], m60),
+            IrClock::Base
+        );
+        assert_eq!(
+            combine_ir_clocks(&[IrClock::Tf(h1), IrClock::Base], m60),
+            IrClock::Base
+        );
+        assert_eq!(
+            combine_ir_clocks(&[IrClock::Tf(m60), IrClock::Tf(h1)], m1),
+            IrClock::Tf(h1)
+        );
+        assert_eq!(
+            combine_ir_clocks(&[IrClock::Tf(h1), IrClock::Tf(m60)], m1),
+            IrClock::Tf(h1)
+        );
     }
 }
