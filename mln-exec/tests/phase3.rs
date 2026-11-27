@@ -2,9 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use mln_check::Tf;
-use mln_exec::{eval_oracle, eval_source_oracle, ExecError, SeriesInputs};
+use mln_exec::{eval_oracle, eval_source_oracle, ExecError, SeriesInputs, ValueSeries};
 use mln_ir::{IrClock, IrConst, IrGraph, IrOp, IrTy, NodeId, SeriesField};
-use mln_lang::{TfUnit, UnOp};
+use mln_lang::{CmpOp, TfUnit, UnOp};
 use mln_std::{tier1_registry, ReturnTy, TriBool, TIER1_OPS};
 
 fn load_bars() -> SeriesInputs {
@@ -601,4 +601,107 @@ fn malformed_ir_and_huge_lag_return_error_or_nan_without_panicking() {
     let out = eval_oracle(&huge_lag, &bars).expect("huge lag should evaluate cleanly");
     assert!(out.node_num(lag_num).unwrap().iter().all(|v| v.is_nan()));
     assert_eq!(out.entry, vec![TriBool::Unknown; 3]);
+}
+
+#[test]
+fn const_tf_and_str_series_handled_explicitly() {
+    let bars = SeriesInputs {
+        open: vec![1.0, 2.0, 3.0],
+        high: vec![2.0, 3.0, 4.0],
+        low: vec![0.5, 1.5, 2.5],
+        close: vec![1.5, 2.5, 3.5],
+        volume: vec![10.0, 20.0, 30.0],
+    };
+
+    // End-to-end folded constant comparisons still evaluate cleanly.
+    let (_, src_out) = eval_source_oracle(
+        "a = \"x\"\nentry = (1h == 60m) and (a == \"x\")\nexit = false",
+        &bars,
+    )
+    .expect("source with Tf and Str constants succeeds");
+    assert_eq!(src_out.entry, vec![TriBool::True; 3]);
+
+    // Unfolded Compare, IfElse, and Lag on Const(Tf) / Const(Str) nodes in IR.
+    let base = Tf::new(1, TfUnit::Day);
+    let mut g = IrGraph::new(base);
+    let tf_1h = g.intern(
+        IrOp::Const(IrConst::Tf(Tf::new(1, TfUnit::Hour))),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Tf,
+    );
+    let tf_60m = g.intern(
+        IrOp::Const(IrConst::Tf(Tf::new(60, TfUnit::Minute))),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Tf,
+    );
+    let str_a = g.intern(
+        IrOp::Const(IrConst::Str("a".into())),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Str,
+    );
+    let str_b = g.intern(
+        IrOp::Const(IrConst::Str("a".into())),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Str,
+    );
+    let cmp_tf = g.intern(
+        IrOp::Compare(CmpOp::Eq),
+        vec![tf_1h, tf_60m],
+        vec![],
+        IrClock::Constant,
+        IrTy::Bool,
+    );
+    let cmp_str = g.intern(
+        IrOp::Compare(CmpOp::Eq),
+        vec![str_a, str_b],
+        vec![],
+        IrClock::Constant,
+        IrTy::Bool,
+    );
+    let entry = g.intern(
+        IrOp::And,
+        vec![cmp_tf, cmp_str],
+        vec![],
+        IrClock::Constant,
+        IrTy::Bool,
+    );
+    let exit = g.intern(
+        IrOp::Const(IrConst::Bool(false)),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Bool,
+    );
+    g.entry = entry;
+    g.exit = exit;
+
+    let out = eval_oracle(&g, &bars).expect("unfolded Tf/Str comparisons succeed");
+    assert_eq!(out.entry, vec![TriBool::True; 3]);
+    assert!(matches!(out.values[tf_1h.0 as usize], ValueSeries::Tf(_)));
+    assert!(matches!(out.values[str_a.0 as usize], ValueSeries::Str(_)));
+
+    // Lag on Tf/Str returns InvalidNode cleanly instead of producing Num(NaN).
+    let mut bad_lag = IrGraph::new(base);
+    let s = bad_lag.intern(
+        IrOp::Const(IrConst::Str("a".into())),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Str,
+    );
+    let l = bad_lag.intern(IrOp::Lag(1), vec![s], vec![], IrClock::Base, IrTy::Str);
+    bad_lag.entry = l;
+    bad_lag.exit = l;
+    assert!(matches!(
+        eval_oracle(&bad_lag, &bars),
+        Err(ExecError::InvalidNode(_))
+    ));
 }

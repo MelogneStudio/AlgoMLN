@@ -1,5 +1,6 @@
 use std::fmt;
 
+use mln_check::Tf;
 use mln_ir::{lower_default, IrClock, IrConst, IrGraph, IrNode, IrOp, NodeId, SeriesField};
 use mln_lang::{parse, BinOp, CmpOp, UnOp};
 use mln_std::eval::{
@@ -46,6 +47,8 @@ impl SeriesInputs {
 pub enum ValueSeries {
     Num(Vec<f64>),
     Bool(Vec<TriBool>),
+    Tf(Vec<Tf>),
+    Str(Vec<String>),
 }
 
 /// Errors produced during oracle evaluation.
@@ -244,7 +247,8 @@ fn eval_node(
                 };
                 len
             ])),
-            IrConst::Tf(_) | IrConst::Str(_) => Ok(ValueSeries::Num(vec![f64::NAN; len])),
+            IrConst::Tf(tf) => Ok(ValueSeries::Tf(vec![*tf; len])),
+            IrConst::Str(s) => Ok(ValueSeries::Str(vec![s.clone(); len])),
         },
         IrOp::Unary(op) => {
             let x = get_num(values, input(node, 0)?)?;
@@ -330,6 +334,47 @@ fn eval_node(
                         }
                     })
                     .collect(),
+                (ValueSeries::Tf(l), ValueSeries::Tf(r)) => l
+                    .iter()
+                    .zip(r.iter())
+                    .map(|(a, b)| {
+                        let res = match op {
+                            CmpOp::Eq => a.minutes() == b.minutes(),
+                            CmpOp::NotEq => a.minutes() != b.minutes(),
+                            CmpOp::Lt => a.minutes() < b.minutes(),
+                            CmpOp::LtEq => a.minutes() <= b.minutes(),
+                            CmpOp::Gt => a.minutes() > b.minutes(),
+                            CmpOp::GtEq => a.minutes() >= b.minutes(),
+                        };
+                        if res {
+                            TriBool::True
+                        } else {
+                            TriBool::False
+                        }
+                    })
+                    .collect(),
+                (ValueSeries::Str(l), ValueSeries::Str(r)) => {
+                    if !matches!(op, CmpOp::Eq | CmpOp::NotEq) {
+                        return Err(ExecError::InvalidNode(
+                            "unsupported string comparison operator".into(),
+                        ));
+                    }
+                    l.iter()
+                        .zip(r.iter())
+                        .map(|(a, b)| {
+                            let res = match op {
+                                CmpOp::Eq => a == b,
+                                CmpOp::NotEq => a != b,
+                                _ => unreachable!(),
+                            };
+                            if res {
+                                TriBool::True
+                            } else {
+                                TriBool::False
+                            }
+                        })
+                        .collect()
+                }
                 _ => {
                     return Err(ExecError::InvalidNode(
                         "compare operand type mismatch".into(),
@@ -383,6 +428,42 @@ fn eval_node(
                         .collect();
                     Ok(ValueSeries::Bool(out))
                 }
+                (ValueSeries::Tf(t), ValueSeries::Tf(e)) => {
+                    if c.len() != len || t.len() != len || e.len() != len {
+                        return Err(ExecError::InvalidNode("if_else length mismatch".into()));
+                    }
+                    let out = c
+                        .iter()
+                        .zip(t.iter())
+                        .zip(e.iter())
+                        .map(|((&cond, &tv), &ev)| match cond {
+                            TriBool::True => Ok(tv),
+                            TriBool::False => Ok(ev),
+                            TriBool::Unknown => Err(ExecError::InvalidNode(
+                                "if_else on Tf cannot evaluate Unknown condition".into(),
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(ValueSeries::Tf(out))
+                }
+                (ValueSeries::Str(t), ValueSeries::Str(e)) => {
+                    if c.len() != len || t.len() != len || e.len() != len {
+                        return Err(ExecError::InvalidNode("if_else length mismatch".into()));
+                    }
+                    let out = c
+                        .iter()
+                        .zip(t.iter())
+                        .zip(e.iter())
+                        .map(|((&cond, tv), ev)| match cond {
+                            TriBool::True => Ok(tv.clone()),
+                            TriBool::False => Ok(ev.clone()),
+                            TriBool::Unknown => Err(ExecError::InvalidNode(
+                                "if_else on Str cannot evaluate Unknown condition".into(),
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(ValueSeries::Str(out))
+                }
                 _ => Err(ExecError::InvalidNode("if_else branch mismatch".into())),
             }
         }
@@ -413,6 +494,9 @@ fn eval_node(
                     };
                     Ok(ValueSeries::Bool(out))
                 }
+                ValueSeries::Tf(_) | ValueSeries::Str(_) => Err(ExecError::InvalidNode(
+                    "lag is not supported on Tf or Str series".into(),
+                )),
             }
         }
         IrOp::Builtin(name) => eval_builtin(name, node, values),
