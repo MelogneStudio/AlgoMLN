@@ -304,11 +304,12 @@ fn t3_09_crossover_semantics_and_nan_unknown() {
         // t=3: a=4, b=3 (a2>b2 -> False)
         // t=4: a=NaN, b=3 -> Unknown
         // t=5: a=5, b=4 (prev a was NaN -> Unknown)
-        open: vec![2.0, 2.0, 2.0, 3.0, 3.0, 4.0],
-        high: vec![2.0; 6],
-        low: vec![1.0; 6],
-        close: vec![1.0, 2.0, 3.0, 4.0, f64::NAN, 5.0],
-        volume: vec![10.0; 6],
+        // t=6: a=2, b=3 (a5>=b5, a6<b6 -> crossunder True!)
+        open: vec![2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 3.0],
+        high: vec![2.0; 7],
+        low: vec![1.0; 7],
+        close: vec![1.0, 2.0, 3.0, 4.0, f64::NAN, 5.0, 2.0],
+        volume: vec![10.0; 7],
     };
     let src = "\
 entry = crossover(close, open)
@@ -316,7 +317,8 @@ exit = crossunder(close, open)
 ";
     let (_, out) = eval_source_oracle(src, &bars).unwrap();
     use TriBool::{False as F, True as T, Unknown as U};
-    assert_eq!(out.entry, vec![U, F, T, F, U, U]);
+    assert_eq!(out.entry, vec![U, F, T, F, U, U, F]);
+    assert_eq!(out.exit, vec![U, F, F, F, U, U, T]);
 }
 
 #[test]
@@ -704,4 +706,87 @@ fn const_tf_and_str_series_handled_explicitly() {
         eval_oracle(&bad_lag, &bars),
         Err(ExecError::InvalidNode(_))
     ));
+}
+
+#[test]
+fn ifelse_num_and_bool_branches_with_unknown_condition() {
+    let bars = SeriesInputs {
+        open: vec![2.0, 5.0, 2.0],
+        high: vec![10.0, 20.0, 30.0],
+        low: vec![1.0, 2.0, 3.0],
+        close: vec![3.0, 4.0, f64::NAN],
+        volume: vec![1.0; 3],
+    };
+    let src = "\
+num_branch = high if close > open else low
+bool_branch = (high > 15) if close > open else (low < 3)
+entry = bool_branch
+exit = num_branch > 10
+";
+    let (graph, out) = eval_source_oracle(src, &bars).unwrap();
+    let num_id = graph
+        .bindings
+        .iter()
+        .find(|(k, _)| k == "num_branch")
+        .unwrap()
+        .1;
+    let nums = out.node_num(num_id).unwrap();
+    assert_eq!(nums[0], 10.0);
+    assert_eq!(nums[1], 2.0);
+    assert!(nums[2].is_nan());
+
+    use TriBool::{False as F, True as T, Unknown as U};
+    assert_eq!(out.entry, vec![F, T, U]);
+    assert_eq!(out.exit, vec![F, F, U]);
+}
+
+#[test]
+fn mod_negative_inputs_and_percent_literal() {
+    let bars = SeriesInputs {
+        open: vec![3.0, -3.0, -3.0, 0.0],
+        high: vec![1.0; 4],
+        low: vec![1.0; 4],
+        close: vec![-7.0, 7.0, -7.0, 5.0],
+        volume: vec![1.0; 4],
+    };
+    let src = "\
+m = mod(close, open)
+entry = 40% == 0.4
+exit = false
+";
+    let (graph, out) = eval_source_oracle(src, &bars).unwrap();
+    let m_id = graph.bindings.iter().find(|(k, _)| k == "m").unwrap().1;
+    let m = out.node_num(m_id).unwrap();
+    assert_eq!(m[0], 2.0);
+    assert_eq!(m[1], -2.0);
+    assert_eq!(m[2], -1.0);
+    assert!(m[3].is_nan());
+    assert_eq!(out.entry, vec![TriBool::True; 4]);
+}
+
+#[test]
+fn empty_bars_and_length_mismatch_errors() {
+    let empty = SeriesInputs {
+        open: vec![],
+        high: vec![],
+        low: vec![],
+        close: vec![],
+        volume: vec![],
+    };
+    let (_, out) = eval_source_oracle("entry = ema(close, 5) > 0\nexit = false", &empty).unwrap();
+    assert!(out.entry.is_empty());
+    assert!(out.exit.is_empty());
+    assert!(out.entry_signals.is_empty());
+    assert!(out.exit_signals.is_empty());
+
+    let mismatch = SeriesInputs {
+        open: vec![1.0, 2.0],
+        high: vec![1.0],
+        low: vec![1.0, 2.0],
+        close: vec![1.0, 2.0],
+        volume: vec![1.0, 2.0],
+    };
+    let err = eval_source_oracle("entry = close > open\nexit = false", &mismatch)
+        .expect_err("unequal series lengths must return LengthMismatch");
+    assert_eq!(err, ExecError::LengthMismatch);
 }
