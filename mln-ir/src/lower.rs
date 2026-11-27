@@ -362,15 +362,13 @@ impl<'a> Lowerer<'a> {
             }
             Expr::Index { base, index, .. } => {
                 let vb = self.lower_expr(base, ambient)?;
-                let k = match self.eval_const_only(index)? {
-                    Some(IrConst::Dec { value, pct: false }) => {
-                        let norm = value.normalize();
-                        u64::try_from(norm.mantissa())
-                            .map_err(|_| IrError::Unsupported("negative index"))?
-                    }
-                    _ => return Err(IrError::Unsupported("non-constant index")),
+                let Some(idx_const) = self.eval_const_only(index)? else {
+                    return Err(IrError::Unsupported("non-constant index"));
                 };
-                if k == 0 {
+                let k_i64 = const_exact_int(&idx_const)
+                    .ok_or(IrError::Unsupported("non-constant index"))?;
+                let k = u64::try_from(k_i64).map_err(|_| IrError::Unsupported("negative index"))?;
+                if k == 0 || vb.clock == IrClock::Constant {
                     return Ok(vb);
                 }
                 let node =
@@ -454,20 +452,25 @@ impl<'a> Lowerer<'a> {
                 }
                 ParamTy::ConstPosInt | ParamTy::ConstNonNegInt => {
                     let int_val = if let Some(arg_expr) = bound[idx] {
-                        match self.eval_const_only(arg_expr)? {
-                            Some(IrConst::Dec { value, pct: false }) => {
-                                let norm = value.normalize();
-                                i64::try_from(norm.mantissa())
-                                    .map_err(|_| IrError::Unsupported("int overflow"))?
-                            }
-                            _ => return Err(IrError::Unsupported("non-const int param")),
-                        }
+                        let Some(c) = self.eval_const_only(arg_expr)? else {
+                            return Err(IrError::Unsupported("non-const int param"));
+                        };
+                        const_exact_int(&c).ok_or(IrError::Unsupported("non-const int param"))?
                     } else {
                         match param.default {
                             Some(mln_std::ParamDefault::Int(v)) => v,
                             _ => return Err(IrError::Unsupported("missing default")),
                         }
                     };
+                    match param.ty {
+                        ParamTy::ConstPosInt if int_val < 1 => {
+                            return Err(IrError::Unsupported("non-positive int param"));
+                        }
+                        ParamTy::ConstNonNegInt if int_val < 0 => {
+                            return Err(IrError::Unsupported("negative int param"));
+                        }
+                        _ => {}
+                    }
                     if let Ok(u) = u64::try_from(int_val) {
                         int_args[idx] = Some(u);
                     }
@@ -661,6 +664,18 @@ impl<'a> Lowerer<'a> {
                 }
                 Ok(Some(if b { vt } else { vo }))
             }
+            Expr::Index { base, index, .. } => {
+                let Some(idx_const) = self.eval_const_only(index)? else {
+                    return Ok(None);
+                };
+                let Some(k) = const_exact_int(&idx_const) else {
+                    return Ok(None);
+                };
+                if k < 0 {
+                    return Ok(None);
+                }
+                self.eval_const_only(base)
+            }
             _ => Ok(None),
         }
     }
@@ -739,4 +754,19 @@ fn same_const_kind(a: &IrConst, b: &IrConst) -> bool {
             | (IrConst::Tf(_), IrConst::Tf(_))
             | (IrConst::Str(_), IrConst::Str(_))
     )
+}
+
+fn const_exact_int(c: &IrConst) -> Option<i64> {
+    match c {
+        IrConst::Dec { value, pct: false } => {
+            let norm = value.normalize();
+            if norm.scale() == 0 {
+                i64::try_from(norm.mantissa()).ok()
+            } else {
+                None
+            }
+        }
+        IrConst::Int(i) => Some(*i),
+        _ => None,
+    }
 }

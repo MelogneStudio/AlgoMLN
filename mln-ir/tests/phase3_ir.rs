@@ -94,3 +94,36 @@ exit = ema(close, 10 if 2 > 1 else 20) > 0
     let dummy_checked: CheckedProgram = checked.program;
     assert!(lower(&bad_parsed.program, &dummy_checked, &reg).is_err());
 }
+
+#[test]
+fn index_and_int_params_check_exact_scale_and_preserve_const_lag() {
+    let const_lag = parse("n = 5[2]\nentry = ema(close, n) > 0\nexit = ema(close, 5[2]) > 0");
+    let graph = lower_default(&const_lag.program).expect("lower succeeds");
+    assert!(
+        !graph.nodes.iter().any(|n| matches!(n.op, IrOp::Lag(_))),
+        "constant lag should not emit Lag node:\n{}",
+        dump_ir(&graph)
+    );
+    let ema_node = graph
+        .nodes
+        .iter()
+        .find(|n| n.op == IrOp::Builtin("ema"))
+        .expect("ema node");
+    assert_eq!(ema_node.const_args, vec![IrConst::Int(5)]);
+
+    let reg = tier1_registry();
+    for bad in [
+        "entry = close[1.5] > 0\nexit = true",
+        "entry = ema(close, 1.5) > 0\nexit = true",
+        "entry = ema(close, 0) > 0\nexit = true",
+        "entry = diff(close, -1) > 0\nexit = true",
+    ] {
+        let p = parse(bad);
+        let checked = mln_check::check(&p.program, &reg, &CheckConfig::default());
+        assert!(!checked.is_ok(), "expected check failure for {bad}");
+        assert!(
+            lower(&p.program, &checked.program, &reg).is_err(),
+            "expected lower error for {bad}"
+        );
+    }
+}
