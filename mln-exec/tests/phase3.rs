@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use mln_exec::{eval_source_oracle, SeriesInputs};
+use mln_exec::{eval_source_oracle, ExecError, SeriesInputs};
 use mln_std::{tier1_registry, ReturnTy, TriBool, TIER1_OPS};
 
 fn load_bars() -> SeriesInputs {
@@ -503,4 +503,18 @@ exit = false
     assert_eq!(w[0], 10.0);
     assert_eq!(w[1], 2.0);
     assert!(w[2].is_nan());
+}
+
+#[test]
+fn non_base_clock_returns_unsupported_op() {
+    let bars = SeriesInputs {
+        open: vec![1.0, 2.0, 3.0],
+        high: vec![2.0, 3.0, 4.0],
+        low: vec![0.5, 1.5, 2.5],
+        close: vec![1.5, 2.5, 3.5],
+        volume: vec![10.0, 20.0, 30.0],
+    };
+    let err = eval_source_oracle("entry = close @ 1d > open @ 1d\nexit = false", &bars)
+        .expect_err("non-base clock should be rejected");
+    assert!(matches!(err, ExecError::UnsupportedOp(_)), "got {err:?}");
 }

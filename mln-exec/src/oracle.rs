@@ -1,6 +1,6 @@
 use std::fmt;
 
-use mln_ir::{lower_default, IrConst, IrGraph, IrNode, IrOp, NodeId, SeriesField};
+use mln_ir::{lower_default, IrClock, IrConst, IrGraph, IrNode, IrOp, NodeId, SeriesField};
 use mln_lang::{parse, BinOp, CmpOp, UnOp};
 use mln_std::eval::{
     clean, op_abs, op_atr, op_bollinger, op_clamp, op_corr, op_cov, op_crossover, op_crossunder,
@@ -122,6 +122,11 @@ pub fn eval_oracle(graph: &IrGraph, inputs: &SeriesInputs) -> Result<OracleOutpu
     let mut values: Vec<ValueSeries> = Vec::with_capacity(graph.nodes.len());
 
     for node in &graph.nodes {
+        if let IrClock::Tf(tf) = node.clock {
+            return Err(ExecError::UnsupportedOp(format!(
+                "non-base clock `{tf}` is not supported in Phase 3 oracle"
+            )));
+        }
         let val = eval_node(node, &values, inputs, len)?;
         values.push(val);
     }
