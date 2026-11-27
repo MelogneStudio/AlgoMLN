@@ -595,7 +595,7 @@ pub fn op_since(cond: &[TriBool]) -> Vec<f64> {
             }
             TriBool::False => {
                 if let Some(cnt) = last_true {
-                    let next = cnt + 1;
+                    let next = cnt.saturating_add(1);
                     last_true = Some(next);
                     out.push(next as f64);
                 } else {
@@ -603,6 +603,7 @@ pub fn op_since(cond: &[TriBool]) -> Vec<f64> {
                 }
             }
             TriBool::Unknown => {
+                last_true = last_true.map(|c| c.saturating_add(1));
                 out.push(f64::NAN);
             }
         }
@@ -661,5 +662,23 @@ mod tests {
         let out_zero = op_wma(&[1.0, 2.0], 0);
         assert_eq!(out_zero.len(), 2);
         assert!(out_zero.iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn since_advances_bar_distance_across_unknown_bars() {
+        let out = op_since(&[
+            TriBool::Unknown,
+            TriBool::True,
+            TriBool::False,
+            TriBool::Unknown,
+            TriBool::False,
+            TriBool::True,
+        ]);
+        assert!(out[0].is_nan());
+        assert_eq!(out[1], 0.0);
+        assert_eq!(out[2], 1.0);
+        assert!(out[3].is_nan());
+        assert_eq!(out[4], 3.0);
+        assert_eq!(out[5], 0.0);
     }
 }

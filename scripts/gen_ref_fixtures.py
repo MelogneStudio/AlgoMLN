@@ -147,6 +147,8 @@ def compute_since(cond_vals: pd.Series) -> pd.Series:
     last_true = None
     for i, v in enumerate(cond_vals):
         if pd.isna(v):
+            if last_true is not None:
+                last_true += 1
             out[i] = np.nan
         elif v == 1.0:
             last_true = 0
