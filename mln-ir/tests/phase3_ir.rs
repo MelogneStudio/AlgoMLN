@@ -232,3 +232,88 @@ fn constant_compare_does_not_intern_dead_compare_nodes() {
         IrOp::Const(IrConst::Bool(true))
     );
 }
+
+#[test]
+fn def_lowering_handles_multi_call_defaults_and_lexical_scoping() {
+    let src = "\
+g = 10
+def helper(x, n = g + 4):\n    tmp = ema(x, n)\n    return tmp
+entry = helper(close) > helper(open)
+exit = helper(close) > helper(close, 20)
+";
+    let parsed = parse(src);
+    assert!(parsed.diags.is_empty(), "parse diags: {:?}", parsed.diags);
+    let graph = lower_default(&parsed.program).expect("lower succeeds");
+    // Two distinct calls with close/open (window 14) + one with close (window 20) = 3 ema nodes.
+    // The second helper(close) CSEs with the first helper(close).
+    let ema_nodes: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.op == IrOp::Builtin("ema"))
+        .collect();
+    assert_eq!(ema_nodes.len(), 3, "got:\n{}", dump_ir(&graph));
+}
+
+#[test]
+fn lag_zero_elides_node_and_chained_compare_emits_and() {
+    let src = "\
+entry = open < close < high
+exit = close[0] > close[3]
+";
+    let parsed = parse(src);
+    let graph = lower_default(&parsed.program).expect("lower succeeds");
+    let cmp_count = graph
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, IrOp::Compare(_)))
+        .count();
+    assert_eq!(
+        cmp_count,
+        3,
+        "expected 3 Compare nodes:\n{}",
+        dump_ir(&graph)
+    );
+    assert!(graph.nodes.iter().any(|n| n.op == IrOp::And));
+    let lags: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.op, IrOp::Lag(_)))
+        .collect();
+    assert_eq!(lags.len(), 1);
+    assert_eq!(lags[0].op, IrOp::Lag(3));
+}
+
+#[test]
+fn ifelse_at_clock_propagation_and_builtin_arg_folding() {
+    let src = "\
+a = ema(close @ 1d, 10 + 4)
+b = 10 if true else 20
+c = 10 if close > open else 20
+entry = (a @ 1h) > c
+exit = ema(close, b) > 0
+";
+    let parsed = parse(src);
+    let graph = lower_default(&parsed.program).expect("lower succeeds");
+    let ema_1d = graph
+        .nodes
+        .iter()
+        .find(|n| n.op == IrOp::Builtin("ema") && n.const_args == vec![IrConst::Int(14)])
+        .expect("ema(14)");
+    assert_eq!(ema_1d.clock, IrClock::Tf(Tf::new(1, TfUnit::Day)));
+    let cmp_node = graph
+        .nodes
+        .iter()
+        .find(|n| n.op == IrOp::Compare(mln_lang::CmpOp::Gt) && n.inputs[0] == ema_1d.id)
+        .expect("entry compare");
+    assert_eq!(cmp_node.clock, IrClock::Base);
+    let ema_10 = graph
+        .nodes
+        .iter()
+        .find(|n| n.op == IrOp::Builtin("ema") && n.const_args == vec![IrConst::Int(10)])
+        .expect("ema(10)");
+    assert_eq!(ema_10.clock, IrClock::Base);
+    assert_eq!(
+        graph.nodes.iter().filter(|n| n.op == IrOp::IfElse).count(),
+        1
+    );
+}
