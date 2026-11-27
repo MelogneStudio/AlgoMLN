@@ -309,7 +309,11 @@ pub fn op_rma(x: &[f64], n: usize) -> Vec<f64> {
 }
 
 pub fn op_wma(x: &[f64], n: usize) -> Vec<f64> {
-    let denom = (n.saturating_mul(n + 1) / 2) as f64;
+    if n == 0 {
+        return vec![f64::NAN; x.len()];
+    }
+    let nf = n as f64;
+    let denom = nf * (nf + 1.0) / 2.0;
     rolling_window(x, n, |w| {
         w.iter()
             .enumerate()
@@ -646,5 +650,16 @@ mod tests {
     fn clamp_reversed_bounds_never_panics() {
         let out = op_clamp(&[5.0], &[10.0], &[1.0]);
         assert!(out[0].is_nan());
+    }
+
+    #[test]
+    fn wma_large_or_zero_window_never_panics() {
+        let out_max = op_wma(&[1.0, 2.0, 3.0], usize::MAX);
+        assert_eq!(out_max.len(), 3);
+        assert!(out_max.iter().all(|v| v.is_nan()));
+
+        let out_zero = op_wma(&[1.0, 2.0], 0);
+        assert_eq!(out_zero.len(), 2);
+        assert!(out_zero.iter().all(|v| v.is_nan()));
     }
 }
