@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use mln_check::{check, CheckConfig, CheckedProgram, Tf};
-use mln_lang::{Arg, BinOp, CmpOp, Def, Diagnostic, Expr, Program, Stmt, UnOp};
+use mln_check::const_eval::{
+    fold_and, fold_binary, fold_compare_pair, fold_not, fold_or, fold_unary,
+};
+use mln_check::{check, CheckConfig, CheckedProgram, ConstVal, Tf};
+use mln_lang::{Arg, CmpOp, Def, Diagnostic, Expr, Program, Stmt};
 use mln_std::{tier1_registry, OpRegistry, OpSpec, ParamTy};
 use rust_decimal::Decimal;
 
@@ -182,7 +185,7 @@ impl<'a> Lowerer<'a> {
             }
             Expr::Unary { op, e, .. } => {
                 let inner = self.lower_expr(e, ambient)?;
-                if let Some(folded) = inner.const_val.as_ref().and_then(|c| fold_unary(*op, c)) {
+                if let Some(folded) = inner.const_val.as_ref().and_then(|c| fold_ir_unary(*op, c)) {
                     return Ok(self.intern_const(folded, IrTy::Dec));
                 }
                 let node = self.graph.intern(
@@ -203,7 +206,7 @@ impl<'a> Lowerer<'a> {
                 let vl = self.lower_expr(l, ambient)?;
                 let vr = self.lower_expr(r, ambient)?;
                 if let (Some(cl), Some(cr)) = (&vl.const_val, &vr.const_val) {
-                    if let Some(folded) = fold_binary(*op, cl, cr) {
+                    if let Some(folded) = fold_ir_binary(*op, cl, cr) {
                         return Ok(self.intern_const(folded, IrTy::Dec));
                     }
                 }
@@ -236,7 +239,7 @@ impl<'a> Lowerer<'a> {
                     let cur = self.lower_expr(rhs, ambient)?;
                     if all_const {
                         if let (Some(a), Some(b)) = (&prev.const_val, &cur.const_val) {
-                            if let Some(res) = fold_cmp(*op, a, b) {
+                            if let Some(res) = fold_ir_cmp(*op, a, b) {
                                 const_acc = const_acc && res;
                             } else {
                                 all_const = false;
@@ -279,8 +282,8 @@ impl<'a> Lowerer<'a> {
             }
             Expr::Not(inner, _) => {
                 let v = self.lower_expr(inner, ambient)?;
-                if let Some(IrConst::Bool(b)) = v.const_val {
-                    return Ok(self.intern_const(IrConst::Bool(!b), IrTy::Bool));
+                if let Some(folded) = v.const_val.as_ref().and_then(fold_ir_not) {
+                    return Ok(self.intern_const(folded, IrTy::Bool));
                 }
                 let node =
                     self.graph
@@ -296,11 +299,15 @@ impl<'a> Lowerer<'a> {
                 let is_and = matches!(expr, Expr::And(_, _, _));
                 let vl = self.lower_expr(l, ambient)?;
                 let vr = self.lower_expr(r, ambient)?;
-                if let (Some(IrConst::Bool(a)), Some(IrConst::Bool(b))) =
-                    (&vl.const_val, &vr.const_val)
-                {
-                    let res = if is_and { *a && *b } else { *a || *b };
-                    return Ok(self.intern_const(IrConst::Bool(res), IrTy::Bool));
+                if let (Some(cl), Some(cr)) = (&vl.const_val, &vr.const_val) {
+                    let folded = if is_and {
+                        fold_ir_and(cl, cr)
+                    } else {
+                        fold_ir_or(cl, cr)
+                    };
+                    if let Some(c) = folded {
+                        return Ok(self.intern_const(c, IrTy::Bool));
+                    }
                 }
                 let clock = combine_ir_clocks(&[vl.clock, vr.clock], self.base_clock);
                 let op = if is_and { IrOp::And } else { IrOp::Or };
@@ -589,9 +596,9 @@ impl<'a> Lowerer<'a> {
             Expr::Str(s, _) => Ok(Some(IrConst::Str(s.clone()))),
             Expr::Bool(b, _) => Ok(Some(IrConst::Bool(*b))),
             Expr::Name(id) => Ok(self.lookup(&id.name).and_then(|v| v.const_val.clone())),
-            Expr::Unary { op, e, .. } => {
-                Ok(self.eval_const_only(e)?.and_then(|c| fold_unary(*op, &c)))
-            }
+            Expr::Unary { op, e, .. } => Ok(self
+                .eval_const_only(e)?
+                .and_then(|c| fold_ir_unary(*op, &c))),
             Expr::Binary { op, l, r, .. } => {
                 let Some(cl) = self.eval_const_only(l)? else {
                     return Ok(None);
@@ -599,20 +606,23 @@ impl<'a> Lowerer<'a> {
                 let Some(cr) = self.eval_const_only(r)? else {
                     return Ok(None);
                 };
-                Ok(fold_binary(*op, &cl, &cr))
+                Ok(fold_ir_binary(*op, &cl, &cr))
             }
-            Expr::Not(e, _) => Ok(match self.eval_const_only(e)? {
-                Some(IrConst::Bool(b)) => Some(IrConst::Bool(!b)),
-                _ => None,
-            }),
-            Expr::And(l, r, _) => Ok(match (self.eval_const_only(l)?, self.eval_const_only(r)?) {
-                (Some(IrConst::Bool(a)), Some(IrConst::Bool(b))) => Some(IrConst::Bool(a && b)),
-                _ => None,
-            }),
-            Expr::Or(l, r, _) => Ok(match (self.eval_const_only(l)?, self.eval_const_only(r)?) {
-                (Some(IrConst::Bool(a)), Some(IrConst::Bool(b))) => Some(IrConst::Bool(a || b)),
-                _ => None,
-            }),
+            Expr::Not(e, _) => Ok(self.eval_const_only(e)?.as_ref().and_then(fold_ir_not)),
+            Expr::And(l, r, _) => {
+                let (Some(cl), Some(cr)) = (self.eval_const_only(l)?, self.eval_const_only(r)?)
+                else {
+                    return Ok(None);
+                };
+                Ok(fold_ir_and(&cl, &cr))
+            }
+            Expr::Or(l, r, _) => {
+                let (Some(cl), Some(cr)) = (self.eval_const_only(l)?, self.eval_const_only(r)?)
+                else {
+                    return Ok(None);
+                };
+                Ok(fold_ir_or(&cl, &cr))
+            }
             Expr::IfElse {
                 cond,
                 then,
@@ -645,110 +655,48 @@ fn combine_ir_clocks(clocks: &[IrClock], base_clock: Tf) -> IrClock {
     }
 }
 
-fn fold_unary(op: UnOp, c: &IrConst) -> Option<IrConst> {
-    match (op, c) {
-        (UnOp::Neg, IrConst::Dec { value, pct }) => {
-            value
-                .checked_mul(Decimal::NEGATIVE_ONE)
-                .map(|v| IrConst::Dec {
-                    value: v.normalize(),
-                    pct: *pct,
-                })
-        }
-        (UnOp::Pos, IrConst::Dec { value, pct }) => Some(IrConst::Dec {
+fn to_check_const(c: &IrConst) -> ConstVal {
+    match c {
+        IrConst::Dec { value, pct } => ConstVal::Dec(*value, *pct),
+        IrConst::Int(i) => ConstVal::Dec(Decimal::from(*i), false),
+        IrConst::Bool(b) => ConstVal::Bool(*b),
+        IrConst::Tf(tf) => ConstVal::Tf(*tf),
+        IrConst::Str(s) => ConstVal::Str(s.clone()),
+    }
+}
+
+fn from_check_const(cv: ConstVal) -> IrConst {
+    match cv {
+        ConstVal::Dec(value, pct) => IrConst::Dec {
             value: value.normalize(),
-            pct: *pct,
-        }),
-        _ => None,
+            pct,
+        },
+        ConstVal::Bool(b) => IrConst::Bool(b),
+        ConstVal::Tf(tf) => IrConst::Tf(tf),
+        ConstVal::Str(s) => IrConst::Str(s),
     }
 }
 
-fn fold_binary(op: BinOp, lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
-    let (
-        IrConst::Dec {
-            value: a,
-            pct: pct_a,
-        },
-        IrConst::Dec {
-            value: b,
-            pct: pct_b,
-        },
-    ) = (lhs, rhs)
-    else {
-        return None;
-    };
-    if *pct_a || *pct_b {
-        return None;
-    }
-    let res = match op {
-        BinOp::Add => a.checked_add(*b)?,
-        BinOp::Sub => a.checked_sub(*b)?,
-        BinOp::Mul => a.checked_mul(*b)?,
-        BinOp::Div => {
-            if b.is_zero() {
-                return None;
-            }
-            a.checked_div(*b)?
-        }
-        BinOp::Pow => {
-            let norm = b.normalize();
-            if norm.scale() != 0 || norm.is_sign_negative() {
-                return None;
-            }
-            let exp = u32::try_from(norm.mantissa()).ok()?;
-            if exp > 64 {
-                return None;
-            }
-            let mut acc = Decimal::ONE;
-            for _ in 0..exp {
-                acc = acc.checked_mul(*a)?;
-            }
-            acc
-        }
-    };
-    Some(IrConst::Dec {
-        value: res.normalize(),
-        pct: false,
-    })
+fn fold_ir_unary(op: mln_lang::UnOp, c: &IrConst) -> Option<IrConst> {
+    fold_unary(op, &to_check_const(c)).map(from_check_const)
 }
 
-fn fold_cmp(op: CmpOp, lhs: &IrConst, rhs: &IrConst) -> Option<bool> {
-    match (lhs, rhs) {
-        (
-            IrConst::Dec {
-                value: a,
-                pct: pct_a,
-            },
-            IrConst::Dec {
-                value: b,
-                pct: pct_b,
-            },
-        ) if pct_a == pct_b => Some(match op {
-            CmpOp::Eq => a == b,
-            CmpOp::NotEq => a != b,
-            CmpOp::Lt => a < b,
-            CmpOp::LtEq => a <= b,
-            CmpOp::Gt => a > b,
-            CmpOp::GtEq => a >= b,
-        }),
-        (IrConst::Bool(a), IrConst::Bool(b)) => match op {
-            CmpOp::Eq => Some(a == b),
-            CmpOp::NotEq => Some(a != b),
-            _ => None,
-        },
-        (IrConst::Tf(a), IrConst::Tf(b)) => Some(match op {
-            CmpOp::Eq => a.minutes() == b.minutes(),
-            CmpOp::NotEq => a.minutes() != b.minutes(),
-            CmpOp::Lt => a.minutes() < b.minutes(),
-            CmpOp::LtEq => a.minutes() <= b.minutes(),
-            CmpOp::Gt => a.minutes() > b.minutes(),
-            CmpOp::GtEq => a.minutes() >= b.minutes(),
-        }),
-        (IrConst::Str(a), IrConst::Str(b)) => match op {
-            CmpOp::Eq => Some(a == b),
-            CmpOp::NotEq => Some(a != b),
-            _ => None,
-        },
-        _ => None,
-    }
+fn fold_ir_binary(op: mln_lang::BinOp, lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
+    fold_binary(op, &to_check_const(lhs), &to_check_const(rhs)).map(from_check_const)
+}
+
+fn fold_ir_cmp(op: CmpOp, lhs: &IrConst, rhs: &IrConst) -> Option<bool> {
+    fold_compare_pair(op, &to_check_const(lhs), &to_check_const(rhs))
+}
+
+fn fold_ir_not(c: &IrConst) -> Option<IrConst> {
+    fold_not(&to_check_const(c)).map(from_check_const)
+}
+
+fn fold_ir_and(lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
+    fold_and(&to_check_const(lhs), &to_check_const(rhs)).map(from_check_const)
+}
+
+fn fold_ir_or(lhs: &IrConst, rhs: &IrConst) -> Option<IrConst> {
+    fold_or(&to_check_const(lhs), &to_check_const(rhs)).map(from_check_const)
 }
