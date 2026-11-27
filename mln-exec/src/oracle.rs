@@ -151,23 +151,41 @@ pub fn eval_oracle(graph: &IrGraph, inputs: &SeriesInputs) -> Result<OracleOutpu
     })
 }
 
+fn input(node: &IrNode, idx: usize) -> Result<NodeId, ExecError> {
+    node.inputs
+        .get(idx)
+        .copied()
+        .ok_or_else(|| ExecError::InvalidNode(format!("missing input {idx} on {}", node.id)))
+}
+
+fn get_val(values: &[ValueSeries], id: NodeId) -> Result<&ValueSeries, ExecError> {
+    values
+        .get(id.0 as usize)
+        .ok_or_else(|| ExecError::InvalidNode(format!("missing value at {id}")))
+}
+
 fn get_num(values: &[ValueSeries], id: NodeId) -> Result<&[f64], ExecError> {
-    match values.get(id.0 as usize) {
-        Some(ValueSeries::Num(v)) => Ok(v),
+    match get_val(values, id)? {
+        ValueSeries::Num(v) => Ok(v),
         _ => Err(ExecError::InvalidNode(format!("expected Num at {id}"))),
     }
 }
 
 fn get_bool(values: &[ValueSeries], id: NodeId) -> Result<&[TriBool], ExecError> {
-    match values.get(id.0 as usize) {
-        Some(ValueSeries::Bool(v)) => Ok(v),
+    match get_val(values, id)? {
+        ValueSeries::Bool(v) => Ok(v),
         _ => Err(ExecError::InvalidNode(format!("expected Bool at {id}"))),
     }
 }
 
 fn const_usize(node: &IrNode, idx: usize) -> Result<usize, ExecError> {
     match node.const_args.get(idx) {
-        Some(IrConst::Int(v)) if *v >= 0 => Ok(*v as usize),
+        Some(IrConst::Int(v)) => usize::try_from(*v).map_err(|_| {
+            ExecError::InvalidNode(format!(
+                "int const arg {idx} out of usize range on {}",
+                node.id
+            ))
+        }),
         _ => Err(ExecError::InvalidNode(format!(
             "expected non-negative int const arg {idx} on {}",
             node.id
@@ -229,7 +247,7 @@ fn eval_node(
             IrConst::Tf(_) | IrConst::Str(_) => Ok(ValueSeries::Num(vec![f64::NAN; len])),
         },
         IrOp::Unary(op) => {
-            let x = get_num(values, node.inputs[0])?;
+            let x = get_num(values, input(node, 0)?)?;
             let out = x
                 .iter()
                 .map(|&v| {
@@ -246,8 +264,8 @@ fn eval_node(
             Ok(ValueSeries::Num(out))
         }
         IrOp::Binary(op) => {
-            let l = get_num(values, node.inputs[0])?;
-            let r = get_num(values, node.inputs[1])?;
+            let l = get_num(values, input(node, 0)?)?;
+            let r = get_num(values, input(node, 1)?)?;
             let out = l
                 .iter()
                 .zip(r.iter())
@@ -267,11 +285,10 @@ fn eval_node(
             Ok(ValueSeries::Num(out))
         }
         IrOp::Compare(op) => {
-            let out = match (
-                values.get(node.inputs[0].0 as usize),
-                values.get(node.inputs[1].0 as usize),
-            ) {
-                (Some(ValueSeries::Num(l)), Some(ValueSeries::Num(r))) => l
+            let lhs = get_val(values, input(node, 0)?)?;
+            let rhs = get_val(values, input(node, 1)?)?;
+            let out = match (lhs, rhs) {
+                (ValueSeries::Num(l), ValueSeries::Num(r)) => l
                     .iter()
                     .zip(r.iter())
                     .map(|(&a, &b)| {
@@ -294,7 +311,7 @@ fn eval_node(
                         }
                     })
                     .collect(),
-                (Some(ValueSeries::Bool(l)), Some(ValueSeries::Bool(r))) => l
+                (ValueSeries::Bool(l), ValueSeries::Bool(r)) => l
                     .iter()
                     .zip(r.iter())
                     .map(|(&a, &b)| match (a, b) {
@@ -322,37 +339,45 @@ fn eval_node(
             Ok(ValueSeries::Bool(out))
         }
         IrOp::Not => {
-            let x = get_bool(values, node.inputs[0])?;
+            let x = get_bool(values, input(node, 0)?)?;
             Ok(ValueSeries::Bool(x.iter().map(|b| b.not()).collect()))
         }
         IrOp::And => {
-            let l = get_bool(values, node.inputs[0])?;
-            let r = get_bool(values, node.inputs[1])?;
+            let l = get_bool(values, input(node, 0)?)?;
+            let r = get_bool(values, input(node, 1)?)?;
             Ok(ValueSeries::Bool(
                 l.iter().zip(r.iter()).map(|(&a, &b)| a.and(b)).collect(),
             ))
         }
         IrOp::Or => {
-            let l = get_bool(values, node.inputs[0])?;
-            let r = get_bool(values, node.inputs[1])?;
+            let l = get_bool(values, input(node, 0)?)?;
+            let r = get_bool(values, input(node, 1)?)?;
             Ok(ValueSeries::Bool(
                 l.iter().zip(r.iter()).map(|(&a, &b)| a.or(b)).collect(),
             ))
         }
         IrOp::IfElse => {
-            let c = get_bool(values, node.inputs[0])?;
-            match (
-                values.get(node.inputs[1].0 as usize),
-                values.get(node.inputs[2].0 as usize),
-            ) {
-                (Some(ValueSeries::Num(t)), Some(ValueSeries::Num(e))) => {
+            let c = get_bool(values, input(node, 0)?)?;
+            let then_val = get_val(values, input(node, 1)?)?;
+            let else_val = get_val(values, input(node, 2)?)?;
+            match (then_val, else_val) {
+                (ValueSeries::Num(t), ValueSeries::Num(e)) => {
+                    if c.len() != len || t.len() != len || e.len() != len {
+                        return Err(ExecError::InvalidNode("if_else length mismatch".into()));
+                    }
                     Ok(ValueSeries::Num(op_where(c, t, e)))
                 }
-                (Some(ValueSeries::Bool(t)), Some(ValueSeries::Bool(e))) => {
-                    let out = (0..len)
-                        .map(|i| match c[i] {
-                            TriBool::True => t[i],
-                            TriBool::False => e[i],
+                (ValueSeries::Bool(t), ValueSeries::Bool(e)) => {
+                    if c.len() != len || t.len() != len || e.len() != len {
+                        return Err(ExecError::InvalidNode("if_else length mismatch".into()));
+                    }
+                    let out = c
+                        .iter()
+                        .zip(t.iter())
+                        .zip(e.iter())
+                        .map(|((&cond, &tv), &ev)| match cond {
+                            TriBool::True => tv,
+                            TriBool::False => ev,
                             TriBool::Unknown => TriBool::Unknown,
                         })
                         .collect();
@@ -362,21 +387,32 @@ fn eval_node(
             }
         }
         IrOp::Lag(k) => {
-            let k = *k as usize;
-            match values.get(node.inputs[0].0 as usize) {
-                Some(ValueSeries::Num(x)) => {
-                    let out = (0..len)
-                        .map(|t| if t < k { f64::NAN } else { clean(x[t - k]) })
-                        .collect();
+            let k_opt = usize::try_from(*k).ok().filter(|&k| k < len);
+            match get_val(values, input(node, 0)?)? {
+                ValueSeries::Num(x) => {
+                    if x.len() != len {
+                        return Err(ExecError::InvalidNode("lag input length mismatch".into()));
+                    }
+                    let out = match k_opt {
+                        None => vec![f64::NAN; len],
+                        Some(k) => (0..len)
+                            .map(|t| if t < k { f64::NAN } else { clean(x[t - k]) })
+                            .collect(),
+                    };
                     Ok(ValueSeries::Num(out))
                 }
-                Some(ValueSeries::Bool(x)) => {
-                    let out = (0..len)
-                        .map(|t| if t < k { TriBool::Unknown } else { x[t - k] })
-                        .collect();
+                ValueSeries::Bool(x) => {
+                    if x.len() != len {
+                        return Err(ExecError::InvalidNode("lag input length mismatch".into()));
+                    }
+                    let out = match k_opt {
+                        None => vec![TriBool::Unknown; len],
+                        Some(k) => (0..len)
+                            .map(|t| if t < k { TriBool::Unknown } else { x[t - k] })
+                            .collect(),
+                    };
                     Ok(ValueSeries::Bool(out))
                 }
-                None => Err(ExecError::InvalidNode("missing lag input".into())),
             }
         }
         IrOp::Builtin(name) => eval_builtin(name, node, values),
@@ -389,143 +425,143 @@ fn eval_builtin(
     values: &[ValueSeries],
 ) -> Result<ValueSeries, ExecError> {
     match name {
-        "abs" => Ok(ValueSeries::Num(op_abs(get_num(values, node.inputs[0])?))),
-        "sqrt" => Ok(ValueSeries::Num(op_sqrt(get_num(values, node.inputs[0])?))),
-        "log" => Ok(ValueSeries::Num(op_log(get_num(values, node.inputs[0])?))),
-        "exp" => Ok(ValueSeries::Num(op_exp(get_num(values, node.inputs[0])?))),
+        "abs" => Ok(ValueSeries::Num(op_abs(get_num(values, input(node, 0)?)?))),
+        "sqrt" => Ok(ValueSeries::Num(op_sqrt(get_num(values, input(node, 0)?)?))),
+        "log" => Ok(ValueSeries::Num(op_log(get_num(values, input(node, 0)?)?))),
+        "exp" => Ok(ValueSeries::Num(op_exp(get_num(values, input(node, 0)?)?))),
         "min" => Ok(ValueSeries::Num(op_min(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
         ))),
         "max" => Ok(ValueSeries::Num(op_max(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
         ))),
         "where" => Ok(ValueSeries::Num(op_where(
-            get_bool(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
-            get_num(values, node.inputs[2])?,
+            get_bool(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
+            get_num(values, input(node, 2)?)?,
         ))),
         "clamp" => Ok(ValueSeries::Num(op_clamp(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
-            get_num(values, node.inputs[2])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
+            get_num(values, input(node, 2)?)?,
         ))),
         "mod" => Ok(ValueSeries::Num(op_mod(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
         ))),
         "diff" => Ok(ValueSeries::Num(op_diff(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "pct_change" => Ok(ValueSeries::Num(op_pct_change(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "cumsum" => Ok(ValueSeries::Num(op_cumsum(get_num(
             values,
-            node.inputs[0],
+            input(node, 0)?,
         )?))),
         "sum" => Ok(ValueSeries::Num(op_sum(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "mean" => Ok(ValueSeries::Num(op_mean(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "sma" => Ok(ValueSeries::Num(op_sma(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "std" => Ok(ValueSeries::Num(op_std(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "var" => Ok(ValueSeries::Num(op_var(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "ema" => Ok(ValueSeries::Num(op_ema(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "rma" => Ok(ValueSeries::Num(op_rma(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "wma" => Ok(ValueSeries::Num(op_wma(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "highest" => Ok(ValueSeries::Num(op_highest(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "lowest" => Ok(ValueSeries::Num(op_lowest(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "rsi" => Ok(ValueSeries::Num(op_rsi(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "tr" => Ok(ValueSeries::Num(op_tr(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
-            get_num(values, node.inputs[2])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
+            get_num(values, input(node, 2)?)?,
         ))),
         "atr" => Ok(ValueSeries::Num(op_atr(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
-            get_num(values, node.inputs[2])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
+            get_num(values, input(node, 2)?)?,
             const_usize(node, 0)?,
         ))),
         "macd" => Ok(ValueSeries::Num(op_macd(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
             const_usize(node, 1)?,
             const_usize(node, 2)?,
         ))),
         "bollinger" => Ok(ValueSeries::Num(op_bollinger(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
             const_f64(node, 1)?,
         ))),
         "corr" => Ok(ValueSeries::Num(op_corr(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
             const_usize(node, 0)?,
         ))),
         "cov" => Ok(ValueSeries::Num(op_cov(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
             const_usize(node, 0)?,
         ))),
         "linreg_slope" => Ok(ValueSeries::Num(op_linreg_slope(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "linreg_intercept" => Ok(ValueSeries::Num(op_linreg_intercept(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "percentile_rank" => Ok(ValueSeries::Num(op_percentile_rank(
-            get_num(values, node.inputs[0])?,
+            get_num(values, input(node, 0)?)?,
             const_usize(node, 0)?,
         ))),
         "crossover" => Ok(ValueSeries::Bool(op_crossover(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
         ))),
         "crossunder" => Ok(ValueSeries::Bool(op_crossunder(
-            get_num(values, node.inputs[0])?,
-            get_num(values, node.inputs[1])?,
+            get_num(values, input(node, 0)?)?,
+            get_num(values, input(node, 1)?)?,
         ))),
         "since" => Ok(ValueSeries::Num(op_since(get_bool(
             values,
-            node.inputs[0],
+            input(node, 0)?,
         )?))),
         _ => Err(ExecError::UnsupportedOp(name.to_string())),
     }

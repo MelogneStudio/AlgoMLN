@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use mln_exec::{eval_source_oracle, ExecError, SeriesInputs};
+use mln_check::Tf;
+use mln_exec::{eval_oracle, eval_source_oracle, ExecError, SeriesInputs};
+use mln_ir::{IrClock, IrConst, IrGraph, IrOp, IrTy, NodeId, SeriesField};
+use mln_lang::{TfUnit, UnOp};
 use mln_std::{tier1_registry, ReturnTy, TriBool, TIER1_OPS};
 
 fn load_bars() -> SeriesInputs {
@@ -517,4 +520,85 @@ fn non_base_clock_returns_unsupported_op() {
     let err = eval_source_oracle("entry = close @ 1d > open @ 1d\nexit = false", &bars)
         .expect_err("non-base clock should be rejected");
     assert!(matches!(err, ExecError::UnsupportedOp(_)), "got {err:?}");
+}
+
+#[test]
+fn malformed_ir_and_huge_lag_return_error_or_nan_without_panicking() {
+    let bars = SeriesInputs {
+        open: vec![1.0, 2.0, 3.0],
+        high: vec![2.0, 3.0, 4.0],
+        low: vec![0.5, 1.5, 2.5],
+        close: vec![1.5, 2.5, 3.5],
+        volume: vec![10.0, 20.0, 30.0],
+    };
+
+    let base = Tf::new(1, TfUnit::Day);
+
+    // Missing input on Unary node must return InvalidNode, not panic.
+    let mut missing_input = IrGraph::new(base);
+    let n0 = missing_input.intern(
+        IrOp::Unary(UnOp::Neg),
+        vec![],
+        vec![],
+        IrClock::Base,
+        IrTy::Num,
+    );
+    missing_input.entry = n0;
+    missing_input.exit = n0;
+    assert!(matches!(
+        eval_oracle(&missing_input, &bars),
+        Err(ExecError::InvalidNode(_))
+    ));
+
+    // Out-of-bounds NodeId input must return InvalidNode, not panic.
+    let mut bad_ref = IrGraph::new(base);
+    let b0 = bad_ref.intern(
+        IrOp::Unary(UnOp::Neg),
+        vec![NodeId(99)],
+        vec![],
+        IrClock::Base,
+        IrTy::Num,
+    );
+    bad_ref.entry = b0;
+    bad_ref.exit = b0;
+    assert!(matches!(
+        eval_oracle(&bad_ref, &bars),
+        Err(ExecError::InvalidNode(_))
+    ));
+
+    // Huge lag (>= len, including u64::MAX) must produce all NaN / Unknown without panicking.
+    let mut huge_lag = IrGraph::new(base);
+    let close = huge_lag.intern(
+        IrOp::Series(SeriesField::Close),
+        vec![],
+        vec![],
+        IrClock::Base,
+        IrTy::Num,
+    );
+    let lag_num = huge_lag.intern(
+        IrOp::Lag(u64::MAX),
+        vec![close],
+        vec![],
+        IrClock::Base,
+        IrTy::Num,
+    );
+    let bool_const = huge_lag.intern(
+        IrOp::Const(IrConst::Bool(true)),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Bool,
+    );
+    let lag_bool = huge_lag.intern(
+        IrOp::Lag(u64::MAX),
+        vec![bool_const],
+        vec![],
+        IrClock::Base,
+        IrTy::Bool,
+    );
+    huge_lag.entry = lag_bool;
+    huge_lag.exit = lag_bool;
+    let out = eval_oracle(&huge_lag, &bars).expect("huge lag should evaluate cleanly");
+    assert!(out.node_num(lag_num).unwrap().iter().all(|v| v.is_nan()));
+    assert_eq!(out.entry, vec![TriBool::Unknown; 3]);
 }
