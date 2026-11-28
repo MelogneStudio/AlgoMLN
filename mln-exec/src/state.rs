@@ -213,8 +213,18 @@ pub fn align_symbol_bars(
     let mut aligned = Vec::with_capacity(primary_bars.len());
     let mut sym_idx = 0usize;
     let mut prev_sym_ts: Option<i64> = None;
+    let mut prev_primary_ts: Option<i64> = None;
 
     for b in primary_bars {
+        if let Some(prev) = prev_primary_ts {
+            if b.timestamp < prev {
+                return Err(ExecError::NonMonotonicTimestamp {
+                    prev,
+                    cur: b.timestamp,
+                });
+            }
+        }
+        prev_primary_ts = Some(b.timestamp);
         while let Some(sb) = sym_bars.get(sym_idx) {
             if let Some(prev) = prev_sym_ts {
                 if sb.timestamp < prev {

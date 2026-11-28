@@ -758,3 +758,20 @@ fn non_numeric_bool_state_var_rejected_by_executor() {
         assert!(matches!(Executor::new(&ir), Err(ExecError::InvalidNode(_))));
     }
 }
+
+#[test]
+fn align_symbol_bars_rejects_non_monotonic_primary_timestamps() {
+    let primary = [
+        Bar::new(1_700_000_060, 100.0, 101.0, 99.0, 100.5, 10.0),
+        Bar::new(1_700_000_000, 100.5, 101.5, 99.5, 101.0, 10.0),
+    ];
+    let sym = [Bar::new(1_700_000_060, 200.0, 201.0, 199.0, 200.5, 20.0)];
+    let err = align_symbol_bars(&primary, &sym).unwrap_err();
+    assert_eq!(
+        err,
+        ExecError::NonMonotonicTimestamp {
+            prev: 1_700_000_060,
+            cur: 1_700_000_000,
+        }
+    );
+}
