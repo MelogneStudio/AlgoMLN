@@ -232,9 +232,10 @@ fn arb_expr_program() -> impl Strategy<Value = String> {
              c = rel_spread(a, b)\n\
              bb = bollinger(close, 8, 2.0)\n\
              mc = macd(close, 4, 8, 3)\n\
-             d = where(a > b, a[1], bb)\n\
-             cond1 = crossover(a, b) or (c > 0.0 and mc >= 0.0)\n\
-             cond2 = crossunder(a, b) or since(a < b) > {lag_k}\n\
+             b_ref = b + 0.0005\n\
+             d = where(a > b_ref, a[1], bb)\n\
+             cond1 = crossover(a, b_ref) or (c > 0.0005 and mc >= 0.0005)\n\
+             cond2 = crossunder(a, b_ref) or since(a < b - 0.0005) > {lag_k}\n\
              entry = true if (cond1 and d == d) else false\n\
              exit = cond2 or not cond1\n"
         )
