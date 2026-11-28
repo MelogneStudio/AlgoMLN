@@ -838,3 +838,288 @@ fn run_chunk_with_context_reports_expected_total_symbol_count_mismatch() {
         }
     );
 }
+
+#[test]
+fn nested_coarsest_first_multi_tf_and_weekly_bucketing() {
+    // Nested `1d` inside `1h`: on simultaneous `1d` + `1h` boundary, `1d` must complete
+    // before `1h` evaluates so `h_with_d` observes the newly completed 2-day SMA.
+    let src_nested = "\
+h_with_d = (sma(close, 2) @ 1d + close) @ 1h
+entry = h_with_d > 0.0
+exit = false
+";
+    let ir_nested = compile(src_nested);
+    let mut exec_nested = Executor::new(&ir_nested).expect("exec");
+
+    // 2023-11-15 00:00 UTC = 1_700_006_400
+    let day0 = 1_700_006_400;
+    let day1 = day0 + 86_400;
+    let day2 = day0 + 2 * 86_400;
+
+    let bars = [
+        // Day 0: two hours -> day0_close = 12.0
+        Bar::new(day0 + 10 * 3600, 10.0, 11.0, 9.0, 10.0, 1.0),
+        Bar::new(day0 + 11 * 3600, 12.0, 13.0, 11.0, 12.0, 1.0),
+        // Day 1: two hours -> day1_close = 24.0
+        Bar::new(day1 + 10 * 3600, 20.0, 21.0, 19.0, 20.0, 1.0),
+        Bar::new(day1 + 11 * 3600, 24.0, 25.0, 23.0, 24.0, 1.0),
+        // Day 2 boundary crosses BOTH 1d and 1h simultaneously.
+        Bar::new(day2 + 10 * 3600, 30.0, 31.0, 29.0, 30.0, 1.0),
+    ];
+
+    for &b in &bars[..4] {
+        exec_nested.step(b).unwrap();
+        assert!(binding_num(&exec_nested, &ir_nested, "h_with_d").is_nan());
+    }
+    exec_nested.step(bars[4]).unwrap();
+    // Completed 1d SMA(2) = (12.0 + 24.0) / 2.0 = 18.0; completed 1h close = 24.0.
+    let expected_h_with_d = 18.0 + 24.0;
+    assert!((binding_num(&exec_nested, &ir_nested, "h_with_d") - expected_h_with_d).abs() < 1e-12);
+
+    // `TfUnit::Week` bucketing (Monday-Sunday ISO week).
+    let ir_week = compile("w_close = close @ 1w\nentry = close > w_close\nexit = false\n");
+    let mut exec_week = Executor::new(&ir_week).expect("week exec");
+    // 2023-11-17 is Friday (1_700_179_200), +2d Sunday, +3d Monday (new week).
+    let fri = 1_700_179_200 + 12 * 3600;
+    let sun = fri + 2 * 86_400;
+    let mon = fri + 3 * 86_400;
+
+    exec_week
+        .step(Bar::new(fri, 100.0, 101.0, 99.0, 101.0, 10.0))
+        .unwrap();
+    assert!(binding_num(&exec_week, &ir_week, "w_close").is_nan());
+    exec_week
+        .step(Bar::new(sun, 101.0, 105.0, 100.0, 104.5, 10.0))
+        .unwrap();
+    assert!(binding_num(&exec_week, &ir_week, "w_close").is_nan());
+    exec_week
+        .step(Bar::new(mon, 105.0, 106.0, 104.0, 105.5, 10.0))
+        .unwrap();
+    assert_eq!(binding_num(&exec_week, &ir_week, "w_close"), 104.5);
+}
+
+#[test]
+fn state_events_while_guards_and_short_position_pnl() {
+    let src = "\
+state s_enter:
+    init = 1.0
+    reset = enter
+state s_exit_cb:
+    init = 0.0
+state s_short:
+    init = 0.0
+state s_flat:
+    init = 0.0
+state s_cond:
+    init = 0.0
+on exit:
+    s_exit_cb = s_exit_cb + 10.0
+while short:
+    s_short = s_short + 1.0
+    s_enter = s_enter + 5.0
+while flat:
+    s_flat = s_flat + 1.0
+while close > 100.0:
+    s_cond = s_cond + 1.0
+is_short = position.side == \"short\"
+cur_pnl = position.pnl
+entry = s_enter > 0.0 and s_exit_cb >= 0.0 and s_short >= 0.0 and s_flat >= 0.0 and s_cond >= 0.0
+exit = is_short and cur_pnl >= 5.0
+";
+    let ir = compile(src);
+    let mut exec = Executor::new(&ir).expect("exec");
+
+    let flat = PositionView::default();
+    let short_open = PositionView {
+        side: PositionSide::Short,
+        entry_price: 105.0,
+        bars_held: 1,
+        pnl: 105.0 - 102.0,
+    };
+    let short_profit = PositionView {
+        side: PositionSide::Short,
+        entry_price: 105.0,
+        bars_held: 2,
+        pnl: 105.0 - 98.0,
+    };
+
+    // Bar 0 (flat, close=101 > 100): `while flat` and `while close > 100` run.
+    exec.step_with_context(Bar::new(60, 100.0, 102.0, 99.0, 101.0, 10.0), flat, &[])
+        .unwrap();
+    assert_eq!(exec.state_value("s_flat"), Some(NodeVal::Num(1.0)));
+    assert_eq!(exec.state_value("s_cond"), Some(NodeVal::Num(1.0)));
+    assert_eq!(exec.state_value("s_short"), Some(NodeVal::Num(0.0)));
+    assert_eq!(exec.state_value("s_enter"), Some(NodeVal::Num(1.0)));
+
+    // Bar 1 (enter short, close=102 > 100): `reset = enter` resets `s_enter` to 1.0, then `while short` adds 5.0 -> 6.0.
+    let out1 = exec
+        .step_with_context(
+            Bar::new(120, 104.0, 105.0, 101.0, 102.0, 10.0),
+            short_open,
+            &[],
+        )
+        .unwrap();
+    assert_eq!(binding_bool(&exec, &ir, "is_short"), TriBool::True);
+    assert_eq!(binding_num(&exec, &ir, "cur_pnl"), 3.0);
+    assert_eq!(out1.exit_signal, 0);
+    assert_eq!(exec.state_value("s_enter"), Some(NodeVal::Num(6.0)));
+    assert_eq!(exec.state_value("s_short"), Some(NodeVal::Num(1.0)));
+    assert_eq!(exec.state_value("s_flat"), Some(NodeVal::Num(1.0)));
+    assert_eq!(exec.state_value("s_cond"), Some(NodeVal::Num(2.0)));
+
+    // Bar 2 (short, close=98 <= 100): short PnL = 7.0 >= 5.0 -> exit_signal = 1; `while close > 100` paused.
+    let out2 = exec
+        .step_with_context(
+            Bar::new(180, 102.0, 103.0, 97.0, 98.0, 10.0),
+            short_profit,
+            &[],
+        )
+        .unwrap();
+    assert_eq!(binding_num(&exec, &ir, "cur_pnl"), 7.0);
+    assert_eq!(out2.exit_signal, 1);
+    assert_eq!(exec.state_value("s_enter"), Some(NodeVal::Num(11.0)));
+    assert_eq!(exec.state_value("s_short"), Some(NodeVal::Num(2.0)));
+    assert_eq!(exec.state_value("s_cond"), Some(NodeVal::Num(2.0)));
+    assert_eq!(exec.state_value("s_exit_cb"), Some(NodeVal::Num(0.0)));
+
+    // Bar 3 (exit back to flat, close=99): `on exit:` fires (+10.0), `while flat` fires (+1.0).
+    exec.step_with_context(Bar::new(240, 98.0, 100.0, 97.0, 99.0, 10.0), flat, &[])
+        .unwrap();
+    assert_eq!(exec.state_value("s_exit_cb"), Some(NodeVal::Num(10.0)));
+    assert_eq!(exec.state_value("s_flat"), Some(NodeVal::Num(2.0)));
+    assert_eq!(exec.state_value("s_short"), Some(NodeVal::Num(2.0)));
+}
+
+#[test]
+fn phase5_state_def_and_higher_tf_fixes_end_to_end() {
+    // Part 1: self-referencing reset, `def` reading `state` across epochs,
+    // and higher-TF expression inside `on enter:` block (`dp = high @ 1d`).
+    let src = "\
+state k:
+    init = 0.0
+    reset = k >= 2.0
+state dp:
+    init = 0.0
+def add_k(x) = k + x
+before_k = add_k(10.0)
+on true:
+    k = k + 1.0
+on enter:
+    dp = high @ 1d
+after_k = add_k(10.0)
+entry = before_k >= 0.0 and after_k >= 0.0 and dp >= 0.0
+exit = false
+";
+    let ir = compile(src);
+    let mut exec = Executor::new(&ir).expect("exec");
+
+    let d0 = 1_700_006_400 + 9 * 3600;
+    let d1 = d0 + 86_400;
+    let flat = PositionView::default();
+    let long = PositionView {
+        side: PositionSide::Long,
+        entry_price: 100.0,
+        bars_held: 1,
+        pnl: 0.0,
+    };
+
+    // Bar 0 (d0, flat): k starts at 0.0 -> before_k = 10.0 -> on true sets k = 1.0 -> after_k = 11.0.
+    exec.step_with_context(Bar::new(d0, 100.0, 105.0, 99.0, 100.0, 10.0), flat, &[])
+        .unwrap();
+    assert_eq!(binding_num(&exec, &ir, "before_k"), 10.0);
+    assert_eq!(binding_num(&exec, &ir, "after_k"), 11.0);
+    assert_eq!(exec.state_value("dp"), Some(NodeVal::Num(0.0)));
+
+    // Bar 1 (d0, flat): k=1.0 -> reset `k >= 2.0` is false -> before_k=11.0 -> k=2.0 -> after_k=12.0.
+    exec.step_with_context(
+        Bar::new(d0 + 60, 100.0, 107.0, 99.0, 106.0, 10.0),
+        flat,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(binding_num(&exec, &ir, "before_k"), 11.0);
+    assert_eq!(binding_num(&exec, &ir, "after_k"), 12.0);
+
+    // Bar 2 (d1, enter long): k=2.0 -> reset `k >= 2.0` resets k=0.0 -> before_k=10.0 -> on true sets k=1.0 -> after_k=11.0.
+    // Completed day0 high was 107.0, assigned into `dp` on `on enter:`.
+    exec.step_with_context(Bar::new(d1, 100.0, 101.0, 93.0, 94.0, 10.0), long, &[])
+        .unwrap();
+    assert_eq!(binding_num(&exec, &ir, "before_k"), 10.0);
+    assert_eq!(binding_num(&exec, &ir, "after_k"), 11.0);
+    assert_eq!(exec.state_value("dp"), Some(NodeVal::Num(107.0)));
+
+    // Part 2: `state` variables named `entry` and `exit` drive `BarOutput`.
+    let src_state_outputs = "\
+state entry:
+    init = false
+state exit:
+    init = false
+on close > 105.0:
+    entry = true
+on close < 95.0:
+    exit = true
+";
+    let ir_out = compile(src_state_outputs);
+    let mut exec_out = Executor::new(&ir_out).expect("exec_out");
+    let o0 = exec_out
+        .step(Bar::new(d0, 100.0, 101.0, 99.0, 100.0, 10.0))
+        .unwrap();
+    assert_eq!(o0.entry, TriBool::False);
+    assert_eq!(o0.exit, TriBool::False);
+    let o1 = exec_out
+        .step(Bar::new(d0 + 60, 100.0, 107.0, 99.0, 106.0, 10.0))
+        .unwrap();
+    assert_eq!(o1.entry, TriBool::True);
+    assert_eq!(o1.exit, TriBool::False);
+    let o2 = exec_out
+        .step(Bar::new(d1, 100.0, 101.0, 93.0, 94.0, 10.0))
+        .unwrap();
+    assert_eq!(o2.entry, TriBool::True);
+    assert_eq!(o2.exit, TriBool::True);
+}
+
+#[test]
+fn phase5_error_paths_monotonicity_invalid_sym_bar_and_align() {
+    let ir = compile("spy_c = symbol(\"SPY\").close @ 1d\nentry = close > spy_c\nexit = false\n");
+    let mut exec = Executor::new(&ir).expect("exec");
+
+    let b0 = Bar::new(1_700_000_060, 100.0, 101.0, 99.0, 100.5, 10.0);
+    let s0 = Some(Bar::new(1_700_000_060, 200.0, 201.0, 199.0, 200.5, 20.0));
+    exec.step_with_context(b0, PositionView::default(), &[s0])
+        .unwrap();
+    let snap_before = format!("{:?}", exec.snapshot());
+
+    // Non-monotonic timestamp in `step_with_context` leaves state untouched.
+    let backwards = Bar::new(1_700_000_000, 100.0, 101.0, 99.0, 100.5, 10.0);
+    assert_eq!(
+        exec.step_with_context(backwards, PositionView::default(), &[s0]),
+        Err(ExecError::NonMonotonicTimestamp {
+            prev: 1_700_000_060,
+            cur: 1_700_000_000,
+        })
+    );
+    assert_eq!(format!("{:?}", exec.snapshot()), snap_before);
+
+    // Invalid secondary `sym_bar` (`high < low`) leaves state untouched.
+    let b1 = Bar::new(1_700_000_120, 100.0, 101.0, 99.0, 100.5, 10.0);
+    let bad_sym = Some(Bar::new(1_700_000_120, 200.0, 198.0, 199.0, 200.0, 20.0));
+    assert!(matches!(
+        exec.step_with_context(b1, PositionView::default(), &[bad_sym]),
+        Err(ExecError::InvalidBar(_))
+    ));
+    assert_eq!(format!("{:?}", exec.snapshot()), snap_before);
+
+    // `align_symbol_bars` rejects non-monotonic secondary symbol timestamps.
+    let primary = [b0, b1];
+    let bad_sym_series = [
+        Bar::new(1_700_000_060, 200.0, 201.0, 199.0, 200.5, 20.0),
+        Bar::new(1_700_000_000, 200.0, 201.0, 199.0, 200.5, 20.0),
+    ];
+    assert_eq!(
+        align_symbol_bars(&primary, &bad_sym_series),
+        Err(ExecError::NonMonotonicTimestamp {
+            prev: 1_700_000_060,
+            cur: 1_700_000_000,
+        })
+    );
+}
