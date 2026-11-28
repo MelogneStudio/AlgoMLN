@@ -645,9 +645,19 @@ impl Parser {
         let mut end_span = colon_span;
 
         loop {
-            self.skip_err_tokens();
             self.stmt_has_error = false;
             self.saw_err_token_in_stmt = false;
+            if matches!(
+                self.tokens.get(self.pos).map(|t| &t.kind),
+                Some(TokenKind::Err)
+            ) {
+                let span = self.tokens[self.pos].span;
+                end_span = end_span.join(span);
+                self.recover_to_stmt_end();
+                self.skip_indented_block();
+                continue;
+            }
+            self.skip_err_tokens();
             match self.peek_kind().clone() {
                 TokenKind::Ded => {
                     self.bump();
@@ -853,9 +863,19 @@ impl Parser {
         self.bump(); // `IND`
         let mut body = Vec::new();
         loop {
-            self.skip_err_tokens();
             self.stmt_has_error = false;
             self.saw_err_token_in_stmt = false;
+            if matches!(
+                self.tokens.get(self.pos).map(|t| &t.kind),
+                Some(TokenKind::Err)
+            ) {
+                let span = self.tokens[self.pos].span;
+                self.recover_to_stmt_end();
+                self.skip_indented_block();
+                body.push(Stmt::Error(span));
+                continue;
+            }
+            self.skip_err_tokens();
             match self.peek_kind().clone() {
                 TokenKind::Ded => {
                     self.bump();
@@ -2005,5 +2025,16 @@ while close > open:
         );
         assert_parse_err("on enter\n    a = 1", "E0100");
         assert_parse_err("while long:\n    state x:\n        init = 1", "E0100");
+    }
+
+    #[test]
+    fn p62_state_and_assign_blocks_handle_leading_err_token_cleanly() {
+        let state_out = parse("state peak:\n    init = 0\n    % foo");
+        let codes_state: Vec<&str> = state_out.diags.iter().map(|d| d.code).collect();
+        assert_eq!(codes_state, vec!["E0001"], "got {:?}", state_out.diags);
+
+        let on_out = parse("on enter:\n    % foo\n    peak = close");
+        let codes_on: Vec<&str> = on_out.diags.iter().map(|d| d.code).collect();
+        assert_eq!(codes_on, vec!["E0001"], "got {:?}", on_out.diags);
     }
 }
