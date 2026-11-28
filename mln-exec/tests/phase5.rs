@@ -814,3 +814,27 @@ fn higher_tf_position_view_uses_completed_bucket_last_pos() {
     assert_eq!(binding_num(&resumed, &ir, "d_held"), 5.0);
     assert_eq!(out_resumed.entry, TriBool::True);
 }
+
+#[test]
+fn run_chunk_with_context_reports_expected_total_symbol_count_mismatch() {
+    let ir = compile("spy_c = symbol(\"SPY\").close\nentry = close > spy_c\nexit = false\n");
+    let mut exec = Executor::new(&ir).expect("exec");
+    let bars = [
+        Bar::new(1_700_000_000, 100.0, 101.0, 99.0, 100.5, 10.0),
+        Bar::new(1_700_000_060, 100.5, 101.5, 99.5, 101.0, 10.0),
+        Bar::new(1_700_000_120, 101.0, 102.0, 100.0, 101.5, 10.0),
+    ];
+    let positions = vec![PositionView::default(); bars.len()];
+    let bad_symbols = vec![None; 2];
+    let mut out = Vec::new();
+    let err = exec
+        .run_chunk_with_context_into(&bars, &positions, &bad_symbols, &mut out)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        ExecError::SymbolCountMismatch {
+            expected: 3,
+            got: 2,
+        }
+    );
+}

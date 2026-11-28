@@ -494,9 +494,13 @@ impl Executor {
             return Err(ExecError::LengthMismatch);
         }
         let sym_count = self.symbol_states.len();
-        if symbols_flat.len() != bars.len().saturating_mul(sym_count) {
+        let expected_total = bars
+            .len()
+            .checked_mul(sym_count)
+            .ok_or(ExecError::LengthMismatch)?;
+        if symbols_flat.len() != expected_total {
             return Err(ExecError::SymbolCountMismatch {
-                expected: sym_count,
+                expected: expected_total,
                 got: symbols_flat.len(),
             });
         }
