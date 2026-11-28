@@ -33,6 +33,11 @@ pub const PHASE2_CODES: &[ErrorCodeInfo] = &[
         summary: "missing entry or exit output",
     },
     ErrorCodeInfo {
+        code: "E0230",
+        phase: 2,
+        summary: "invalid state assignment target",
+    },
+    ErrorCodeInfo {
         code: "W0201",
         phase: 2,
         summary: "unused name",

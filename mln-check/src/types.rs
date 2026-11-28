@@ -67,6 +67,10 @@ pub enum Ty {
     Dec,
     Tf,
     Str,
+    /// Built-in `position` execution context object (`position.side`, etc.).
+    Position,
+    /// Secondary symbol namespace returned by `symbol("NAME")`.
+    Symbol,
     /// Poison type propagated from Phase 1 `Error` nodes or earlier check errors.
     Error,
 }
@@ -79,6 +83,8 @@ impl fmt::Display for Ty {
             Ty::Dec => f.write_str("Dec"),
             Ty::Tf => f.write_str("Tf"),
             Ty::Str => f.write_str("Str"),
+            Ty::Position => f.write_str("Position"),
+            Ty::Symbol => f.write_str("Symbol"),
             Ty::Error => f.write_str("<error>"),
         }
     }
@@ -158,7 +164,7 @@ pub struct CheckedExpr {
     pub span: Span,
 }
 
-/// Checked statement in a program or `def` instance.
+/// Checked statement in a program or block body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckedStmt {
     Assign {
@@ -170,7 +176,48 @@ pub enum CheckedStmt {
         name: String,
         span: Span,
     },
+    State {
+        name: String,
+        init: CheckedExpr,
+        reset: Option<CheckedStateReset>,
+        span: Span,
+    },
+    On {
+        event: CheckedEvent,
+        body: Vec<CheckedStmt>,
+        span: Span,
+    },
+    While {
+        guard: CheckedGuard,
+        body: Vec<CheckedStmt>,
+        span: Span,
+    },
     Error(Span),
+}
+
+/// Checked reset specification on a `state` variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckedStateReset {
+    Enter,
+    Exit,
+    Expr(CheckedExpr),
+}
+
+/// Checked event trigger on an `on` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckedEvent {
+    Enter,
+    Exit,
+    Expr(CheckedExpr),
+}
+
+/// Checked guard condition on a `while` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckedGuard {
+    Long,
+    Short,
+    Flat,
+    Expr(CheckedExpr),
 }
 
 /// A per-call-site instantiation of a `def` helper (gets its own state instance).

@@ -54,6 +54,7 @@ Stable error and warning codes for the LangMelogne (`.mln`) compiler. A code's m
 - **E0203** — Shadowing a builtin. A user variable, `def`, or parameter has the same name as a built-in series or operator.
 - **E0210** — Recursive `def`. A `def` function calls itself directly or indirectly.
 - **E0220** — Missing required output. A program must define both `entry` and `exit`.
+- **E0230** — Invalid state assignment target. Only variables declared via `state` can be reassigned inside `on` or `while` blocks.
 - **W0201** — Unused name. A defined variable or `def` helper is never referenced by `entry`, `exit`, or another used definition.
 - **E0300** — Type mismatch. Operand or output types are incompatible (for example, `entry` is not `Bool`, `close and 1`, or `1d + 1`).
 - **E0301** — Wrong call arity. A function call has too few or too many arguments, or attempts to call a non-function.

@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use mln_lang::{Arg, CmpOp, Def, Diagnostic, Expr, Program, Severity, Span, Stmt};
+use mln_lang::{
+    Arg, CmpOp, Def, Diagnostic, EventSpec, Expr, GuardSpec, Program, Severity, Span, StateReset,
+    Stmt,
+};
 use mln_std::{tier1_registry, OpRegistry, OpSpec, ParamTy, ReturnTy};
 
 use crate::const_eval::{fold_and, fold_binary, fold_compare_pair, fold_not, fold_or, fold_unary};
 use crate::types::{
-    CheckConfig, CheckedExpr, CheckedProgram, CheckedStmt, Clock, ConstVal, DefInstance,
-    OutputWarmup, Tf, Ty, WarmupReport,
+    CheckConfig, CheckedEvent, CheckedExpr, CheckedGuard, CheckedProgram, CheckedStateReset,
+    CheckedStmt, Clock, ConstVal, DefInstance, OutputWarmup, Tf, Ty, WarmupReport,
 };
 
 const BUILTIN_SERIES: &[&str] = &["open", "high", "low", "close", "volume"];
@@ -78,6 +81,7 @@ struct Checker<'a> {
     defs: HashMap<String, DefEntry<'a>>,
     declared_top: HashMap<String, Span>,
     globals: HashMap<String, Binding>,
+    state_vars: HashSet<String>,
     scopes: Vec<HashMap<String, Binding>>,
     local_declared: Vec<HashMap<String, Span>>,
     checked_stmts: Vec<CheckedStmt>,
@@ -98,6 +102,7 @@ impl<'a> Checker<'a> {
             defs: HashMap::new(),
             declared_top: HashMap::new(),
             globals: HashMap::new(),
+            state_vars: HashSet::new(),
             scopes: Vec::new(),
             local_declared: Vec::new(),
             checked_stmts: Vec::new(),
@@ -110,7 +115,9 @@ impl<'a> Checker<'a> {
     }
 
     fn is_builtin(&self, name: &str) -> bool {
-        BUILTIN_SERIES.contains(&name) || self.registry.get(name).is_some()
+        BUILTIN_SERIES.contains(&name)
+            || matches!(name, "position" | "symbol")
+            || self.registry.get(name).is_some()
     }
 
     fn emit_error(&mut self, code: &'static str, msg: impl Into<String>, span: Span) {
@@ -135,6 +142,12 @@ impl<'a> Checker<'a> {
                         .entry(name.name.clone())
                         .or_insert(name.span);
                 }
+                Stmt::State(st) => {
+                    self.declared_top
+                        .entry(st.name.name.clone())
+                        .or_insert(st.name.span);
+                }
+                Stmt::On(_) | Stmt::While(_) => {}
                 Stmt::Def(d) => {
                     let assigned_earlier = self.declared_top.contains_key(&d.name.name);
                     self.declared_top
@@ -255,7 +268,15 @@ impl<'a> Checker<'a> {
         for stmt in &self.program.stmts {
             match stmt {
                 Stmt::Assign { name, value, span } => {
-                    let expr = self.check_expr(value, ambient, Some(&name.name));
+                    let mut expr = self.check_expr(value, ambient, Some(&name.name));
+                    if matches!(expr.ty, Ty::Position | Ty::Symbol) {
+                        self.emit_error(
+                            "E0300",
+                            format!("values of type `{}` cannot be assigned directly", expr.ty),
+                            expr.span,
+                        );
+                        expr = self.err_expr(expr.span);
+                    }
                     let used = matches!(name.name.as_str(), "entry" | "exit");
                     if self.is_builtin(&name.name) {
                         self.emit_error(
@@ -291,6 +312,138 @@ impl<'a> Checker<'a> {
                         name: name.name.clone(),
                         expr,
                         span: *span,
+                    });
+                }
+                Stmt::State(st) => {
+                    let mut init = self.check_expr(&st.init, ambient, Some(&st.name.name));
+                    let state_ty = match init.ty {
+                        Ty::Num | Ty::Dec => Ty::Num,
+                        Ty::Bool => Ty::Bool,
+                        Ty::Error => Ty::Error,
+                        other => {
+                            self.emit_error(
+                                "E0300",
+                                format!(
+                                    "state variable `{}` must be numeric or Bool, found {other}",
+                                    st.name.name
+                                ),
+                                init.span,
+                            );
+                            init = self.err_expr(init.span);
+                            Ty::Error
+                        }
+                    };
+                    let reset = st.reset.as_ref().map(|r| match r {
+                        mln_lang::StateReset::Enter => CheckedStateReset::Enter,
+                        mln_lang::StateReset::Exit => CheckedStateReset::Exit,
+                        mln_lang::StateReset::Expr(e) => {
+                            let re = self.check_expr(e, ambient, Some(&st.name.name));
+                            if re.ty != Ty::Bool && re.ty != Ty::Error {
+                                self.emit_error(
+                                    "E0300",
+                                    format!(
+                                        "state `reset` condition must be Bool, found {}",
+                                        re.ty
+                                    ),
+                                    re.span,
+                                );
+                            }
+                            CheckedStateReset::Expr(re)
+                        }
+                    });
+                    if self.is_builtin(&st.name.name) {
+                        self.emit_error(
+                            "E0203",
+                            format!("cannot shadow built-in `{}`", st.name.name),
+                            st.name.span,
+                        );
+                    } else if self.globals.contains_key(&st.name.name)
+                        || self
+                            .defs
+                            .get(&st.name.name)
+                            .is_some_and(|e| e.def.span.start < st.name.span.start)
+                    {
+                        self.emit_error(
+                            "E0201",
+                            format!("redefinition of `{}`", st.name.name),
+                            st.name.span,
+                        );
+                    } else {
+                        let clock = match init.clock {
+                            Clock::Tf(tf) => Clock::Tf(tf),
+                            Clock::Constant => Clock::Tf(ambient),
+                        };
+                        self.globals.insert(
+                            st.name.name.clone(),
+                            Binding {
+                                ty: state_ty,
+                                clock,
+                                const_val: None,
+                                warmups: init.warmups.clone(),
+                                span: st.name.span,
+                                used: false,
+                            },
+                        );
+                        self.state_vars.insert(st.name.name.clone());
+                    }
+                    checked_stmts.push(CheckedStmt::State {
+                        name: st.name.name.clone(),
+                        init,
+                        reset,
+                        span: st.span,
+                    });
+                }
+                Stmt::On(on_blk) => {
+                    let event = match &on_blk.event {
+                        EventSpec::Enter => CheckedEvent::Enter,
+                        EventSpec::Exit => CheckedEvent::Exit,
+                        EventSpec::Expr(e) => {
+                            let ce = self.check_expr(e, ambient, None);
+                            if ce.ty != Ty::Bool && ce.ty != Ty::Error {
+                                self.emit_error(
+                                    "E0300",
+                                    format!(
+                                        "`on` trigger expression must be Bool, found {}",
+                                        ce.ty
+                                    ),
+                                    ce.span,
+                                );
+                            }
+                            CheckedEvent::Expr(ce)
+                        }
+                    };
+                    let body = self.check_state_block_body(&on_blk.body, ambient);
+                    checked_stmts.push(CheckedStmt::On {
+                        event,
+                        body,
+                        span: on_blk.span,
+                    });
+                }
+                Stmt::While(while_blk) => {
+                    let guard = match &while_blk.guard {
+                        GuardSpec::Long => CheckedGuard::Long,
+                        GuardSpec::Short => CheckedGuard::Short,
+                        GuardSpec::Flat => CheckedGuard::Flat,
+                        GuardSpec::Expr(e) => {
+                            let ce = self.check_expr(e, ambient, None);
+                            if ce.ty != Ty::Bool && ce.ty != Ty::Error {
+                                self.emit_error(
+                                    "E0300",
+                                    format!(
+                                        "`while` guard expression must be Bool, found {}",
+                                        ce.ty
+                                    ),
+                                    ce.span,
+                                );
+                            }
+                            CheckedGuard::Expr(ce)
+                        }
+                    };
+                    let body = self.check_state_block_body(&while_blk.body, ambient);
+                    checked_stmts.push(CheckedStmt::While {
+                        guard,
+                        body,
+                        span: while_blk.span,
                     });
                 }
                 Stmt::Def(d) => {
@@ -508,6 +661,78 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn check_state_block_body(&mut self, body: &'a [Stmt], ambient: Tf) -> Vec<CheckedStmt> {
+        let mut checked = Vec::with_capacity(body.len());
+        for stmt in body {
+            match stmt {
+                Stmt::Assign { name, value, span } => {
+                    let mut expr = self.check_expr(value, ambient, None);
+                    if self.state_vars.contains(&name.name) {
+                        if let Some(target_binding) = self.globals.get(&name.name) {
+                            let target_ty = target_binding.ty;
+                            let ok = matches!(
+                                (target_ty, expr.ty),
+                                (Ty::Num, Ty::Num | Ty::Dec)
+                                    | (Ty::Bool, Ty::Bool)
+                                    | (Ty::Error, _)
+                                    | (_, Ty::Error)
+                            );
+                            if !ok {
+                                self.emit_error(
+                                    "E0300",
+                                    format!(
+                                        "cannot assign {} to state variable `{}` of type {target_ty}",
+                                        expr.ty, name.name
+                                    ),
+                                    expr.span,
+                                );
+                                expr = self.err_expr(expr.span);
+                            }
+                        }
+                    } else if self.globals.contains_key(&name.name)
+                        || self.defs.contains_key(&name.name)
+                        || self.is_builtin(&name.name)
+                    {
+                        self.emit_error(
+                            "E0230",
+                            format!(
+                                "assignment target `{}` in on/while block must be a declared state variable",
+                                name.name
+                            ),
+                            name.span,
+                        );
+                    } else if self.declared_top.contains_key(&name.name) {
+                        self.emit_error(
+                            "E0202",
+                            format!("use of `{}` before declaration", name.name),
+                            name.span,
+                        );
+                    } else {
+                        self.emit_error(
+                            "E0200",
+                            format!("unknown state variable `{}`", name.name),
+                            name.span,
+                        );
+                    }
+                    checked.push(CheckedStmt::Assign {
+                        name: name.name.clone(),
+                        expr,
+                        span: *span,
+                    });
+                }
+                Stmt::Error(span) => {
+                    self.has_parse_error = true;
+                    checked.push(CheckedStmt::Error(*span));
+                }
+                _ => {
+                    let span = stmt.span();
+                    checked.push(CheckedStmt::Error(span));
+                }
+            }
+        }
+        checked
+    }
+
     fn err_expr(&self, span: Span) -> CheckedExpr {
         CheckedExpr {
             ty: Ty::Error,
@@ -600,6 +825,15 @@ impl<'a> Checker<'a> {
                         span: id.span,
                     };
                 }
+                if id.name == "position" {
+                    return CheckedExpr {
+                        ty: Ty::Position,
+                        clock: Clock::Tf(ambient),
+                        const_val: None,
+                        warmups: BTreeMap::new(),
+                        span: id.span,
+                    };
+                }
                 if BUILTIN_SERIES.contains(&id.name.as_str()) {
                     return CheckedExpr {
                         ty: Ty::Num,
@@ -609,7 +843,10 @@ impl<'a> Checker<'a> {
                         span: id.span,
                     };
                 }
-                if self.defs.contains_key(&id.name) || self.registry.get(&id.name).is_some() {
+                if id.name == "symbol"
+                    || self.defs.contains_key(&id.name)
+                    || self.registry.get(&id.name).is_some()
+                {
                     self.emit_error(
                         "E0300",
                         format!("function `{}` must be called with `(...)`", id.name),
@@ -930,14 +1167,59 @@ impl<'a> Checker<'a> {
             }
             Expr::Attr { base, name, span } => {
                 let cb = self.check_expr(base, ambient, self_assign_target);
-                if cb.ty != Ty::Error {
-                    self.emit_error(
-                        "E0300",
-                        format!("attribute `.{}` is not supported on {}", name.name, cb.ty),
-                        *span,
-                    );
+                match cb.ty {
+                    Ty::Error => self.err_expr(*span),
+                    Ty::Position => {
+                        let ty = match name.name.as_str() {
+                            "side" => Ty::Str,
+                            "entry_price" | "bars_held" | "pnl" => Ty::Num,
+                            _ => {
+                                self.emit_error(
+                                    "E0300",
+                                    format!("unknown `position` attribute `.{}`", name.name),
+                                    *span,
+                                );
+                                return self.err_expr(*span);
+                            }
+                        };
+                        CheckedExpr {
+                            ty,
+                            clock: cb.clock,
+                            const_val: None,
+                            warmups: BTreeMap::new(),
+                            span: *span,
+                        }
+                    }
+                    Ty::Symbol => {
+                        let ty = match name.name.as_str() {
+                            "open" | "high" | "low" | "close" | "volume" => Ty::Num,
+                            "stale" => Ty::Bool,
+                            _ => {
+                                self.emit_error(
+                                    "E0300",
+                                    format!("unknown `symbol` attribute `.{}`", name.name),
+                                    *span,
+                                );
+                                return self.err_expr(*span);
+                            }
+                        };
+                        CheckedExpr {
+                            ty,
+                            clock: cb.clock,
+                            const_val: None,
+                            warmups: BTreeMap::new(),
+                            span: *span,
+                        }
+                    }
+                    _ => {
+                        self.emit_error(
+                            "E0300",
+                            format!("attribute `.{}` is not supported on {}", name.name, cb.ty),
+                            *span,
+                        );
+                        self.err_expr(*span)
+                    }
                 }
-                self.err_expr(*span)
             }
             Expr::At { base, tf, span } => {
                 let target_tf = Tf::from(*tf);
@@ -953,6 +1235,10 @@ impl<'a> Checker<'a> {
                 }
                 let cb = self.check_expr(base, target_tf, self_assign_target);
                 if cb.ty == Ty::Error {
+                    return self.err_expr(*span);
+                }
+                if matches!(cb.ty, Ty::Position | Ty::Symbol) {
+                    self.emit_error("E0300", format!("cannot apply `@` to `{}`", cb.ty), *span);
                     return self.err_expr(*span);
                 }
                 match cb.clock {
@@ -1008,7 +1294,44 @@ impl<'a> Checker<'a> {
             return self.err_expr(span);
         };
 
-        if let Some(op) = self.registry.get(&id.name).copied() {
+        if id.name == "symbol" {
+            let Some(bound) = self.bind_call_args(
+                "symbol",
+                &[("name", false)],
+                args,
+                span,
+                ambient,
+                self_assign_target,
+            ) else {
+                return self.err_expr(span);
+            };
+            let arg_expr = bound[0].expect("required symbol name");
+            let ce = self.check_expr(arg_expr, ambient, self_assign_target);
+            if ce.ty == Ty::Error {
+                return self.err_expr(span);
+            }
+            return match (&ce.ty, &ce.const_val) {
+                (Ty::Str, Some(ConstVal::Str(sym))) if !sym.is_empty() => CheckedExpr {
+                    ty: Ty::Symbol,
+                    clock: Clock::Tf(ambient),
+                    const_val: None,
+                    warmups: BTreeMap::new(),
+                    span,
+                },
+                (Ty::Str, Some(ConstVal::Str(_))) => {
+                    self.emit_error("E0303", "`symbol` name cannot be empty", ce.span);
+                    self.err_expr(span)
+                }
+                _ => {
+                    self.emit_error(
+                        "E0303",
+                        "`symbol` requires a constant non-empty string literal",
+                        ce.span,
+                    );
+                    self.err_expr(span)
+                }
+            };
+        } else if let Some(op) = self.registry.get(&id.name).copied() {
             return self.check_builtin_call(op, args, span, ambient, self_assign_target);
         }
 
@@ -1412,7 +1735,15 @@ impl<'a> Checker<'a> {
         for stmt in &def.body {
             match stmt {
                 Stmt::Assign { name, value, .. } => {
-                    let expr = self.check_expr(value, ambient, Some(&name.name));
+                    let mut expr = self.check_expr(value, ambient, Some(&name.name));
+                    if matches!(expr.ty, Ty::Position | Ty::Symbol) {
+                        self.emit_error(
+                            "E0300",
+                            format!("values of type `{}` cannot be assigned directly", expr.ty),
+                            expr.span,
+                        );
+                        expr = self.err_expr(expr.span);
+                    }
                     let is_builtin = self.is_builtin(&name.name);
                     let already_defined = self
                         .scopes
@@ -1445,11 +1776,19 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                Stmt::Def(_) | Stmt::Error(_) => {}
+                Stmt::Def(_) | Stmt::State(_) | Stmt::On(_) | Stmt::While(_) | Stmt::Error(_) => {}
             }
         }
 
-        let ret = self.check_expr(&def.ret, ambient, None);
+        let mut ret = self.check_expr(&def.ret, ambient, None);
+        if matches!(ret.ty, Ty::Position | Ty::Symbol) {
+            self.emit_error(
+                "E0300",
+                format!("values of type `{}` cannot be returned from `def`", ret.ty),
+                ret.span,
+            );
+            ret = self.err_expr(ret.span);
+        }
 
         let finished_scope = self.scopes.pop().expect("active scope");
         self.local_declared.pop();
@@ -1622,6 +1961,18 @@ fn stmt_has_error(stmt: &Stmt) -> bool {
         Stmt::Error(_) => true,
         Stmt::Assign { value, .. } => expr_has_error(value),
         Stmt::Def(d) => def_has_error(d),
+        Stmt::State(st) => {
+            expr_has_error(&st.init)
+                || matches!(&st.reset, Some(StateReset::Expr(e)) if expr_has_error(e))
+        }
+        Stmt::On(on_blk) => {
+            matches!(&on_blk.event, EventSpec::Expr(e) if expr_has_error(e))
+                || on_blk.body.iter().any(stmt_has_error)
+        }
+        Stmt::While(while_blk) => {
+            matches!(&while_blk.guard, GuardSpec::Expr(e) if expr_has_error(e))
+                || while_blk.body.iter().any(stmt_has_error)
+        }
     }
 }
 

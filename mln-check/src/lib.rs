@@ -11,6 +11,6 @@ pub mod types;
 pub use checker::{check, check_default, check_with_base, CheckOutput};
 pub use error_codes::PHASE2_CODES;
 pub use types::{
-    CheckConfig, CheckedExpr, CheckedProgram, CheckedStmt, Clock, ConstVal, DefInstance,
-    OutputWarmup, Tf, Ty, WarmupReport,
+    CheckConfig, CheckedEvent, CheckedExpr, CheckedGuard, CheckedProgram, CheckedStateReset,
+    CheckedStmt, Clock, ConstVal, DefInstance, OutputWarmup, Tf, Ty, WarmupReport,
 };
