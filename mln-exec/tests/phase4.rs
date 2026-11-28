@@ -635,6 +635,25 @@ exit = crossunder(s, e)
         assert_eq!(noisy_exec.snapshot(), snap_before);
     }
 
+    // Mid-chunk InvalidBar in run_chunk_into leaves both executor state and `out` untouched.
+    let mixed_chunk = [
+        good_bars[10],
+        good_bars[11],
+        Bar::new(1_700_001_540, 100.0, 99.0, 101.0, 100.0, 10.0), // high < low
+        good_bars[12],
+    ];
+    let len_before = noisy_out.len();
+    let chunk_err = noisy_exec
+        .run_chunk_into(&mixed_chunk, &mut noisy_out)
+        .unwrap_err();
+    assert!(
+        matches!(chunk_err, ExecError::InvalidBar(_)),
+        "unexpected chunk err: {chunk_err:?}"
+    );
+    assert_eq!(noisy_out.len(), len_before);
+    assert_eq!(noisy_exec.bar_count(), 10);
+    assert_eq!(noisy_exec.snapshot(), snap_before);
+
     noisy_out.extend(noisy_exec.run_chunk(&good_bars[10..]).expect("suffix"));
     assert_outputs_and_state_eq(
         &clean_out,

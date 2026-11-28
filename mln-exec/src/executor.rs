@@ -1,4 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use mln_lang::{BinOp, CmpOp, UnOp};
@@ -155,13 +154,19 @@ impl Executor {
 
     /// Appends outputs for `bars` bar-by-bar into `out` (zero allocation when
     /// `out.capacity() - out.len() >= bars.len()`).
+    ///
+    /// Pre-validates every bar before mutating state or appending to `out`, so
+    /// an [`ExecError::InvalidBar`] mid-chunk leaves both `self` and `out` unchanged.
     pub fn run_chunk_into(
         &mut self,
         bars: &[Bar],
         out: &mut Vec<BarOutput>,
     ) -> Result<(), ExecError> {
+        for bar in bars {
+            validate_bar(bar)?;
+        }
         for &bar in bars {
-            out.push(self.step(bar)?);
+            out.push(self.step_inner(bar));
         }
         Ok(())
     }
@@ -1268,8 +1273,32 @@ fn compile_builtin(
     }
 }
 
+struct Fnv1a64(u64);
+
+impl Fnv1a64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0100_0000_01b3;
+
+    fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+}
+
+impl Hasher for Fnv1a64 {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 fn fingerprint_ir(ir: &IrGraph) -> u64 {
-    let mut h = DefaultHasher::new();
+    let mut h = Fnv1a64::new();
     ir.base_clock.hash(&mut h);
     ir.entry.hash(&mut h);
     ir.exit.hash(&mut h);
