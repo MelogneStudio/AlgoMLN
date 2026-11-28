@@ -624,15 +624,47 @@ fn t4_06_constant_time_operators_stay_flat() {
             "entry = linreg_slope(close, 10) > -1e9\nexit = false\n",
             "entry = linreg_slope(close, 10000) > -1e9\nexit = false\n",
         ),
+        (
+            "linreg_intercept",
+            "entry = linreg_intercept(close, 10) > -1e9\nexit = false\n",
+            "entry = linreg_intercept(close, 10000) > -1e9\nexit = false\n",
+        ),
+        (
+            "cov",
+            "entry = cov(high, low, 10) > -1e9\nexit = false\n",
+            "entry = cov(high, low, 10000) > -1e9\nexit = false\n",
+        ),
+        (
+            "wma",
+            "entry = wma(close, 10) > 0.0\nexit = false\n",
+            "entry = wma(close, 10000) > 0.0\nexit = false\n",
+        ),
+        (
+            "highest",
+            "entry = highest(high, 10) > 0.0\nexit = false\n",
+            "entry = highest(high, 10000) > 0.0\nexit = false\n",
+        ),
+        (
+            "lowest",
+            "entry = lowest(low, 10) > 0.0\nexit = false\n",
+            "entry = lowest(low, 10000) > 0.0\nexit = false\n",
+        ),
     ];
+
+    // Enforce the strict 2.0x O(1) wall-clock bound in release builds; allow a looser 4.0x
+    // margin in unoptimized debug builds so OS jitter does not flake while still catching O(n).
+    #[cfg(not(debug_assertions))]
+    let max_ratio = 2.0;
+    #[cfg(debug_assertions)]
+    let max_ratio = 4.0;
 
     for (name, small_src, large_src) in cases {
         let t_small = measure_ns_per_bar(small_src, 10_050, 20_000);
         let t_large = measure_ns_per_bar(large_src, 10_050, 20_000);
         let ratio = t_large / t_small;
         assert!(
-            ratio <= 2.0,
-            "{name}: window 10000 ({t_large:.1} ns/bar) vs window 10 ({t_small:.1} ns/bar), ratio={ratio:.2}x > 2.0x"
+            ratio <= max_ratio,
+            "{name}: window 10000 ({t_large:.1} ns/bar) vs window 10 ({t_small:.1} ns/bar), ratio={ratio:.2}x > {max_ratio:.1}x"
         );
     }
 }
