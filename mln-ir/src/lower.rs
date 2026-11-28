@@ -60,16 +60,8 @@ pub fn lower(
 ) -> Result<IrGraph, IrError> {
     let mut lowerer = Lowerer::new(checked.base_clock, registry);
     lowerer.lower_program(program)?;
-    let entry = lowerer
-        .globals
-        .get("entry")
-        .map(|v| v.node)
-        .ok_or(IrError::MissingOutputs)?;
-    let exit = lowerer
-        .globals
-        .get("exit")
-        .map(|v| v.node)
-        .ok_or(IrError::MissingOutputs)?;
+    let entry = lowerer.resolve_output_node("entry")?;
+    let exit = lowerer.resolve_output_node("exit")?;
     lowerer.graph.entry = entry;
     lowerer.graph.exit = exit;
     Ok(lowerer.graph)
@@ -270,6 +262,16 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.globals.get(name)
+    }
+
+    fn resolve_output_node(&mut self, name: &str) -> Result<NodeId, IrError> {
+        if let Some(v) = self.globals.get(name) {
+            return Ok(v.node);
+        }
+        if let Some(&(sid, ty, clock)) = self.state_vars.get(name) {
+            return Ok(self.intern_node(IrOp::StateRead(sid), Vec::new(), Vec::new(), clock, ty));
+        }
+        Err(IrError::MissingOutputs)
     }
 
     fn intern_const(&mut self, c: IrConst, ty: IrTy) -> IrValue {

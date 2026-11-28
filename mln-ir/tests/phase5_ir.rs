@@ -118,3 +118,36 @@ exit = false
             .any(|step| matches!(step, IrExecStep::EvalNode(id) if *id == blk_node)));
     }
 }
+
+#[test]
+fn state_variables_named_entry_and_exit_lower_to_final_epoch_reads() {
+    let src = "\
+state entry:
+    init = false
+state exit:
+    init = false
+on close > open:
+    entry = true
+while long:
+    exit = close < open
+";
+    let parsed = parse(src);
+    assert!(parsed.diags.is_empty(), "{:?}", parsed.diags);
+    let graph = lower_default(&parsed.program).expect("lower succeeds");
+    assert!(matches!(
+        graph.nodes[graph.entry.0 as usize].op,
+        IrOp::StateRead(sid) if sid == graph.states[0].id
+    ));
+    assert!(matches!(
+        graph.nodes[graph.exit.0 as usize].op,
+        IrOp::StateRead(sid) if sid == graph.states[1].id
+    ));
+    assert!(graph
+        .schedule
+        .iter()
+        .any(|s| matches!(s, IrExecStep::EvalNode(id) if *id == graph.entry)));
+    assert!(graph
+        .schedule
+        .iter()
+        .any(|s| matches!(s, IrExecStep::EvalNode(id) if *id == graph.exit)));
+}
