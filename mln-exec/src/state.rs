@@ -187,12 +187,14 @@ impl SessionCalendar {
         let shifted = ts_secs.saturating_add(self.offset_secs);
         match tf.unit {
             TfUnit::Week => {
+                let n = if tf.n == 0 { 1 } else { tf.n as i64 };
                 let day = shifted.div_euclid(86_400);
                 // 1970-01-01 was Thursday (+3 shifts Monday to index 0).
-                (day + 3).div_euclid(7 * (tf.n as i64))
+                (day + 3).div_euclid(7 * n)
             }
             TfUnit::Minute | TfUnit::Hour | TfUnit::Day => {
-                let tf_secs = (tf.minutes() as i64) * 60;
+                let mins = tf.minutes();
+                let tf_secs = (if mins == 0 { 1 } else { mins } as i64) * 60;
                 shifted.div_euclid(tf_secs)
             }
         }

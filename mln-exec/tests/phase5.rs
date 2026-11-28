@@ -1,9 +1,10 @@
+use mln_check::Tf;
 use mln_exec::{
-    align_symbol_bars, Bar, BarOutput, Executor, NodeVal, PositionSide, PositionTracker,
+    align_symbol_bars, Bar, BarOutput, ExecError, Executor, NodeVal, PositionSide, PositionTracker,
     PositionView, SessionCalendar,
 };
-use mln_ir::{lower_default, IrGraph};
-use mln_lang::parse;
+use mln_ir::{lower_default, IrClock, IrConst, IrGraph, IrOp, IrTy, SeriesField};
+use mln_lang::{parse, CmpOp, TfUnit};
 use mln_std::TriBool;
 
 fn compile(src: &str) -> IrGraph {
@@ -693,4 +694,37 @@ exit = position.side == \"long\" and close < peak * 0.99
     let arb_shift = 123_456_i64;
     let arb_shift_sigs = run_with_shift(arb_shift, SessionCalendar::with_offset(-arb_shift));
     assert_eq!(base_sigs, arb_shift_sigs);
+}
+
+#[test]
+fn zero_tf_is_guarded_in_bucket_and_rejected_by_executor() {
+    let cal = SessionCalendar::utc();
+    let _ = cal.bucket(1_700_000_000, Tf::new(0, TfUnit::Minute));
+    let _ = cal.bucket(1_700_000_000, Tf::new(0, TfUnit::Week));
+
+    let mut ir = IrGraph::new(Tf::new(1, TfUnit::Minute));
+    let zero_node = ir.intern(
+        IrOp::Series(SeriesField::Close),
+        vec![],
+        vec![],
+        IrClock::Tf(Tf::new(0, TfUnit::Minute)),
+        IrTy::Num,
+    );
+    let zero = ir.intern(
+        IrOp::Const(IrConst::Int(0)),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Dec,
+    );
+    let cmp = ir.intern(
+        IrOp::Compare(CmpOp::Gt),
+        vec![zero_node, zero],
+        vec![],
+        IrClock::Tf(Tf::new(0, TfUnit::Minute)),
+        IrTy::Bool,
+    );
+    ir.entry = cmp;
+    ir.exit = cmp;
+    assert!(matches!(Executor::new(&ir), Err(ExecError::InvalidNode(_))));
 }

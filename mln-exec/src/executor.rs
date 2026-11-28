@@ -174,6 +174,12 @@ impl Executor {
             states.push(state);
             vals.push(init_val);
             if let IrClock::Tf(tf) = node.clock {
+                if tf.n == 0 {
+                    return Err(ExecError::InvalidNode(format!(
+                        "zero timeframe `{tf}` on node {}",
+                        node.id
+                    )));
+                }
                 node_is_base.push(false);
                 tf_map.entry(tf).or_default().push(i);
             } else {
