@@ -176,6 +176,13 @@ impl<'a> Lowerer<'a> {
                         IrTy::Bool => IrTy::Bool,
                         _ => return Err(IrError::Unsupported("invalid state variable type")),
                     };
+                    let sid = StateId(self.graph.states.len() as u32);
+                    let clock = match init.clock {
+                        IrClock::Tf(tf) => IrClock::Tf(tf),
+                        _ => IrClock::Base,
+                    };
+                    self.state_vars
+                        .insert(st.name.name.clone(), (sid, state_ty, clock));
                     let reset = match &st.reset {
                         None => IrReset::None,
                         Some(StateReset::Enter) => IrReset::Enter,
@@ -185,11 +192,6 @@ impl<'a> Lowerer<'a> {
                             IrReset::Expr(r.node)
                         }
                     };
-                    let sid = StateId(self.graph.states.len() as u32);
-                    let clock = match init.clock {
-                        IrClock::Tf(tf) => IrClock::Tf(tf),
-                        _ => IrClock::Base,
-                    };
                     self.graph.states.push(IrStateVar {
                         id: sid,
                         name: st.name.name.clone(),
@@ -197,8 +199,6 @@ impl<'a> Lowerer<'a> {
                         init: init.node,
                         reset,
                     });
-                    self.state_vars
-                        .insert(st.name.name.clone(), (sid, state_ty, clock));
                     self.graph.schedule.push(IrExecStep::ResetState(sid));
                     self.state_epoch += 1;
                 }

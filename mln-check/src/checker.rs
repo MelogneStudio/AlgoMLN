@@ -333,24 +333,6 @@ impl<'a> Checker<'a> {
                             Ty::Error
                         }
                     };
-                    let reset = st.reset.as_ref().map(|r| match r {
-                        mln_lang::StateReset::Enter => CheckedStateReset::Enter,
-                        mln_lang::StateReset::Exit => CheckedStateReset::Exit,
-                        mln_lang::StateReset::Expr(e) => {
-                            let re = self.check_expr(e, ambient, Some(&st.name.name));
-                            if re.ty != Ty::Bool && re.ty != Ty::Error {
-                                self.emit_error(
-                                    "E0300",
-                                    format!(
-                                        "state `reset` condition must be Bool, found {}",
-                                        re.ty
-                                    ),
-                                    re.span,
-                                );
-                            }
-                            CheckedStateReset::Expr(re)
-                        }
-                    });
                     if self.is_builtin(&st.name.name) {
                         self.emit_error(
                             "E0203",
@@ -386,6 +368,24 @@ impl<'a> Checker<'a> {
                         );
                         self.state_vars.insert(st.name.name.clone());
                     }
+                    let reset = st.reset.as_ref().map(|r| match r {
+                        mln_lang::StateReset::Enter => CheckedStateReset::Enter,
+                        mln_lang::StateReset::Exit => CheckedStateReset::Exit,
+                        mln_lang::StateReset::Expr(e) => {
+                            let re = self.check_expr(e, ambient, None);
+                            if re.ty != Ty::Bool && re.ty != Ty::Error {
+                                self.emit_error(
+                                    "E0300",
+                                    format!(
+                                        "state `reset` condition must be Bool, found {}",
+                                        re.ty
+                                    ),
+                                    re.span,
+                                );
+                            }
+                            CheckedStateReset::Expr(re)
+                        }
+                    });
                     checked_stmts.push(CheckedStmt::State {
                         name: st.name.name.clone(),
                         init,

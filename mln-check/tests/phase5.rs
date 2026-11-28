@@ -145,3 +145,19 @@ exit = close < open
     assert_has_code(&out, "W0201");
     assert_ne!(Ty::Position, Ty::Symbol);
 }
+
+#[test]
+fn self_referencing_state_reset_is_allowed() {
+    let src = "\
+state count:
+    init = 0
+    reset = count >= 10
+on close > open:
+    count = count + 1
+entry = count > 0
+exit = false
+";
+    let out = run_check(src);
+    assert!(out.is_ok(), "unexpected errors: {:?}", out.diags);
+    assert!(out.diags.is_empty(), "unexpected diags: {:?}", out.diags);
+}

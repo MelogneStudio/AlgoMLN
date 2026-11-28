@@ -1,4 +1,4 @@
-use mln_ir::{dump_ir, lower_default, IrClock, IrExecStep, IrOp};
+use mln_ir::{dump_ir, lower_default, IrClock, IrExecStep, IrOp, IrReset};
 use mln_lang::parse;
 
 #[test]
@@ -58,4 +58,25 @@ exit = close < after * 0.95 or position.bars_held >= 5
     assert!(dumped.contains("block b1 while long:"));
     assert!(dumped.contains("symbol(\"INFY\", close)"));
     assert!(dumped.contains("position(side)"));
+}
+
+#[test]
+fn self_referencing_state_reset_lowers_to_expr_with_state_read() {
+    let src = "\
+state count:
+    init = 0
+    reset = count >= 10
+on close > open:
+    count = count + 1
+entry = count > 0
+exit = false
+";
+    let parsed = parse(src);
+    assert!(parsed.diags.is_empty(), "{:?}", parsed.diags);
+    let graph = lower_default(&parsed.program).expect("lower succeeds");
+    assert!(matches!(graph.states[0].reset, IrReset::Expr(_)));
+    assert!(graph
+        .nodes
+        .iter()
+        .any(|n| matches!(n.op, IrOp::StateRead(id) if id == graph.states[0].id)));
 }
