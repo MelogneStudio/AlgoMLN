@@ -7,5 +7,8 @@ pub mod ir;
 pub mod lower;
 
 pub use dump::dump_ir;
-pub use ir::{IrClock, IrConst, IrGraph, IrNode, IrOp, IrTy, NodeId, SeriesField};
+pub use ir::{
+    IrClock, IrConst, IrExecStep, IrGraph, IrNode, IrOp, IrReset, IrStateBlock, IrStateVar,
+    IrTrigger, IrTy, NodeId, PositionField, SeriesField, StateId, SymbolField,
+};
 pub use lower::{lower, lower_default, IrError};

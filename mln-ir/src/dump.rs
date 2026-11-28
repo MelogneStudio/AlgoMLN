@@ -2,13 +2,50 @@ use std::fmt::Write;
 
 use mln_lang::{BinOp, UnOp};
 
-use crate::ir::{IrClock, IrConst, IrGraph, IrNode, IrOp};
+use crate::ir::{IrClock, IrConst, IrGraph, IrNode, IrOp, IrReset, IrTrigger};
 
 /// Formats an [`IrGraph`] into its canonical deterministic text dump.
 pub fn dump_ir(graph: &IrGraph) -> String {
     let mut out = String::new();
+    for st in &graph.states {
+        let _ = write!(out, "{} ({}) = state_init({}", st.id, st.name, st.init);
+        match st.reset {
+            IrReset::None => out.push(')'),
+            IrReset::Enter => out.push_str(", reset=enter)"),
+            IrReset::Exit => out.push_str(", reset=exit)"),
+            IrReset::Expr(id) => {
+                let _ = write!(out, ", reset={id})");
+            }
+        }
+        out.push('\n');
+    }
     for node in &graph.nodes {
-        dump_node(node, &mut out);
+        dump_node(node, &graph.symbols, &mut out);
+        out.push('\n');
+    }
+    for (idx, blk) in graph.state_blocks.iter().enumerate() {
+        out.push_str("block ");
+        let _ = write!(out, "b{idx} ");
+        match blk.trigger {
+            IrTrigger::OnEnter => out.push_str("on enter"),
+            IrTrigger::OnExit => out.push_str("on exit"),
+            IrTrigger::OnExpr(id) => {
+                let _ = write!(out, "on {id}");
+            }
+            IrTrigger::WhileLong => out.push_str("while long"),
+            IrTrigger::WhileShort => out.push_str("while short"),
+            IrTrigger::WhileFlat => out.push_str("while flat"),
+            IrTrigger::WhileExpr(id) => {
+                let _ = write!(out, "while {id}");
+            }
+        }
+        out.push_str(": ");
+        for (i, (sid, val_id)) in blk.updates.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "{sid} = {val_id}");
+        }
         out.push('\n');
     }
     let _ = writeln!(out, "entry = {}", graph.entry);
@@ -16,11 +53,21 @@ pub fn dump_ir(graph: &IrGraph) -> String {
     out
 }
 
-fn dump_node(node: &IrNode, out: &mut String) {
+fn dump_node(node: &IrNode, symbols: &[String], out: &mut String) {
     let _ = write!(out, "{} = ", node.id);
     match &node.op {
         IrOp::Series(field) => {
             let _ = write!(out, "series({})", field.as_str());
+        }
+        IrOp::Position(field) => {
+            let _ = write!(out, "position({})", field.as_str());
+        }
+        IrOp::SymbolSeries { sym_idx, field } => {
+            let name = symbols.get(*sym_idx as usize).map_or("?", String::as_str);
+            let _ = write!(out, "symbol({name:?}, {})", field.as_str());
+        }
+        IrOp::StateRead(sid) => {
+            let _ = write!(out, "state({sid})");
         }
         IrOp::Const(c) => {
             out.push_str("const(");

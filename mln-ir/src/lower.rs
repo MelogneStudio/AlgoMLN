@@ -5,11 +5,16 @@ use mln_check::const_eval::{
     fold_and, fold_binary, fold_compare_pair, fold_not, fold_or, fold_unary,
 };
 use mln_check::{check, CheckConfig, CheckedProgram, ConstVal, Tf};
-use mln_lang::{Arg, CmpOp, Def, Diagnostic, Expr, Program, Stmt};
+use mln_lang::{
+    Arg, CmpOp, Def, Diagnostic, EventSpec, Expr, GuardSpec, Program, StateReset, Stmt,
+};
 use mln_std::{tier1_registry, OpRegistry, OpSpec, ParamTy};
 use rust_decimal::Decimal;
 
-use crate::ir::{IrClock, IrConst, IrGraph, IrOp, IrTy, NodeId, SeriesField};
+use crate::ir::{
+    IrClock, IrConst, IrExecStep, IrGraph, IrOp, IrReset, IrStateBlock, IrStateVar, IrTrigger,
+    IrTy, NodeId, PositionField, SeriesField, StateId, SymbolField,
+};
 
 /// Error returned if IR lowering is given an invalid program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +91,10 @@ struct Lowerer<'a> {
     graph: IrGraph,
     defs: HashMap<String, &'a Def>,
     globals: HashMap<String, IrValue>,
+    state_vars: HashMap<String, (StateId, IrTy, IrClock)>,
+    state_epoch: u32,
+    active_block: Option<usize>,
+    active_block_nodes: Vec<NodeId>,
     locals: Vec<HashMap<String, IrValue>>,
     active_defs: Vec<String>,
     call_depth: usize,
@@ -99,6 +108,10 @@ impl<'a> Lowerer<'a> {
             graph: IrGraph::new(base_clock),
             defs: HashMap::new(),
             globals: HashMap::new(),
+            state_vars: HashMap::new(),
+            state_epoch: 0,
+            active_block: None,
+            active_block_nodes: Vec::new(),
             locals: Vec::new(),
             active_defs: Vec::new(),
             call_depth: 0,
@@ -107,6 +120,42 @@ impl<'a> Lowerer<'a> {
 
     fn clock_from_tf(&self, tf: Tf) -> IrClock {
         IrClock::from_check(mln_check::Clock::Tf(tf), self.base_clock)
+    }
+
+    fn intern_node(
+        &mut self,
+        op: IrOp,
+        inputs: Vec<NodeId>,
+        const_args: Vec<IrConst>,
+        clock: IrClock,
+        ty: IrTy,
+    ) -> NodeId {
+        if matches!(clock, IrClock::Tf(_)) {
+            return self.graph.intern(op, inputs, const_args, clock, ty);
+        }
+        if let Some(bidx) = self.active_block {
+            let scope = (1u64 << 63) | (bidx as u64);
+            let (id, created) = self
+                .graph
+                .intern_scoped(scope, op, inputs, const_args, clock, ty);
+            if created {
+                self.active_block_nodes.push(id);
+            }
+            id
+        } else {
+            let scope = if matches!(op, IrOp::StateRead(_)) {
+                u64::from(self.state_epoch) + 1
+            } else {
+                0
+            };
+            let (id, created) = self
+                .graph
+                .intern_scoped(scope, op, inputs, const_args, clock, ty);
+            if created {
+                self.graph.schedule.push(IrExecStep::EvalNode(id));
+            }
+            id
+        }
     }
 
     fn lower_program(&mut self, program: &'a Program) -> Result<(), IrError> {
@@ -120,9 +169,100 @@ impl<'a> Lowerer<'a> {
                     self.graph.bindings.push((name.name.clone(), val.node));
                     self.globals.insert(name.name.clone(), val);
                 }
+                Stmt::State(st) => {
+                    let init = self.lower_expr(&st.init, self.base_clock)?;
+                    let state_ty = match init.ty {
+                        IrTy::Num | IrTy::Dec => IrTy::Num,
+                        IrTy::Bool => IrTy::Bool,
+                        _ => return Err(IrError::Unsupported("invalid state variable type")),
+                    };
+                    let reset = match &st.reset {
+                        None => IrReset::None,
+                        Some(StateReset::Enter) => IrReset::Enter,
+                        Some(StateReset::Exit) => IrReset::Exit,
+                        Some(StateReset::Expr(e)) => {
+                            let r = self.lower_expr(e, self.base_clock)?;
+                            IrReset::Expr(r.node)
+                        }
+                    };
+                    let sid = StateId(self.graph.states.len() as u32);
+                    let clock = match init.clock {
+                        IrClock::Tf(tf) => IrClock::Tf(tf),
+                        _ => IrClock::Base,
+                    };
+                    self.graph.states.push(IrStateVar {
+                        id: sid,
+                        name: st.name.name.clone(),
+                        ty: state_ty,
+                        init: init.node,
+                        reset,
+                    });
+                    self.state_vars
+                        .insert(st.name.name.clone(), (sid, state_ty, clock));
+                    self.graph.schedule.push(IrExecStep::ResetState(sid));
+                    self.state_epoch += 1;
+                }
+                Stmt::On(on_blk) => {
+                    let trigger = match &on_blk.event {
+                        EventSpec::Enter => IrTrigger::OnEnter,
+                        EventSpec::Exit => IrTrigger::OnExit,
+                        EventSpec::Expr(e) => {
+                            let cond = self.lower_expr(e, self.base_clock)?;
+                            IrTrigger::OnExpr(cond.node)
+                        }
+                    };
+                    self.lower_state_block(trigger, &on_blk.body)?;
+                }
+                Stmt::While(while_blk) => {
+                    let trigger = match &while_blk.guard {
+                        GuardSpec::Long => IrTrigger::WhileLong,
+                        GuardSpec::Short => IrTrigger::WhileShort,
+                        GuardSpec::Flat => IrTrigger::WhileFlat,
+                        GuardSpec::Expr(e) => {
+                            let cond = self.lower_expr(e, self.base_clock)?;
+                            IrTrigger::WhileExpr(cond.node)
+                        }
+                    };
+                    self.lower_state_block(trigger, &while_blk.body)?;
+                }
                 Stmt::Error(_) => return Err(IrError::Unsupported("parse error node")),
             }
         }
+        Ok(())
+    }
+
+    fn lower_state_block(&mut self, trigger: IrTrigger, body: &'a [Stmt]) -> Result<(), IrError> {
+        let bidx = self.graph.state_blocks.len();
+        self.active_block = Some(bidx);
+        self.active_block_nodes.clear();
+
+        let mut updates = Vec::with_capacity(body.len());
+        let res = (|| -> Result<(), IrError> {
+            for stmt in body {
+                let Stmt::Assign { name, value, .. } = stmt else {
+                    return Err(IrError::Unsupported("non-assign statement in state block"));
+                };
+                let &(sid, _, _) = self
+                    .state_vars
+                    .get(&name.name)
+                    .ok_or(IrError::Unsupported("unknown state variable"))?;
+                let val = self.lower_expr(value, self.base_clock)?;
+                updates.push((sid, val.node));
+            }
+            Ok(())
+        })();
+
+        self.active_block = None;
+        let nodes = std::mem::take(&mut self.active_block_nodes);
+        res?;
+
+        self.graph.state_blocks.push(IrStateBlock {
+            trigger,
+            nodes,
+            updates,
+        });
+        self.graph.schedule.push(IrExecStep::ExecBlock(bidx));
+        self.state_epoch += 1;
         Ok(())
     }
 
@@ -167,9 +307,29 @@ impl<'a> Lowerer<'a> {
                 if let Some(v) = self.lookup(&id.name) {
                     return Ok(v.clone());
                 }
+                if let Some(&(sid, ty, clock)) = self.state_vars.get(&id.name) {
+                    let eff_clock = if matches!(clock, IrClock::Tf(_)) {
+                        clock
+                    } else {
+                        self.clock_from_tf(ambient)
+                    };
+                    let node = self.intern_node(
+                        IrOp::StateRead(sid),
+                        Vec::new(),
+                        Vec::new(),
+                        eff_clock,
+                        ty,
+                    );
+                    return Ok(IrValue {
+                        node,
+                        ty,
+                        clock: eff_clock,
+                        const_val: None,
+                    });
+                }
                 if let Some(field) = SeriesField::from_name(&id.name) {
                     let clock = self.clock_from_tf(ambient);
-                    let node = self.graph.intern(
+                    let node = self.intern_node(
                         IrOp::Series(field),
                         Vec::new(),
                         Vec::new(),
@@ -190,7 +350,7 @@ impl<'a> Lowerer<'a> {
                 if let Some(folded) = inner.const_val.as_ref().and_then(|c| fold_ir_unary(*op, c)) {
                     return Ok(self.intern_const(folded, IrTy::Dec));
                 }
-                let node = self.graph.intern(
+                let node = self.intern_node(
                     IrOp::Unary(*op),
                     vec![inner.node],
                     Vec::new(),
@@ -218,7 +378,7 @@ impl<'a> Lowerer<'a> {
                     IrTy::Num
                 };
                 let clock = combine_ir_clocks(&[vl.clock, vr.clock], self.base_clock);
-                let node = self.graph.intern(
+                let node = self.intern_node(
                     IrOp::Binary(*op),
                     vec![vl.node, vr.node],
                     Vec::new(),
@@ -262,7 +422,7 @@ impl<'a> Lowerer<'a> {
                 }
                 let first_pair = cmp_pairs[0];
                 let mut acc_clock = first_pair.3;
-                let mut acc_id = self.graph.intern(
+                let mut acc_id = self.intern_node(
                     IrOp::Compare(first_pair.2),
                     vec![first_pair.0, first_pair.1],
                     Vec::new(),
@@ -270,7 +430,7 @@ impl<'a> Lowerer<'a> {
                     IrTy::Bool,
                 );
                 for &(lhs_id, rhs_id, op, cclock) in &cmp_pairs[1..] {
-                    let cmp_id = self.graph.intern(
+                    let cmp_id = self.intern_node(
                         IrOp::Compare(op),
                         vec![lhs_id, rhs_id],
                         Vec::new(),
@@ -278,7 +438,7 @@ impl<'a> Lowerer<'a> {
                         IrTy::Bool,
                     );
                     acc_clock = combine_ir_clocks(&[acc_clock, cclock], self.base_clock);
-                    acc_id = self.graph.intern(
+                    acc_id = self.intern_node(
                         IrOp::And,
                         vec![acc_id, cmp_id],
                         Vec::new(),
@@ -299,8 +459,7 @@ impl<'a> Lowerer<'a> {
                     return Ok(self.intern_const(folded, IrTy::Bool));
                 }
                 let node =
-                    self.graph
-                        .intern(IrOp::Not, vec![v.node], Vec::new(), v.clock, IrTy::Bool);
+                    self.intern_node(IrOp::Not, vec![v.node], Vec::new(), v.clock, IrTy::Bool);
                 Ok(IrValue {
                     node,
                     ty: IrTy::Bool,
@@ -325,8 +484,7 @@ impl<'a> Lowerer<'a> {
                 let clock = combine_ir_clocks(&[vl.clock, vr.clock], self.base_clock);
                 let op = if is_and { IrOp::And } else { IrOp::Or };
                 let node =
-                    self.graph
-                        .intern(op, vec![vl.node, vr.node], Vec::new(), clock, IrTy::Bool);
+                    self.intern_node(op, vec![vl.node, vr.node], Vec::new(), clock, IrTy::Bool);
                 Ok(IrValue {
                     node,
                     ty: IrTy::Bool,
@@ -359,7 +517,7 @@ impl<'a> Lowerer<'a> {
                     _ => IrTy::Num,
                 };
                 let clock = combine_ir_clocks(&[vc.clock, vt.clock, vo.clock], self.base_clock);
-                let node = self.graph.intern(
+                let node = self.intern_node(
                     IrOp::IfElse,
                     vec![vc.node, vt.node, vo.node],
                     Vec::new(),
@@ -385,8 +543,7 @@ impl<'a> Lowerer<'a> {
                     return Ok(vb);
                 }
                 let node =
-                    self.graph
-                        .intern(IrOp::Lag(k), vec![vb.node], Vec::new(), vb.clock, vb.ty);
+                    self.intern_node(IrOp::Lag(k), vec![vb.node], Vec::new(), vb.clock, vb.ty);
                 Ok(IrValue {
                     node,
                     ty: vb.ty,
@@ -419,7 +576,8 @@ impl<'a> Lowerer<'a> {
                 })
             }
             Expr::Call { callee, args, .. } => self.lower_call(callee, args, ambient),
-            Expr::Attr { .. } | Expr::Error(_) => Err(IrError::Unsupported("attr or error node")),
+            Expr::Attr { base, name, .. } => self.lower_attr(base, &name.name, ambient),
+            Expr::Error(_) => Err(IrError::Unsupported("error node")),
         }
     }
 
@@ -539,15 +697,75 @@ impl<'a> Lowerer<'a> {
             mln_std::ReturnTy::Num => IrTy::Num,
             mln_std::ReturnTy::Bool => IrTy::Bool,
         };
-        let node = self
-            .graph
-            .intern(IrOp::Builtin(op.name), inputs, const_args, clock, ty);
+        let node = self.intern_node(IrOp::Builtin(op.name), inputs, const_args, clock, ty);
         Ok(IrValue {
             node,
             ty,
             clock,
             const_val: None,
         })
+    }
+
+    fn lower_attr(&mut self, base: &'a Expr, attr: &str, ambient: Tf) -> Result<IrValue, IrError> {
+        match base {
+            Expr::Name(id) if id.name == "position" => {
+                let field = PositionField::from_name(attr)
+                    .ok_or(IrError::Unsupported("unknown position field"))?;
+                let ty = match field {
+                    PositionField::Side => IrTy::Str,
+                    PositionField::EntryPrice | PositionField::BarsHeld | PositionField::Pnl => {
+                        IrTy::Num
+                    }
+                };
+                let clock = self.clock_from_tf(ambient);
+                let node =
+                    self.intern_node(IrOp::Position(field), Vec::new(), Vec::new(), clock, ty);
+                Ok(IrValue {
+                    node,
+                    ty,
+                    clock,
+                    const_val: None,
+                })
+            }
+            Expr::Call { callee, args, .. } => {
+                let Expr::Name(c) = callee.as_ref() else {
+                    return Err(IrError::Unsupported("invalid attribute target"));
+                };
+                if c.name != "symbol" {
+                    return Err(IrError::Unsupported("invalid attribute target"));
+                }
+                let bound = bind_call_args(&["name"], args)?;
+                let arg0 = bound[0].ok_or(IrError::Unsupported("missing symbol name"))?;
+                let Some(IrConst::Str(sym_name)) = self.eval_const_only(arg0)? else {
+                    return Err(IrError::Unsupported("non-const symbol name"));
+                };
+                if sym_name.is_empty() {
+                    return Err(IrError::Unsupported("empty symbol name"));
+                }
+                let field = SymbolField::from_name(attr)
+                    .ok_or(IrError::Unsupported("unknown symbol field"))?;
+                let sym_idx = self.graph.intern_symbol(&sym_name);
+                let ty = match field {
+                    SymbolField::Stale => IrTy::Bool,
+                    _ => IrTy::Num,
+                };
+                let clock = self.clock_from_tf(ambient);
+                let node = self.intern_node(
+                    IrOp::SymbolSeries { sym_idx, field },
+                    Vec::new(),
+                    Vec::new(),
+                    clock,
+                    ty,
+                );
+                Ok(IrValue {
+                    node,
+                    ty,
+                    clock,
+                    const_val: None,
+                })
+            }
+            _ => Err(IrError::Unsupported("invalid attribute target")),
+        }
     }
 
     fn lower_def_call(

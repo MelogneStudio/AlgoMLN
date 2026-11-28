@@ -15,6 +15,82 @@ impl fmt::Display for NodeId {
     }
 }
 
+/// Index of a persistent `state` variable in an [`IrGraph`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StateId(pub u32);
+
+impl fmt::Display for StateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "s{}", self.0)
+    }
+}
+
+/// Fields exposed by the pure `position.*` input context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PositionField {
+    Side,
+    EntryPrice,
+    BarsHeld,
+    Pnl,
+}
+
+impl PositionField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PositionField::Side => "side",
+            PositionField::EntryPrice => "entry_price",
+            PositionField::BarsHeld => "bars_held",
+            PositionField::Pnl => "pnl",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "side" => Some(PositionField::Side),
+            "entry_price" => Some(PositionField::EntryPrice),
+            "bars_held" => Some(PositionField::BarsHeld),
+            "pnl" => Some(PositionField::Pnl),
+            _ => None,
+        }
+    }
+}
+
+/// Fields exposed by secondary symbol inputs (`symbol("NAME").<field>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SymbolField {
+    Open,
+    High,
+    Low,
+    Close,
+    Volume,
+    Stale,
+}
+
+impl SymbolField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SymbolField::Open => "open",
+            SymbolField::High => "high",
+            SymbolField::Low => "low",
+            SymbolField::Close => "close",
+            SymbolField::Volume => "volume",
+            SymbolField::Stale => "stale",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "open" => Some(SymbolField::Open),
+            "high" => Some(SymbolField::High),
+            "low" => Some(SymbolField::Low),
+            "close" => Some(SymbolField::Close),
+            "volume" => Some(SymbolField::Volume),
+            "stale" => Some(SymbolField::Stale),
+            _ => None,
+        }
+    }
+}
+
 /// Built-in market data series field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SeriesField {
@@ -121,6 +197,9 @@ pub enum IrConst {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IrOp {
     Series(SeriesField),
+    Position(PositionField),
+    SymbolSeries { sym_idx: u32, field: SymbolField },
+    StateRead(StateId),
     Const(IrConst),
     Unary(UnOp),
     Binary(BinOp),
@@ -131,6 +210,53 @@ pub enum IrOp {
     IfElse,
     Lag(u64),
     Builtin(&'static str),
+}
+
+/// Reset condition for a lowered persistent `state` variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IrReset {
+    None,
+    Enter,
+    Exit,
+    Expr(NodeId),
+}
+
+/// Lowered persistent `state` variable metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrStateVar {
+    pub id: StateId,
+    pub name: String,
+    pub ty: IrTy,
+    pub init: NodeId,
+    pub reset: IrReset,
+}
+
+/// Trigger condition for a lowered `on` or `while` block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IrTrigger {
+    OnEnter,
+    OnExit,
+    OnExpr(NodeId),
+    WhileLong,
+    WhileShort,
+    WhileFlat,
+    WhileExpr(NodeId),
+}
+
+/// Conditional state mutation block lowered from `on` or `while`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrStateBlock {
+    pub trigger: IrTrigger,
+    pub nodes: Vec<NodeId>,
+    pub updates: Vec<(StateId, NodeId)>,
+}
+
+/// Top-level execution schedule step inside an [`IrGraph`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IrExecStep {
+    EvalNode(NodeId),
+    ResetState(StateId),
+    ExecBlock(usize),
 }
 
 /// A single node in the stream DAG.
@@ -146,6 +272,7 @@ pub struct IrNode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CseKey {
+    scope: u64,
     op: IrOp,
     inputs: Vec<NodeId>,
     const_args: Vec<IrConst>,
@@ -158,6 +285,10 @@ struct CseKey {
 pub struct IrGraph {
     pub base_clock: Tf,
     pub nodes: Vec<IrNode>,
+    pub symbols: Vec<String>,
+    pub states: Vec<IrStateVar>,
+    pub state_blocks: Vec<IrStateBlock>,
+    pub schedule: Vec<IrExecStep>,
     pub entry: NodeId,
     pub exit: NodeId,
     /// Named top-level bindings (excluding `def`s) in source order for inspection/testing.
@@ -171,6 +302,10 @@ impl IrGraph {
         Self {
             base_clock,
             nodes: Vec::new(),
+            symbols: Vec::new(),
+            states: Vec::new(),
+            state_blocks: Vec::new(),
+            schedule: Vec::new(),
             entry: NodeId(0),
             exit: NodeId(0),
             bindings: Vec::new(),
@@ -178,8 +313,8 @@ impl IrGraph {
         }
     }
 
-    /// Interns a node in the DAG, returning an existing [`NodeId`] if an identical
-    /// `(op, inputs, const_args, clock, ty)` node already exists.
+    /// Interns a top-level node in the DAG, returning an existing [`NodeId`] if an
+    /// identical `(op, inputs, const_args, clock, ty)` node already exists at global scope.
     pub fn intern(
         &mut self,
         op: IrOp,
@@ -188,7 +323,38 @@ impl IrGraph {
         clock: IrClock,
         ty: IrTy,
     ) -> NodeId {
+        let (id, created) = self.intern_with_scope(0, op, inputs, const_args, clock, ty);
+        if created {
+            self.schedule.push(IrExecStep::EvalNode(id));
+        }
+        id
+    }
+
+    /// Interns a node under an explicit CSE `scope` tag without automatically scheduling it
+    /// at the top level. Returns `(id, newly_created)`.
+    pub fn intern_scoped(
+        &mut self,
+        scope: u64,
+        op: IrOp,
+        inputs: Vec<NodeId>,
+        const_args: Vec<IrConst>,
+        clock: IrClock,
+        ty: IrTy,
+    ) -> (NodeId, bool) {
+        self.intern_with_scope(scope, op, inputs, const_args, clock, ty)
+    }
+
+    fn intern_with_scope(
+        &mut self,
+        scope: u64,
+        op: IrOp,
+        inputs: Vec<NodeId>,
+        const_args: Vec<IrConst>,
+        clock: IrClock,
+        ty: IrTy,
+    ) -> (NodeId, bool) {
         let key = CseKey {
+            scope,
             op: op.clone(),
             inputs: inputs.clone(),
             const_args: const_args.clone(),
@@ -196,7 +362,7 @@ impl IrGraph {
             ty,
         };
         if let Some(&id) = self.cse.get(&key) {
-            return id;
+            return (id, false);
         }
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(IrNode {
@@ -208,7 +374,17 @@ impl IrGraph {
             ty,
         });
         self.cse.insert(key, id);
-        id
+        (id, true)
+    }
+
+    /// Interns a secondary symbol name and returns its dense index.
+    pub fn intern_symbol(&mut self, sym: &str) -> u32 {
+        if let Some(idx) = self.symbols.iter().position(|s| s == sym) {
+            return idx as u32;
+        }
+        let idx = self.symbols.len() as u32;
+        self.symbols.push(sym.to_string());
+        idx
     }
 }
 
