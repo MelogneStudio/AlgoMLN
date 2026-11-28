@@ -1,0 +1,11 @@
+{
+  "benchmark": "exec_1m_20_ops",
+  "bars": 1000000,
+  "cpu": "11th Gen Intel(R) Core(TM) i5-1145G7 @ 2.60GHz",
+  "cores": 4,
+  "logical_processors": 8,
+  "step_ms": 1204.7,
+  "run_chunk_into_ms": 1185.7,
+  "max_regression_ratio": 1.15,
+  "hard_target_ms": 1500.0
+}
