@@ -161,3 +161,44 @@ exit = false
     assert!(out.is_ok(), "unexpected errors: {:?}", out.diags);
     assert!(out.diags.is_empty(), "unexpected diags: {:?}", out.diags);
 }
+
+#[test]
+fn state_blocks_propagate_warmups_and_check_clock_compatibility() {
+    let warm_src = "\
+state s:
+    init = 0.0
+on close > sma(close, 10):
+    s = ema(close, 50)
+entry = s > 0.0
+exit = false
+";
+    let warm_out = run_check(warm_src);
+    assert!(warm_out.is_ok(), "unexpected errors: {:?}", warm_out.diags);
+    assert_eq!(warm_out.program.warmup.max_base_bars_estimate, 49);
+
+    let guard_src = "\
+state g:
+    init = 0.0
+while ema(close, 21) > 0.0:
+    g = close
+entry = g > 0.0
+exit = false
+";
+    let guard_out = run_check(guard_src);
+    assert!(
+        guard_out.is_ok(),
+        "unexpected errors: {:?}",
+        guard_out.diags
+    );
+    assert_eq!(guard_out.program.warmup.max_base_bars_estimate, 20);
+
+    let clock_err_src = "\
+state daily_peak:
+    init = close @ 1d
+on enter:
+    daily_peak = close
+entry = daily_peak > 0.0
+exit = false
+";
+    assert_has_code(&run_check(clock_err_src), "E0401");
+}

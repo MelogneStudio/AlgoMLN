@@ -394,6 +394,7 @@ impl<'a> Checker<'a> {
                     });
                 }
                 Stmt::On(on_blk) => {
+                    let mut trigger_warmups = BTreeMap::new();
                     let event = match &on_blk.event {
                         EventSpec::Enter => CheckedEvent::Enter,
                         EventSpec::Exit => CheckedEvent::Exit,
@@ -409,10 +410,11 @@ impl<'a> Checker<'a> {
                                     ce.span,
                                 );
                             }
+                            trigger_warmups = ce.warmups.clone();
                             CheckedEvent::Expr(ce)
                         }
                     };
-                    let body = self.check_state_block_body(&on_blk.body, ambient);
+                    let body = self.check_state_block_body(&on_blk.body, ambient, &trigger_warmups);
                     checked_stmts.push(CheckedStmt::On {
                         event,
                         body,
@@ -420,6 +422,7 @@ impl<'a> Checker<'a> {
                     });
                 }
                 Stmt::While(while_blk) => {
+                    let mut guard_warmups = BTreeMap::new();
                     let guard = match &while_blk.guard {
                         GuardSpec::Long => CheckedGuard::Long,
                         GuardSpec::Short => CheckedGuard::Short,
@@ -436,10 +439,12 @@ impl<'a> Checker<'a> {
                                     ce.span,
                                 );
                             }
+                            guard_warmups = ce.warmups.clone();
                             CheckedGuard::Expr(ce)
                         }
                     };
-                    let body = self.check_state_block_body(&while_blk.body, ambient);
+                    let body =
+                        self.check_state_block_body(&while_blk.body, ambient, &guard_warmups);
                     checked_stmts.push(CheckedStmt::While {
                         guard,
                         body,
@@ -661,15 +666,21 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_state_block_body(&mut self, body: &'a [Stmt], ambient: Tf) -> Vec<CheckedStmt> {
+    fn check_state_block_body(
+        &mut self,
+        body: &'a [Stmt],
+        ambient: Tf,
+        block_warmups: &BTreeMap<Tf, u64>,
+    ) -> Vec<CheckedStmt> {
         let mut checked = Vec::with_capacity(body.len());
         for stmt in body {
             match stmt {
                 Stmt::Assign { name, value, span } => {
                     let mut expr = self.check_expr(value, ambient, None);
                     if self.state_vars.contains(&name.name) {
-                        if let Some(target_binding) = self.globals.get(&name.name) {
-                            let target_ty = target_binding.ty;
+                        if let Some((target_ty, target_clock)) =
+                            self.globals.get(&name.name).map(|b| (b.ty, b.clock))
+                        {
                             let ok = matches!(
                                 (target_ty, expr.ty),
                                 (Ty::Num, Ty::Num | Ty::Dec)
@@ -687,6 +698,27 @@ impl<'a> Checker<'a> {
                                     expr.span,
                                 );
                                 expr = self.err_expr(expr.span);
+                            } else if let (Clock::Tf(target_tf), Clock::Tf(expr_tf)) =
+                                (target_clock, expr.clock)
+                            {
+                                if expr_tf.minutes() < target_tf.minutes() {
+                                    self.emit_error(
+                                        "E0401",
+                                        format!(
+                                            "finer clock `{expr_tf}` cannot be assigned to coarser state `{}` ({target_tf})",
+                                            name.name
+                                        ),
+                                        expr.span,
+                                    );
+                                    expr = self.err_expr(expr.span);
+                                }
+                            }
+                            if let Some(target_binding) = self.globals.get_mut(&name.name) {
+                                target_binding.warmups = merge_warmups(&[
+                                    &target_binding.warmups,
+                                    &expr.warmups,
+                                    block_warmups,
+                                ]);
                             }
                         }
                     } else if self.globals.contains_key(&name.name)
