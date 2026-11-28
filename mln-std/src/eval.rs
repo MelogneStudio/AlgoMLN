@@ -484,6 +484,9 @@ pub fn op_corr(x: &[f64], y: &[f64], n: usize) -> Vec<f64> {
             if !wx.iter().all(|v| v.is_finite()) || !wy.iter().all(|v| v.is_finite()) {
                 return f64::NAN;
             }
+            if wx.iter().all(|&v| v == wx[0]) || wy.iter().all(|&v| v == wy[0]) {
+                return f64::NAN;
+            }
             let nf = n as f64;
             let mx = wx.iter().sum::<f64>() / nf;
             let my = wy.iter().sum::<f64>() / nf;
