@@ -619,7 +619,7 @@ impl Executor {
                             }
                             let eval_input = EvalInput {
                                 bar: &completed_primary,
-                                pos: &pos,
+                                pos: &tracker.last_pos,
                                 symbol_states: &tracker.completed_symbols,
                                 state_slots,
                             };
@@ -640,6 +640,7 @@ impl Executor {
                     tracker.current_bucket = Some(bucket);
                 }
                 tracker.primary.accumulate(bar);
+                tracker.last_pos = pos;
                 for (s_idx, sym_bar) in symbols.iter().enumerate() {
                     if let Some(sb) = *sym_bar {
                         tracker.symbols[s_idx].accumulate(sb);

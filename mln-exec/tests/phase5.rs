@@ -775,3 +775,42 @@ fn align_symbol_bars_rejects_non_monotonic_primary_timestamps() {
         }
     );
 }
+
+#[test]
+fn higher_tf_position_view_uses_completed_bucket_last_pos() {
+    let ir = compile("d_held = position.bars_held @ 1d\nentry = d_held >= 5\nexit = false\n");
+    let d0 = 1_700_006_400 + 9 * 3600;
+    let d1 = d0 + 86_400;
+    let b0 = Bar::new(d0, 100.0, 101.0, 99.0, 100.5, 10.0);
+    let b1 = Bar::new(d0 + 60, 100.5, 101.5, 99.5, 101.0, 10.0);
+    let b2 = Bar::new(d1, 101.0, 102.0, 100.0, 101.5, 10.0);
+
+    let p0 = PositionView {
+        side: PositionSide::Long,
+        entry_price: 100.0,
+        bars_held: 2,
+        pnl: 0.5,
+    };
+    let p1 = PositionView {
+        side: PositionSide::Long,
+        entry_price: 100.0,
+        bars_held: 5,
+        pnl: 1.0,
+    };
+    let p2 = PositionView::default();
+
+    let mut exec = Executor::new(&ir).expect("exec");
+    exec.step_with_context(b0, p0, &[]).unwrap();
+    exec.step_with_context(b1, p1, &[]).unwrap();
+    let snap = exec.snapshot();
+    let out = exec.step_with_context(b2, p2, &[]).unwrap();
+    assert_eq!(binding_num(&exec, &ir, "d_held"), 5.0);
+    assert_eq!(out.entry, TriBool::True);
+
+    // Snapshot before bucket rollover preserves `last_pos`.
+    let mut resumed = Executor::new(&ir).expect("resumed");
+    resumed.restore(&snap).unwrap();
+    let out_resumed = resumed.step_with_context(b2, p2, &[]).unwrap();
+    assert_eq!(binding_num(&resumed, &ir, "d_held"), 5.0);
+    assert_eq!(out_resumed.entry, TriBool::True);
+}

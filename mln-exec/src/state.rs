@@ -361,14 +361,31 @@ impl InProgressBar {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) struct TfTracker {
     pub(crate) tf: Tf,
     pub(crate) current_bucket: Option<i64>,
     pub(crate) primary: InProgressBar,
+    pub(crate) last_pos: PositionView,
     pub(crate) symbols: Vec<InProgressBar>,
     pub(crate) completed_symbols: Vec<SymbolState>,
     pub(crate) node_indices: Vec<usize>,
+}
+
+impl PartialEq for TfTracker {
+    fn eq(&self, other: &Self) -> bool {
+        let f_eq = |a: f64, b: f64| (a.is_nan() && b.is_nan()) || a == b;
+        self.tf == other.tf
+            && self.current_bucket == other.current_bucket
+            && self.primary == other.primary
+            && self.last_pos.side == other.last_pos.side
+            && self.last_pos.bars_held == other.last_pos.bars_held
+            && f_eq(self.last_pos.entry_price, other.last_pos.entry_price)
+            && f_eq(self.last_pos.pnl, other.last_pos.pnl)
+            && self.symbols == other.symbols
+            && self.completed_symbols == other.completed_symbols
+            && self.node_indices == other.node_indices
+    }
 }
 
 impl TfTracker {
@@ -377,6 +394,7 @@ impl TfTracker {
             tf,
             current_bucket: None,
             primary: InProgressBar::default(),
+            last_pos: PositionView::default(),
             symbols: vec![InProgressBar::default(); num_symbols],
             completed_symbols: vec![SymbolState::default(); num_symbols],
             node_indices,
