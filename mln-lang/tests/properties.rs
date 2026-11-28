@@ -89,6 +89,31 @@ fn check_stmt_spans(stmt: &Stmt, src: &str) {
             }
             check_expr_spans(&d.ret, span, src);
         }
+        Stmt::State(st) => {
+            assert!(st.name.span.start >= span.start && st.name.span.end <= span.end);
+            check_expr_spans(&st.init, span, src);
+            if let Some(mln_lang::StateReset::Expr(e)) = &st.reset {
+                check_expr_spans(e, span, src);
+            }
+        }
+        Stmt::On(on_blk) => {
+            if let mln_lang::EventSpec::Expr(e) = &on_blk.event {
+                check_expr_spans(e, span, src);
+            }
+            for s in &on_blk.body {
+                assert!(s.span().start >= span.start && s.span().end <= span.end);
+                check_stmt_spans(s, src);
+            }
+        }
+        Stmt::While(while_blk) => {
+            if let mln_lang::GuardSpec::Expr(e) = &while_blk.guard {
+                check_expr_spans(e, span, src);
+            }
+            for s in &while_blk.body {
+                assert!(s.span().start >= span.start && s.span().end <= span.end);
+                check_stmt_spans(s, src);
+            }
+        }
         Stmt::Error(_) => {}
     }
 }

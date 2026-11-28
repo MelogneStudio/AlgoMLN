@@ -1,6 +1,9 @@
 use std::fmt::Write;
 
-use crate::ast::{BinOp, Def, Expr, Program, Stmt, UnOp};
+use crate::ast::{
+    BinOp, Def, EventSpec, Expr, GuardSpec, OnBlock, Program, StateDecl, StateReset, Stmt, UnOp,
+    WhileBlock,
+};
 use crate::lexer::TfUnit;
 
 /// Formats a parsed [`Program`] into its canonical s-expression representation.
@@ -23,8 +26,56 @@ fn dump_stmt(stmt: &Stmt, out: &mut String) {
             out.push(')');
         }
         Stmt::Def(def) => dump_def(def, out),
+        Stmt::State(state) => dump_state(state, out),
+        Stmt::On(on_blk) => dump_on(on_blk, out),
+        Stmt::While(while_blk) => dump_while(while_blk, out),
         Stmt::Error(_) => out.push_str("(error)"),
     }
+}
+
+fn dump_state(state: &StateDecl, out: &mut String) {
+    let _ = write!(out, "(state {} (init ", state.name.name);
+    dump_expr(&state.init, out);
+    out.push(')');
+    if let Some(reset) = &state.reset {
+        out.push_str(" (reset ");
+        match reset {
+            StateReset::Enter => out.push_str("enter"),
+            StateReset::Exit => out.push_str("exit"),
+            StateReset::Expr(e) => dump_expr(e, out),
+        }
+        out.push(')');
+    }
+    out.push(')');
+}
+
+fn dump_on(block: &OnBlock, out: &mut String) {
+    out.push_str("(on ");
+    match &block.event {
+        EventSpec::Enter => out.push_str("enter"),
+        EventSpec::Exit => out.push_str("exit"),
+        EventSpec::Expr(e) => dump_expr(e, out),
+    }
+    for stmt in &block.body {
+        out.push(' ');
+        dump_stmt(stmt, out);
+    }
+    out.push(')');
+}
+
+fn dump_while(block: &WhileBlock, out: &mut String) {
+    out.push_str("(while ");
+    match &block.guard {
+        GuardSpec::Long => out.push_str("long"),
+        GuardSpec::Short => out.push_str("short"),
+        GuardSpec::Flat => out.push_str("flat"),
+        GuardSpec::Expr(e) => dump_expr(e, out),
+    }
+    for stmt in &block.body {
+        out.push(' ');
+        dump_stmt(stmt, out);
+    }
+    out.push(')');
 }
 
 fn dump_def(def: &Def, out: &mut String) {

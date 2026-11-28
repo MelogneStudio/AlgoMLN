@@ -11,7 +11,10 @@ pub mod lexer;
 pub mod parser;
 pub mod span;
 
-pub use ast::{Arg, BinOp, CmpOp, Def, Expr, Ident, Param, Program, Stmt, Timeframe, UnOp};
+pub use ast::{
+    Arg, BinOp, CmpOp, Def, EventSpec, Expr, GuardSpec, Ident, OnBlock, Param, Program, StateDecl,
+    StateReset, Stmt, Timeframe, UnOp, WhileBlock,
+};
 pub use diag::{line_col, render, Diagnostic, Severity};
 pub use dump::dump;
 pub use error_codes::{ErrorCodeInfo, ERROR_CODES};

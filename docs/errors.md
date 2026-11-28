@@ -38,7 +38,7 @@ Stable error and warning codes for the LangMelogne (`.mln`) compiler. A code's m
 - **E0119** — Only assignments allowed in a `def` block. Multi-line `def` bodies may contain only assignments before the final `return`.
 - **E0120** — Nesting too deep. Expression nesting exceeds the maximum depth of 64.
 - **E0130** — `;` is not supported. Put each statement on its own line instead of using semicolons.
-- **E0140** — Block not available in this version. Reserved block keywords (`state`, `on`, `while`, `score`, `portfolio`, `use`) are rejected until their later phase.
+- **E0140** — Block not available in this version. Reserved block keywords (`score`, `portfolio`, `use`) are rejected until their later phase.
 - **E0150** — `return` outside a `def`, or not last. `return` is only valid as the last statement of a `def` block.
 - **E0152** — Expression statement has no effect. Bare expressions are not statements; assign the result to a variable.
 - **E0153** — Invalid assignment target. Only plain variable names can appear on the left-hand side of `=`.

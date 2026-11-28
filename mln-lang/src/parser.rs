@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use crate::ast::{Arg, BinOp, CmpOp, Def, Expr, Ident, Param, Program, Stmt, Timeframe, UnOp};
+use crate::ast::{
+    Arg, BinOp, CmpOp, Def, EventSpec, Expr, GuardSpec, Ident, OnBlock, Param, Program, StateDecl,
+    StateReset, Stmt, Timeframe, UnOp, WhileBlock,
+};
 use crate::diag::{finalize_diagnostics, Diagnostic};
 use crate::lexer::{lex, Kw, Token, TokenKind};
 use crate::span::Span;
@@ -31,10 +34,11 @@ pub fn parse(src: &str) -> ParseOutput {
 }
 
 fn is_block_keyword(word: &str) -> bool {
-    matches!(
-        word,
-        "state" | "on" | "while" | "score" | "portfolio" | "use"
-    )
+    matches!(word, "score" | "portfolio" | "use")
+}
+
+fn is_phase5_block_keyword(word: &str) -> bool {
+    matches!(word, "state" | "on" | "while")
 }
 
 struct Parser {
@@ -242,6 +246,31 @@ impl Parser {
                 );
                 self.recover_to_stmt_end();
                 Stmt::Error(span)
+            }
+            TokenKind::Ident(ref word)
+                if is_phase5_block_keyword(word)
+                    && !matches!(
+                        self.peek_second_kind(),
+                        Some(TokenKind::Eq | TokenKind::Aug(_))
+                    ) =>
+            {
+                if in_def {
+                    let kw_tok = self.bump();
+                    self.emit_stmt_error(Diagnostic::error(
+                        "E0119",
+                        "only assignments are allowed in a `def` block",
+                        kw_tok.span,
+                    ));
+                    self.recover_to_stmt_end();
+                    self.skip_indented_block();
+                    return Stmt::Error(kw_tok.span);
+                }
+                match word.as_str() {
+                    "state" => self.parse_state_block(),
+                    "on" => self.parse_on_block(),
+                    "while" => self.parse_while_block(),
+                    _ => unreachable!(),
+                }
             }
             TokenKind::Ident(ref word)
                 if is_block_keyword(word)
@@ -556,6 +585,324 @@ impl Parser {
                 Stmt::Error(def_span.join(err_span))
             }
         }
+    }
+
+    fn parse_state_block(&mut self) -> Stmt {
+        let kw_span = self.bump().span; // `state`
+        let name = match self.peek_kind().clone() {
+            TokenKind::Ident(s) => {
+                let span = self.bump().span;
+                Ident { name: s, span }
+            }
+            _ => {
+                let err_span = self.current_span();
+                if !self.saw_err_token_in_stmt {
+                    self.emit_stmt_error(Diagnostic::error(
+                        "E0102",
+                        "expected state variable identifier after `state`",
+                        err_span,
+                    ));
+                }
+                self.recover_to_stmt_end();
+                self.skip_indented_block();
+                return Stmt::Error(kw_span.join(err_span));
+            }
+        };
+
+        let colon_span = if matches!(self.peek_kind(), TokenKind::Colon) {
+            self.bump().span
+        } else {
+            let err_span = self.current_span();
+            self.emit_stmt_error(Diagnostic::error(
+                "E0100",
+                "expected `:` after `state` variable name",
+                err_span,
+            ));
+            self.recover_to_stmt_end();
+            self.skip_indented_block();
+            return Stmt::Error(kw_span.join(err_span));
+        };
+
+        self.consume_stmt_end();
+        if self.stmt_has_error {
+            self.skip_indented_block();
+            return Stmt::Error(kw_span.join(colon_span));
+        }
+
+        if !matches!(self.peek_kind(), TokenKind::Ind) {
+            let err_span = self.current_span();
+            self.emit_stmt_error(Diagnostic::error(
+                "E0101",
+                "expected indented body for `state` block",
+                err_span,
+            ));
+            return Stmt::Error(kw_span.join(colon_span));
+        }
+        self.bump(); // `IND`
+
+        let mut init: Option<Expr> = None;
+        let mut reset: Option<StateReset> = None;
+        let mut end_span = colon_span;
+
+        loop {
+            self.skip_err_tokens();
+            self.stmt_has_error = false;
+            self.saw_err_token_in_stmt = false;
+            match self.peek_kind().clone() {
+                TokenKind::Ded => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Nl => {
+                    self.bump();
+                }
+                TokenKind::Ident(ref field)
+                    if (field == "init" || field == "reset")
+                        && matches!(self.peek_second_kind(), Some(TokenKind::Eq)) =>
+                {
+                    let field_tok = self.bump();
+                    let field_name = match field_tok.kind {
+                        TokenKind::Ident(s) => s,
+                        _ => unreachable!(),
+                    };
+                    self.bump(); // `=`
+                    if field_name == "init" {
+                        let expr = self.parse_expr();
+                        end_span = end_span.join(expr.span());
+                        self.consume_stmt_end();
+                        if init.is_some() {
+                            self.emit_stmt_error(Diagnostic::error(
+                                "E0100",
+                                "duplicate `init` clause in `state` block",
+                                field_tok.span,
+                            ));
+                        } else {
+                            init = Some(expr);
+                        }
+                    } else {
+                        let res = match self.peek_kind().clone() {
+                            TokenKind::Ident(ref ev)
+                                if (ev == "enter" || ev == "exit")
+                                    && matches!(
+                                        self.peek_second_kind(),
+                                        Some(TokenKind::Nl | TokenKind::Ded | TokenKind::Eof)
+                                    ) =>
+                            {
+                                let ev_tok = self.bump();
+                                end_span = end_span.join(ev_tok.span);
+                                self.consume_stmt_end();
+                                match ev_tok.kind {
+                                    TokenKind::Ident(ref s) if s == "enter" => StateReset::Enter,
+                                    _ => StateReset::Exit,
+                                }
+                            }
+                            _ => {
+                                let expr = self.parse_expr();
+                                end_span = end_span.join(expr.span());
+                                self.consume_stmt_end();
+                                StateReset::Expr(expr)
+                            }
+                        };
+                        if reset.is_some() {
+                            self.emit_stmt_error(Diagnostic::error(
+                                "E0100",
+                                "duplicate `reset` clause in `state` block",
+                                field_tok.span,
+                            ));
+                        } else {
+                            reset = Some(res);
+                        }
+                    }
+                }
+                _ => {
+                    let bad_span = self.current_span();
+                    end_span = end_span.join(bad_span);
+                    self.emit_stmt_error(Diagnostic::error(
+                        "E0100",
+                        "expected `init = ...` or `reset = ...` in `state` block",
+                        bad_span,
+                    ));
+                    self.recover_to_stmt_end();
+                    self.skip_indented_block();
+                }
+            }
+        }
+
+        let Some(init) = init else {
+            let diag_span = kw_span.join(colon_span);
+            if !self.lex_diag_starts.contains(&diag_span.start)
+                && !self.diags.iter().any(|d| d.span.start == diag_span.start)
+            {
+                self.diags.push(Diagnostic::error(
+                    "E0101",
+                    format!("`state {}` block is missing `init = ...`", name.name),
+                    diag_span,
+                ));
+            }
+            return Stmt::Error(kw_span.join(end_span));
+        };
+
+        Stmt::State(StateDecl {
+            name,
+            init,
+            reset,
+            span: kw_span.join(end_span),
+        })
+    }
+
+    fn parse_on_block(&mut self) -> Stmt {
+        let kw_span = self.bump().span; // `on`
+        let event = match self.peek_kind().clone() {
+            TokenKind::Ident(ref ev)
+                if (ev == "enter" || ev == "exit")
+                    && matches!(self.peek_second_kind(), Some(TokenKind::Colon)) =>
+            {
+                self.bump();
+                if ev == "enter" {
+                    EventSpec::Enter
+                } else {
+                    EventSpec::Exit
+                }
+            }
+            _ => EventSpec::Expr(self.parse_expr()),
+        };
+
+        let Some(colon_span) = self.expect_block_header_colon(kw_span, "`on`") else {
+            return Stmt::Error(kw_span);
+        };
+        let (body, end_span) = self.parse_indented_assign_block(kw_span, colon_span, "`on`");
+        Stmt::On(OnBlock {
+            event,
+            body,
+            span: kw_span.join(end_span),
+        })
+    }
+
+    fn parse_while_block(&mut self) -> Stmt {
+        let kw_span = self.bump().span; // `while`
+        let guard = match self.peek_kind().clone() {
+            TokenKind::Ident(ref g)
+                if (g == "long" || g == "short" || g == "flat")
+                    && matches!(self.peek_second_kind(), Some(TokenKind::Colon)) =>
+            {
+                self.bump();
+                match g.as_str() {
+                    "long" => GuardSpec::Long,
+                    "short" => GuardSpec::Short,
+                    _ => GuardSpec::Flat,
+                }
+            }
+            _ => GuardSpec::Expr(self.parse_expr()),
+        };
+
+        let Some(colon_span) = self.expect_block_header_colon(kw_span, "`while`") else {
+            return Stmt::Error(kw_span);
+        };
+        let (body, end_span) = self.parse_indented_assign_block(kw_span, colon_span, "`while`");
+        Stmt::While(WhileBlock {
+            guard,
+            body,
+            span: kw_span.join(end_span),
+        })
+    }
+
+    fn expect_block_header_colon(&mut self, kw_span: Span, kind: &str) -> Option<Span> {
+        if self.stmt_has_error {
+            self.recover_to_stmt_end();
+            self.skip_indented_block();
+            return None;
+        }
+        let colon_span = if matches!(self.peek_kind(), TokenKind::Colon) {
+            self.bump().span
+        } else {
+            let err_span = self.current_span();
+            self.emit_stmt_error(Diagnostic::error(
+                "E0100",
+                format!("expected `:` after {kind} condition"),
+                err_span,
+            ));
+            self.recover_to_stmt_end();
+            self.skip_indented_block();
+            return None;
+        };
+        self.consume_stmt_end();
+        if self.stmt_has_error {
+            self.skip_indented_block();
+            return None;
+        }
+        if !matches!(self.peek_kind(), TokenKind::Ind) {
+            let err_span = self.current_span();
+            self.emit_stmt_error(Diagnostic::error(
+                "E0101",
+                format!("expected indented body for {kind} block"),
+                err_span,
+            ));
+            let _ = kw_span.join(colon_span);
+            return None;
+        }
+        Some(colon_span)
+    }
+
+    fn parse_indented_assign_block(
+        &mut self,
+        kw_span: Span,
+        colon_span: Span,
+        kind: &str,
+    ) -> (Vec<Stmt>, Span) {
+        self.bump(); // `IND`
+        let mut body = Vec::new();
+        loop {
+            self.skip_err_tokens();
+            self.stmt_has_error = false;
+            self.saw_err_token_in_stmt = false;
+            match self.peek_kind().clone() {
+                TokenKind::Ded => {
+                    self.bump();
+                    break;
+                }
+                TokenKind::Eof => break,
+                TokenKind::Nl => {
+                    self.bump();
+                }
+                TokenKind::Ident(_) if matches!(self.peek_second_kind(), Some(TokenKind::Eq)) => {
+                    let name_tok = self.bump();
+                    let name = match name_tok.kind {
+                        TokenKind::Ident(s) => Ident {
+                            name: s,
+                            span: name_tok.span,
+                        },
+                        _ => unreachable!(),
+                    };
+                    self.bump(); // `=`
+                    let value = self.parse_expr();
+                    self.consume_stmt_end();
+                    let span = name.span.join(value.span());
+                    body.push(Stmt::Assign { name, value, span });
+                }
+                _ => {
+                    let stmt = self.parse_stmt(false);
+                    if !matches!(stmt, Stmt::Error(_)) {
+                        let span = stmt.span();
+                        self.diags.push(Diagnostic::error(
+                            "E0100",
+                            format!(
+                                "only state variable assignments are allowed in a {kind} block"
+                            ),
+                            span,
+                        ));
+                        body.push(Stmt::Error(span));
+                    } else {
+                        body.push(stmt);
+                    }
+                }
+            }
+        }
+        let end_span = body
+            .last()
+            .map(|s| s.span())
+            .unwrap_or_else(|| kw_span.join(colon_span));
+        (body, end_span)
     }
 
     fn parse_params(&mut self) -> Vec<Param> {
@@ -1510,14 +1857,12 @@ mod tests {
 
     #[test]
     fn p48_reserved_block_keywords() {
-        let out = assert_parse_err("on enter:\n    a = 1\nb = 2", "E0140");
+        let out = assert_parse_err("score vol:\n    a = 1\nb = 2", "E0140");
         assert_eq!(dump(&out.program), "(error)\n(assign b 2)");
 
         for src in [
-            "state peak:\n    a = 1",
             "score vol:\n    a = 1",
             "portfolio:\n    a = 1",
-            "while long:\n    a = 1",
             "use plugin 'x'",
         ] {
             assert_parse_err(src, "E0140");
@@ -1528,7 +1873,8 @@ mod tests {
     fn p49_block_keywords_as_variable_names() {
         assert_eq!(parse_dump("state = 1"), "(assign state 1)");
         assert_eq!(parse_dump("on = 2"), "(assign on 2)");
-        assert_eq!(parse_dump("use = 3"), "(assign use 3)");
+        assert_eq!(parse_dump("while = 3"), "(assign while 3)");
+        assert_eq!(parse_dump("use = 4"), "(assign use 4)");
     }
 
     #[test]
@@ -1603,5 +1949,61 @@ mod tests {
         let out = parse("1 = x\nx += 1\nema(close, 5)");
         let codes: Vec<&str> = out.diags.iter().map(|d| d.code).collect();
         assert_eq!(codes, vec!["E0153", "E0154", "E0152"]);
+    }
+
+    #[test]
+    fn p59_state_on_and_while_blocks() {
+        let src = "\
+state peak:
+    init = 0.0
+    reset = exit
+state count:
+    init = 0
+on enter:
+    peak = close
+while long:
+    peak = max(peak, high)
+    count = count + 1
+on close > open:
+    count = count + 1
+while short:
+    count = 0
+while flat:
+    count = 0
+while close > open:
+    count = count
+";
+        assert_eq!(
+            parse_dump(src),
+            "(state peak (init 0) (reset exit))\n\
+             (state count (init 0))\n\
+             (on enter (assign peak close))\n\
+             (while long (assign peak (call max peak high)) (assign count (+ count 1)))\n\
+             (on (cmp close > open) (assign count (+ count 1)))\n\
+             (while short (assign count 0))\n\
+             (while flat (assign count 0))\n\
+             (while (cmp close > open) (assign count count))"
+        );
+    }
+
+    #[test]
+    fn p60_multi_symbol_and_position_expressions_parse() {
+        assert_eq!(
+            parse_dump("a = symbol(\"INFY\").close @ 1d\nb = position.bars_held"),
+            "(assign a (at (attr (call symbol \"INFY\") close) 1d))\n(assign b (attr position bars_held))"
+        );
+    }
+
+    #[test]
+    fn p61_phase5_block_recovery() {
+        assert_parse_err("state peak:\n    reset = exit", "E0101");
+        assert_parse_err("state peak:\n    init = 0\n    init = 1", "E0100");
+        assert_parse_err("state peak:\n    foo = 1", "E0100");
+        assert_parse_err(
+            "def f(x):\n    state s:\n        init = 1\n    return x",
+            "E0119",
+        );
+        assert_parse_err("on enter\n    a = 1", "E0100");
+        assert_parse_err("while long:\n    state x:\n        init = 1", "E0100");
     }
 }

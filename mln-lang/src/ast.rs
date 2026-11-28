@@ -16,7 +16,7 @@ pub struct Program {
     pub stmts: Vec<Stmt>,
 }
 
-/// A statement in a program or `def` body.
+/// A statement in a program or block body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Assign {
@@ -25,6 +25,9 @@ pub enum Stmt {
         span: Span,
     },
     Def(Def),
+    State(StateDecl),
+    On(OnBlock),
+    While(WhileBlock),
     Error(Span),
 }
 
@@ -34,8 +37,61 @@ impl Stmt {
         match self {
             Stmt::Assign { span, .. } | Stmt::Error(span) => *span,
             Stmt::Def(d) => d.span,
+            Stmt::State(s) => s.span,
+            Stmt::On(b) => b.span,
+            Stmt::While(b) => b.span,
         }
     }
+}
+
+/// A persistent state declaration (`state <name>:`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateDecl {
+    pub name: Ident,
+    pub init: Expr,
+    pub reset: Option<StateReset>,
+    pub span: Span,
+}
+
+/// Reset condition for a [`StateDecl`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateReset {
+    Enter,
+    Exit,
+    Expr(Expr),
+}
+
+/// Trigger specification for an `on <event>:` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventSpec {
+    Enter,
+    Exit,
+    Expr(Expr),
+}
+
+/// Guard specification for a `while <guard>:` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardSpec {
+    Long,
+    Short,
+    Flat,
+    Expr(Expr),
+}
+
+/// An event-triggered mutation block (`on <event>:`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnBlock {
+    pub event: EventSpec,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// A guard-active mutation block (`while <guard>:`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhileBlock {
+    pub guard: GuardSpec,
+    pub body: Vec<Stmt>,
+    pub span: Span,
 }
 
 /// A function definition (`def`).
