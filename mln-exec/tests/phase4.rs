@@ -100,7 +100,14 @@ fn assert_exec_matches_oracle(ir: &IrGraph, bars: &[Bar], label: &str) {
                         node.id.0
                     );
                 }
-                (ValueSeries::Str(_), NodeVal::Str(_)) => {}
+                (ValueSeries::Str(v), NodeVal::Str(_)) => {
+                    assert_eq!(
+                        exec.str_value(node.id),
+                        Some(v[bar_idx].as_str()),
+                        "{label} bar {bar_idx} str node {}",
+                        node.id.0
+                    );
+                }
                 other => panic!(
                     "{label} bar {bar_idx} node {} type mismatch: {other:?}",
                     node.id.0
@@ -129,27 +136,33 @@ fn generate_bars_from_spec(
         };
         ts += gap;
 
-        let flat = nan_flags.get(i).copied().unwrap_or(0) & 0x40 != 0;
-        let delta = if flat {
-            0.0
+        let flags = nan_flags.get(i).copied().unwrap_or(0);
+        let flat = flags & 0x40 != 0;
+        let zero_bar = flags & 0x80 != 0;
+        let (open, high, low, close, volume) = if zero_bar {
+            (0.0, 0.0, 0.0, 0.0, 0.0)
         } else {
-            f64::from(steps[i]) * 0.01
-        };
-        let open = price;
-        let close = (price + delta).max(0.5);
-        price = close;
+            let delta = if flat {
+                0.0
+            } else {
+                f64::from(steps[i]) * 0.01
+            };
+            let open = price;
+            let close = (price + delta).max(0.5);
+            price = close;
 
-        let spread = if flat {
-            0.0
-        } else {
-            f64::from(spreads[i] % 200) * 0.01
+            let spread = if flat {
+                0.0
+            } else {
+                f64::from(spreads[i] % 200) * 0.01
+            };
+            let high = open.max(close) + spread;
+            let low = (open.min(close) - spread * 0.5).max(0.1);
+            let volume = if flat { 0.0 } else { f64::from(vols[i]) + 1.0 };
+            (open, high, low, close, volume)
         };
-        let high = open.max(close) + spread;
-        let low = (open.min(close) - spread * 0.5).max(0.1);
-        let volume = if flat { 0.0 } else { f64::from(vols[i]) + 1.0 };
 
         let mut bar = Bar::new(ts, open, high, low, close, volume);
-        let flags = nan_flags.get(i).copied().unwrap_or(0);
         if flags & 0x3f == 1 {
             bar.close = f64::NAN;
         } else if flags & 0x3f == 2 {
@@ -198,48 +211,76 @@ fn arb_expr_program() -> impl Strategy<Value = String> {
         Just("volume".to_string()),
     ];
 
-    let op1 = (series_atom, 2usize..=12).prop_map(|(s, w)| {
+    let op_pool = (series_atom.clone(), series_atom, 2usize..=12).prop_map(|(s1, s2, w)| {
         vec![
-            format!("sma({s}, {w})"),
-            format!("ema({s}, {w})"),
-            format!("rma({s}, {w})"),
-            format!("wma({s}, {w})"),
-            format!("sum({s}, {w})"),
-            format!("std({s}, {w})"),
-            format!("var({s}, {w})"),
-            format!("highest({s}, {w})"),
-            format!("lowest({s}, {w})"),
-            format!("rsi({s}, {w})"),
-            format!("diff({s}, 1)"),
-            format!("pct_change({s}, 1)"),
-            format!("percentile_rank({s}, {w})"),
-            format!("linreg_slope({s}, {w})"),
-            format!("linreg_intercept({s}, {w})"),
+            format!("sma({s1}, {w})"),
+            format!("ema({s1}, {w})"),
+            format!("rma({s1}, {w})"),
+            format!("wma({s1}, {w})"),
+            format!("sum({s1}, {w})"),
+            format!("mean({s1}, {w})"),
+            format!("std({s1}, {w})"),
+            format!("var({s1}, {w})"),
+            format!("highest({s1}, {w})"),
+            format!("lowest({s1}, {w})"),
+            format!("rsi({s1}, {w})"),
+            format!("diff({s1}, 1)"),
+            format!("pct_change({s1}, 1)"),
+            format!("percentile_rank({s1}, {w})"),
+            format!("linreg_slope({s1}, {w})"),
+            format!("linreg_intercept({s1}, {w})"),
+            "tr(high, low, close)".to_string(),
             format!("atr(high, low, close, {w})"),
             format!("corr(close, volume, {w})"),
             format!("cov(high, low, {w})"),
-            format!("cumsum(diff({s}, 1))"),
+            format!("cumsum(diff({s1}, 1))"),
+            format!("log(abs({s1}) + 1.0)"),
+            format!("exp(clamp(diff({s1}, 1) / max(abs({s1}), 1.0), -2.0, 2.0))"),
+            format!("min({s1}, {s2})"),
+            format!("mod({s1}, 5.0)"),
+            format!("clamp({s1}, low, high)"),
         ]
     });
 
-    (op1, 0usize..19, 0usize..19, 1usize..=4).prop_map(|(cands, i1, i2, lag_k)| {
-        let e1 = &cands[i1 % cands.len()];
-        let e2 = &cands[i2 % cands.len()];
-        format!(
-            "def rel_spread(x, y) = (x - y) / max(abs(y), 1.0)\n\
-             a = {e1}\n\
-             b = {e2}\n\
-             c = rel_spread(a, b)\n\
-             bb = bollinger(close, 8, 2.0)\n\
-             mc = macd(close, 4, 8, 3)\n\
-             b_ref = b + 0.0005\n\
-             d = where(a > b_ref, a[1], bb)\n\
-             cond1 = crossover(a, b_ref) or (c > 0.0005 and mc >= 0.0005)\n\
-             cond2 = crossunder(a, b_ref) or since(a < b - 0.0005) > {lag_k}\n\
-             entry = true if (cond1 and d == d) else false\n\
-             exit = cond2 or not cond1\n"
-        )
-    })
+    (
+        op_pool,
+        0usize..26,
+        0usize..26,
+        0usize..26,
+        0usize..4,
+        1usize..=4,
+    )
+        .prop_map(|(cands, i1, i2, i3, combo, lag_k)| {
+            let e1 = &cands[i1 % cands.len()];
+            let e2 = &cands[i2 % cands.len()];
+            let e3 = &cands[i3 % cands.len()];
+            let combined = match combo {
+                0 => format!("+{e1} + (-{e2})"),
+                1 => format!("clamp({e1}, min({e2}, {e3}), max({e2}, {e3}) + 1.0)"),
+                2 => format!("({e1} - {e2}) ** 2.0 / max(volume, 0.0)"),
+                _ => format!("mod(-close, 3.17) + mod(+open, volume) - (-{e3})"),
+            };
+            format!(
+                "def rel_spread(x, y) = (x - y) / max(abs(y), 1.0)\n\
+                 tag = \"p4\"\n\
+                 a = {e1}\n\
+                 b = {e2}\n\
+                 c = rel_spread(a, b)\n\
+                 comb = {combined}\n\
+                 div_zero = +a / volume\n\
+                 bb = bollinger(close, 8, 2.0)\n\
+                 mc = macd(close, 4, 8, 3)\n\
+                 b_ref = b + 0.0005\n\
+                 d = where(a > b_ref, a[1], bb)\n\
+                 chained = (b - 0.0005) < b_ref < (b + 1000.0)\n\
+                 b_ie = (a > b_ref) if (mc >= 0.0005) else (c < -0.0005)\n\
+                 b_lag = b_ie[{lag_k}]\n\
+                 cond1 = crossover(a, b_ref) or (c > 0.0005 and mc >= 0.0005) or (chained and tag == \"p4\" and comb == comb)\n\
+                 cond2 = crossunder(a, b_ref) or since(a < b - 0.0005) > {lag_k} or (div_zero > 0.0005 and b_lag)\n\
+                 entry = true if (cond1 and d == d) else false\n\
+                 exit = cond2 or not cond1\n"
+            )
+        })
 }
 
 fn assert_outputs_and_state_eq(
@@ -328,10 +369,12 @@ x27 = cov(high, low, 6)
 x28 = linreg_slope(close, 6)
 x29 = linreg_intercept(close, 6)
 x30 = percentile_rank(close, 6)
+x31 = mean(close, 5)
+s_tag = \"tier1\"
 c1 = crossover(x12, x13)
 c2 = crossunder(x12, x13)
 s0 = since(c1)
-entry = (x24 > -1e9 and x25 > -1e9 and c1) or (x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10 + x11 + x14 + x15 + x16 + x17 + x18 + x19 + x20 + x21 + x22 + x23 + x26 + x27 + x28 + x29 + x30) > 0.0
+entry = (x24 > -1e9 and x25 > -1e9 and c1 and s_tag == \"tier1\") or (x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10 + x11 + x14 + x15 + x16 + x17 + x18 + x19 + x20 + x21 + x22 + x23 + x26 + x27 + x28 + x29 + x30 + x31) > 0.0
 exit = c2 or s0 >= 3
 ";
     let ir = compile_src(src);

@@ -205,6 +205,14 @@ impl Executor {
         self.vals.get(id.0 as usize).copied()
     }
 
+    /// Returns the string constant associated with `id`, if `id` evaluates to [`NodeVal::Str`].
+    pub fn str_value(&self, id: NodeId) -> Option<&str> {
+        match self.node_value(id) {
+            Some(NodeVal::Str(idx)) => self.strings.get(idx as usize).map(String::as_str),
+            _ => None,
+        }
+    }
+
     fn step_inner(&mut self, bar: Bar) -> BarOutput {
         for i in 0..self.ops.len() {
             let val = eval_compiled(
