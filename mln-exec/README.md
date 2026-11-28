@@ -23,7 +23,7 @@ use mln_exec::{Bar, Executor};
 use mln_ir::lower_default;
 use mln_lang::parse;
 
-let src = "s = sma(close, 3)\nentry = s > open\nexit = close < open";
+let src = "s = sma(close, 3)\nentry = close > s\nexit = close < open";
 let parsed = parse(src);
 assert!(parsed.diags.is_empty());
 let ir = lower_default(&parsed.program).unwrap();
