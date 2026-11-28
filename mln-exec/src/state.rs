@@ -1,6 +1,7 @@
 //! Per-node incremental state structs, bar validation, and snapshots.
 
 use mln_check::Tf;
+use mln_lang::TfUnit;
 use mln_std::eval::clean;
 use mln_std::TriBool;
 
@@ -59,6 +60,316 @@ pub enum NodeVal {
     Bool(TriBool),
     Tf(Tf),
     Str(u32),
+}
+
+/// Position side exposed to LangMelogne programs via `position.side`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PositionSide {
+    #[default]
+    Flat,
+    Long,
+    Short,
+}
+
+impl PositionSide {
+    /// Returns the string constant index in `Executor::strings`.
+    #[inline]
+    pub(crate) const fn str_idx(self) -> u32 {
+        match self {
+            PositionSide::Flat => 0,
+            PositionSide::Long => 1,
+            PositionSide::Short => 2,
+        }
+    }
+}
+
+/// Pure position state view supplied by the caller/trader each bar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PositionView {
+    pub side: PositionSide,
+    pub entry_price: f64,
+    pub bars_held: u64,
+    pub pnl: f64,
+}
+
+impl Default for PositionView {
+    fn default() -> Self {
+        Self {
+            side: PositionSide::Flat,
+            entry_price: f64::NAN,
+            bars_held: 0,
+            pnl: 0.0,
+        }
+    }
+}
+
+/// Helper adapter maintaining a pure [`PositionView`] from discrete strategy signals.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PositionTracker {
+    view: PositionView,
+    pending_enter_long: Option<f64>,
+    pending_exit: bool,
+}
+
+impl Default for PositionTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PositionTracker {
+    /// Creates a flat position tracker.
+    pub fn new() -> Self {
+        Self {
+            view: PositionView::default(),
+            pending_enter_long: None,
+            pending_exit: false,
+        }
+    }
+
+    /// Returns the [`PositionView`] at the start of the current `bar`, updating PnL and
+    /// `bars_held` after applying any entry/exit fill triggered by the previous bar.
+    pub fn begin_bar(&mut self, bar: &Bar) -> PositionView {
+        if self.pending_exit {
+            self.view = PositionView::default();
+            self.pending_exit = false;
+        }
+        if let Some(fill_price) = self.pending_enter_long.take() {
+            self.view.side = PositionSide::Long;
+            self.view.entry_price = fill_price;
+            self.view.bars_held = 0;
+        }
+        if self.view.side != PositionSide::Flat {
+            self.view.bars_held += 1;
+            self.view.pnl = match self.view.side {
+                PositionSide::Long => clean(bar.close - self.view.entry_price),
+                PositionSide::Short => clean(self.view.entry_price - bar.close),
+                PositionSide::Flat => 0.0,
+            };
+        }
+        self.view
+    }
+
+    /// Consumes the strategy's `BarOutput` signals at the close of `bar`.
+    pub fn end_bar(&mut self, bar: &Bar, out: &BarOutput) {
+        if self.view.side == PositionSide::Flat && out.entry_signal == 1 {
+            self.pending_enter_long = Some(bar.close);
+        } else if self.view.side != PositionSide::Flat && out.exit_signal == 1 {
+            self.pending_exit = true;
+        }
+    }
+
+    /// Returns the current [`PositionView`].
+    pub fn view(&self) -> PositionView {
+        self.view
+    }
+}
+
+/// Trading session / calendar alignment for multi-timeframe bucketing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SessionCalendar {
+    pub offset_secs: i64,
+}
+
+impl SessionCalendar {
+    /// Standard UTC calendar bucketing (`offset_secs = 0`).
+    pub const fn utc() -> Self {
+        Self { offset_secs: 0 }
+    }
+
+    /// Calendar bucketing shifted by `offset_secs` (for local exchange sessions or shifted tests).
+    pub const fn with_offset(offset_secs: i64) -> Self {
+        Self { offset_secs }
+    }
+
+    /// Maps an epoch timestamp (seconds) into a causal monotonic bucket index for `tf`.
+    pub const fn bucket(self, ts_secs: i64, tf: Tf) -> i64 {
+        let shifted = ts_secs.saturating_add(self.offset_secs);
+        match tf.unit {
+            TfUnit::Week => {
+                let day = shifted.div_euclid(86_400);
+                // 1970-01-01 was Thursday (+3 shifts Monday to index 0).
+                (day + 3).div_euclid(7 * (tf.n as i64))
+            }
+            TfUnit::Minute | TfUnit::Hour | TfUnit::Day => {
+                let tf_secs = (tf.minutes() as i64) * 60;
+                shifted.div_euclid(tf_secs)
+            }
+        }
+    }
+}
+
+/// Aligns a sorted secondary symbol series to `primary_bars` timestamps without lookahead.
+///
+/// Exact timestamp matches emit `Some(sym_bar)`. Gaps where no bar exists for the secondary
+/// symbol at a primary timestamp emit `None`, which causes the executor to hold the last
+/// seen bar values and mark `.stale == true`.
+pub fn align_symbol_bars(
+    primary_bars: &[Bar],
+    sym_bars: &[Bar],
+) -> Result<Vec<Option<Bar>>, ExecError> {
+    let mut aligned = Vec::with_capacity(primary_bars.len());
+    let mut sym_idx = 0usize;
+    let mut prev_sym_ts: Option<i64> = None;
+
+    for b in primary_bars {
+        while let Some(sb) = sym_bars.get(sym_idx) {
+            if let Some(prev) = prev_sym_ts {
+                if sb.timestamp < prev {
+                    return Err(ExecError::NonMonotonicTimestamp {
+                        prev,
+                        cur: sb.timestamp,
+                    });
+                }
+            }
+            if sb.timestamp < b.timestamp {
+                prev_sym_ts = Some(sb.timestamp);
+                sym_idx += 1;
+            } else {
+                break;
+            }
+        }
+        if let Some(sb) = sym_bars.get(sym_idx) {
+            if sb.timestamp == b.timestamp {
+                validate_bar(sb)?;
+                prev_sym_ts = Some(sb.timestamp);
+                aligned.push(Some(*sb));
+                sym_idx += 1;
+                continue;
+            }
+        }
+        aligned.push(None);
+    }
+
+    Ok(aligned)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SymbolState {
+    pub(crate) has_bar: bool,
+    pub(crate) open: f64,
+    pub(crate) high: f64,
+    pub(crate) low: f64,
+    pub(crate) close: f64,
+    pub(crate) volume: f64,
+    pub(crate) stale: TriBool,
+}
+
+impl Default for SymbolState {
+    fn default() -> Self {
+        Self {
+            has_bar: false,
+            open: f64::NAN,
+            high: f64::NAN,
+            low: f64::NAN,
+            close: f64::NAN,
+            volume: f64::NAN,
+            stale: TriBool::True,
+        }
+    }
+}
+
+impl SymbolState {
+    pub(crate) fn update(&mut self, incoming: Option<Bar>) {
+        match incoming {
+            Some(b) => {
+                self.has_bar = true;
+                self.open = clean(b.open);
+                self.high = clean(b.high);
+                self.low = clean(b.low);
+                self.close = clean(b.close);
+                self.volume = clean(b.volume);
+                self.stale = TriBool::False;
+            }
+            None => {
+                self.stale = TriBool::True;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct InProgressBar {
+    pub(crate) has_bar: bool,
+    pub(crate) timestamp: i64,
+    pub(crate) open: f64,
+    pub(crate) high: f64,
+    pub(crate) low: f64,
+    pub(crate) close: f64,
+    pub(crate) volume: f64,
+}
+
+impl Default for InProgressBar {
+    fn default() -> Self {
+        Self {
+            has_bar: false,
+            timestamp: 0,
+            open: f64::NAN,
+            high: f64::NAN,
+            low: f64::NAN,
+            close: f64::NAN,
+            volume: f64::NAN,
+        }
+    }
+}
+
+impl InProgressBar {
+    pub(crate) fn accumulate(&mut self, bar: Bar) {
+        if !self.has_bar {
+            self.has_bar = true;
+            self.timestamp = bar.timestamp;
+            self.open = clean(bar.open);
+            self.high = clean(bar.high);
+            self.low = clean(bar.low);
+            self.close = clean(bar.close);
+            self.volume = clean(bar.volume);
+        } else {
+            self.timestamp = bar.timestamp;
+            self.high = self.high.max(clean(bar.high));
+            self.low = self.low.min(clean(bar.low));
+            self.close = clean(bar.close);
+            self.volume = clean(self.volume + bar.volume);
+        }
+    }
+
+    pub(crate) fn take_completed(&mut self) -> Option<Bar> {
+        if !self.has_bar {
+            return None;
+        }
+        let bar = Bar::new(
+            self.timestamp,
+            self.open,
+            self.high,
+            self.low,
+            self.close,
+            self.volume,
+        );
+        *self = Self::default();
+        Some(bar)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TfTracker {
+    pub(crate) tf: Tf,
+    pub(crate) current_bucket: Option<i64>,
+    pub(crate) primary: InProgressBar,
+    pub(crate) symbols: Vec<InProgressBar>,
+    pub(crate) completed_symbols: Vec<SymbolState>,
+    pub(crate) node_indices: Vec<usize>,
+}
+
+impl TfTracker {
+    pub(crate) fn new(tf: Tf, num_symbols: usize, node_indices: Vec<usize>) -> Self {
+        Self {
+            tf,
+            current_bucket: None,
+            primary: InProgressBar::default(),
+            symbols: vec![InProgressBar::default(); num_symbols],
+            completed_symbols: vec![SymbolState::default(); num_symbols],
+            node_indices,
+        }
+    }
 }
 
 /// Validates a bar strictly: rejects non-finite OHLCV values, `high < low`, and negative volume.
@@ -426,7 +737,14 @@ pub(crate) enum NodeState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutorSnapshot {
     pub(crate) ir_fingerprint: u64,
+    pub(crate) calendar: SessionCalendar,
     pub(crate) bar_count: u64,
+    pub(crate) last_timestamp: Option<i64>,
+    pub(crate) prev_side: PositionSide,
     pub(crate) node_states: Vec<NodeState>,
     pub(crate) node_vals: Vec<NodeVal>,
+    pub(crate) state_slots: Vec<NodeVal>,
+    pub(crate) state_initialized: Vec<bool>,
+    pub(crate) symbol_states: Vec<SymbolState>,
+    pub(crate) tf_trackers: Vec<TfTracker>,
 }

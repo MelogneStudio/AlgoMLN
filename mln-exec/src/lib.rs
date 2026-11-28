@@ -37,4 +37,7 @@ pub use executor::Executor;
 pub use oracle::{
     eval_oracle, eval_source_oracle, ExecError, OracleOutput, SeriesInputs, ValueSeries,
 };
-pub use state::{Bar, BarOutput, ExecutorSnapshot, NodeVal};
+pub use state::{
+    align_symbol_bars, Bar, BarOutput, ExecutorSnapshot, NodeVal, PositionSide, PositionTracker,
+    PositionView, SessionCalendar,
+};

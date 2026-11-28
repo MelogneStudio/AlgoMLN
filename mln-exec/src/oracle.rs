@@ -62,6 +62,8 @@ pub enum ExecError {
     InvalidNode(String),
     InvalidBar(String),
     SnapshotMismatch,
+    SymbolCountMismatch { expected: usize, got: usize },
+    NonMonotonicTimestamp { prev: i64, cur: i64 },
 }
 
 impl fmt::Display for ExecError {
@@ -75,6 +77,14 @@ impl fmt::Display for ExecError {
             ExecError::SnapshotMismatch => {
                 f.write_str("snapshot does not match this executor's IR graph")
             }
+            ExecError::SymbolCountMismatch { expected, got } => write!(
+                f,
+                "expected {expected} secondary symbol input(s), got {got}"
+            ),
+            ExecError::NonMonotonicTimestamp { prev, cur } => write!(
+                f,
+                "bar timestamp {cur} is earlier than previous bar timestamp {prev}"
+            ),
         }
     }
 }
@@ -486,6 +496,12 @@ fn eval_node(
             }
         }
         IrOp::Builtin(name) => eval_builtin(name, node, values),
+        IrOp::Position(_) | IrOp::SymbolSeries { .. } | IrOp::StateRead(_) => {
+            Err(ExecError::UnsupportedOp(
+                "Phase 5 stateful/context ops require incremental Executor::step_with_context"
+                    .into(),
+            ))
+        }
     }
 }
 
