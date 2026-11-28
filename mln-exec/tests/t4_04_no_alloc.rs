@@ -2,7 +2,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use mln_exec::{Bar, Executor};
+use mln_exec::{Bar, Executor, PositionSide, PositionView};
 use mln_ir::lower_default;
 use mln_lang::parse;
 
@@ -135,5 +135,95 @@ exit = crossunder(s, e) or since(s > e) > 10
     assert_eq!(
         reallocs, 0,
         "expected 0 heap reallocs in step/run_chunk_into, saw {reallocs}"
+    );
+
+    // Verify Phase 5 features (state, on, while, position.*, symbol().*, @ 1d) also do 0 heap allocations.
+    let p5_src = "\
+state peak:
+    init = 0.0
+    reset = exit
+on enter:
+    peak = close
+while long:
+    peak = max(peak, high)
+sym_d = symbol(\"INFY\").close @ 1d
+sym_s = symbol(\"INFY\").stale
+entry = position.side == \"flat\" and not sym_s and close > sym_d
+exit = position.side == \"long\" and (close < peak * 0.99 or position.bars_held >= 5)
+";
+    let p5_parsed = parse(p5_src);
+    assert!(p5_parsed.diags.is_empty());
+    let p5_ir = lower_default(&p5_parsed.program).expect("lower p5");
+    let mut p5_exec = Executor::new(&p5_ir).expect("p5 exec");
+
+    for (i, &b) in warmup_bars.iter().enumerate() {
+        let mut shifted = b;
+        shifted.timestamp = 1_700_006_400 + (i as i64) * 600;
+        let sb = Some(shifted);
+        black_box(
+            p5_exec
+                .step_with_context(shifted, PositionView::default(), &[sb])
+                .expect("p5 warm"),
+        );
+    }
+
+    let p5_live: Vec<Bar> = live_bars
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| {
+            let mut nb = b;
+            nb.timestamp = 1_700_100_000 + (i as i64) * 600;
+            nb
+        })
+        .collect();
+    let p5_positions: Vec<PositionView> = (0..500)
+        .map(|i| PositionView {
+            side: if i % 2 == 0 {
+                PositionSide::Long
+            } else {
+                PositionSide::Flat
+            },
+            entry_price: 100.0,
+            bars_held: (i % 5) as u64,
+            pnl: 1.0,
+        })
+        .collect();
+    let p5_syms: Vec<Option<Bar>> = p5_live[..1000]
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| (i % 3 != 0).then_some(b))
+        .collect();
+
+    ALLOC_CALLS.store(0, Ordering::SeqCst);
+    REALLOC_CALLS.store(0, Ordering::SeqCst);
+    COUNTING.store(true, Ordering::SeqCst);
+
+    for i in 0..500 {
+        let out = p5_exec
+            .step_with_context(p5_live[i], p5_positions[i], &[p5_syms[i]])
+            .expect("p5 step");
+        black_box(out);
+    }
+    chunk_out.clear();
+    p5_exec
+        .run_chunk_with_context_into(
+            &p5_live[500..1000],
+            &p5_positions,
+            &p5_syms[500..1000],
+            &mut chunk_out,
+        )
+        .expect("p5 chunk");
+    black_box(chunk_out.as_slice());
+
+    COUNTING.store(false, Ordering::SeqCst);
+    let p5_allocs = ALLOC_CALLS.load(Ordering::SeqCst);
+    let p5_reallocs = REALLOC_CALLS.load(Ordering::SeqCst);
+    assert_eq!(
+        p5_allocs, 0,
+        "Phase 5 step_with_context allocated {p5_allocs}"
+    );
+    assert_eq!(
+        p5_reallocs, 0,
+        "Phase 5 step_with_context reallocated {p5_reallocs}"
     );
 }

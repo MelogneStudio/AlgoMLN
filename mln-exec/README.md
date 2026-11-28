@@ -4,13 +4,15 @@ Reference oracle interpreter and zero-allocation incremental streaming executor 
 
 ## Public API
 
-- **Incremental Executor (Phase 4)**:
-  - `Executor::new(ir: &IrGraph) -> Result<Executor, ExecError>`
+- **Incremental Executor (Phases 4 & 5)**:
+  - `Executor::new(ir: &IrGraph) -> Result<Executor, ExecError>` / `Executor::new_with_calendar(ir, SessionCalendar)`
   - `Executor::step(&mut self, bar: Bar) -> Result<BarOutput, ExecError>`
+  - `Executor::step_with_context(&mut self, bar: Bar, pos: PositionView, symbols: &[Option<Bar>]) -> Result<BarOutput, ExecError>`
   - `Executor::run_chunk(&mut self, bars: &[Bar]) -> Result<Vec<BarOutput>, ExecError>`
   - `Executor::run_chunk_into(&mut self, bars: &[Bar], out: &mut Vec<BarOutput>) -> Result<(), ExecError>`
+  - `Executor::run_chunk_with_context_into(...)` / `align_symbol_bars`
   - `Executor::snapshot(&self) -> ExecutorSnapshot` / `Executor::restore(&mut self, snap: &ExecutorSnapshot) -> Result<(), ExecError>`
-  - `Bar`, `BarOutput`, `NodeVal`, `ExecutorSnapshot`
+  - `Bar`, `BarOutput`, `NodeVal`, `PositionSide`, `PositionView`, `PositionTracker`, `SessionCalendar`, `ExecutorSnapshot`
 - **Whole-Array Oracle (Phase 3)**:
   - `eval_oracle(graph: &IrGraph, inputs: &SeriesInputs) -> Result<OracleOutput, ExecError>`
   - `eval_source_oracle(src: &str, inputs: &SeriesInputs) -> Result<(IrGraph, OracleOutput), ExecError>`
