@@ -130,9 +130,6 @@ impl<'a> Lowerer<'a> {
         clock: IrClock,
         ty: IrTy,
     ) -> NodeId {
-        if matches!(clock, IrClock::Tf(_)) {
-            return self.graph.intern(op, inputs, const_args, clock, ty);
-        }
         if let Some(bidx) = self.active_block {
             let scope = (1u64 << 63) | (bidx as u64);
             let (id, created) = self
@@ -151,7 +148,7 @@ impl<'a> Lowerer<'a> {
             let (id, created) = self
                 .graph
                 .intern_scoped(scope, op, inputs, const_args, clock, ty);
-            if created {
+            if created && !matches!(clock, IrClock::Tf(_)) {
                 self.graph.schedule.push(IrExecStep::EvalNode(id));
             }
             id

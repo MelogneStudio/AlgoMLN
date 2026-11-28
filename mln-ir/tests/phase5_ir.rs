@@ -80,3 +80,41 @@ exit = false
         .iter()
         .any(|n| matches!(n.op, IrOp::StateRead(id) if id == graph.states[0].id)));
 }
+
+#[test]
+fn higher_tf_state_read_respects_epoch_and_block_nodes_stay_scoped() {
+    let src = "\
+state dp:
+    init = close @ 1d
+before = dp
+on enter:
+    dp = high @ 1d
+after = dp
+entry = after > before
+exit = false
+";
+    let parsed = parse(src);
+    assert!(parsed.diags.is_empty(), "{:?}", parsed.diags);
+    let graph = lower_default(&parsed.program).expect("lower succeeds");
+
+    let before_id = graph
+        .bindings
+        .iter()
+        .find(|(k, _)| k == "before")
+        .unwrap()
+        .1;
+    let after_id = graph.bindings.iter().find(|(k, _)| k == "after").unwrap().1;
+    assert_ne!(before_id, after_id);
+
+    // `high @ 1d` inside `on enter:` must live in `state_blocks[0].nodes` and not top-level `schedule`.
+    assert!(
+        !graph.state_blocks[0].nodes.is_empty(),
+        "expected block-scoped @1d node in blk.nodes"
+    );
+    for &blk_node in &graph.state_blocks[0].nodes {
+        assert!(!graph
+            .schedule
+            .iter()
+            .any(|step| matches!(step, IrExecStep::EvalNode(id) if *id == blk_node)));
+    }
+}
