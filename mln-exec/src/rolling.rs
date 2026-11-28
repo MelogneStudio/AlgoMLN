@@ -157,7 +157,7 @@ impl WindowMonoid for StatsSummary {
                 let nf = n as f64;
                 let delta = mb - ma;
                 let mean = ma + delta * (nb as f64) / nf;
-                let m2 = m2a + m2b + delta * delta * ((na * nb) as f64) / nf;
+                let m2 = m2a + m2b + delta * delta * ((na as f64) * (nb as f64)) / nf;
                 StatsSummary::Valid { count: n, mean, m2 }
             }
             _ => StatsSummary::Invalid,
@@ -223,7 +223,7 @@ impl WindowMonoid for PairStatsSummary {
                 let nf = n as f64;
                 let dx = mxb - mxa;
                 let dy = myb - mya;
-                let weight = ((na * nb) as f64) / nf;
+                let weight = ((na as f64) * (nb as f64)) / nf;
                 PairStatsSummary::Valid {
                     count: n,
                     mx: mxa + dx * (nb as f64) / nf,
@@ -287,7 +287,7 @@ impl WindowMonoid for LinregSummary {
                 LinregSummary::Valid {
                     count: n,
                     mean_y: ma + dy * (nb as f64) / nf,
-                    cov_iy: ca + cb + dx * dy * ((na * nb) as f64) / nf,
+                    cov_iy: ca + cb + dx * dy * ((na as f64) * (nb as f64)) / nf,
                 }
             }
             _ => LinregSummary::Invalid,
@@ -563,5 +563,65 @@ mod tests {
             panic!();
         };
         assert_eq!(wsum2, 400.0);
+    }
+
+    #[test]
+    fn summary_merge_handles_large_counts_without_u32_overflow() {
+        let na = 200_000;
+        let nb = 200_000;
+        let expected_weight = (na as f64) * (nb as f64) / ((na + nb) as f64);
+
+        let sa = StatsSummary::Valid {
+            count: na,
+            mean: 1.0,
+            m2: 0.0,
+        };
+        let sb = StatsSummary::Valid {
+            count: nb,
+            mean: 3.0,
+            m2: 0.0,
+        };
+        let StatsSummary::Valid { count, mean, m2 } = StatsSummary::merge(sa, sb) else {
+            panic!();
+        };
+        assert_eq!(count, na + nb);
+        assert_eq!(mean, 2.0);
+        assert_eq!(m2, 4.0 * expected_weight);
+
+        let pa = PairStatsSummary::Valid {
+            count: na,
+            mx: 1.0,
+            my: 2.0,
+            m2x: 0.0,
+            m2y: 0.0,
+            cxy: 0.0,
+        };
+        let pb = PairStatsSummary::Valid {
+            count: nb,
+            mx: 3.0,
+            my: 6.0,
+            m2x: 0.0,
+            m2y: 0.0,
+            cxy: 0.0,
+        };
+        let PairStatsSummary::Valid { cxy, .. } = PairStatsSummary::merge(pa, pb) else {
+            panic!();
+        };
+        assert_eq!(cxy, 8.0 * expected_weight);
+
+        let la = LinregSummary::Valid {
+            count: na,
+            mean_y: 1.0,
+            cov_iy: 0.0,
+        };
+        let lb = LinregSummary::Valid {
+            count: nb,
+            mean_y: 3.0,
+            cov_iy: 0.0,
+        };
+        let LinregSummary::Valid { cov_iy, .. } = LinregSummary::merge(la, lb) else {
+            panic!();
+        };
+        assert_eq!(cov_iy, ((na + nb) as f64) * 0.5 * 2.0 * expected_weight);
     }
 }
