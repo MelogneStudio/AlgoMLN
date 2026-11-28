@@ -718,3 +718,40 @@ exit = crossunder(s, e)
     assert!(step_exec.node_value(NodeId(0)).is_some());
     assert_ne!(ir.nodes[0].ty, IrTy::Str);
 }
+
+#[test]
+fn executor_rejects_mismatched_node_ids_and_inconsistent_op_types() {
+    let mut bad_id = compile_src("entry = close > open\nexit = false");
+    bad_id.nodes[0].id = NodeId(2);
+    assert!(matches!(
+        Executor::new(&bad_id),
+        Err(ExecError::InvalidNode(_))
+    ));
+
+    let mut non_topo = compile_src("entry = close > open\nexit = false");
+    non_topo.nodes[0].id = NodeId(2);
+    non_topo.nodes[2].inputs[0] = NodeId(1);
+    assert!(matches!(
+        Executor::new(&non_topo),
+        Err(ExecError::InvalidNode(_))
+    ));
+
+    let mut bad_series_ty = compile_src("entry = close > open\nexit = false");
+    bad_series_ty.nodes[0].ty = IrTy::Bool;
+    assert!(matches!(
+        Executor::new(&bad_series_ty),
+        Err(ExecError::InvalidNode(_))
+    ));
+
+    let mut bad_builtin_ty = compile_src("entry = sma(close, 3) > 0\nexit = false");
+    let sma_idx = bad_builtin_ty
+        .nodes
+        .iter()
+        .position(|n| matches!(n.op, mln_ir::IrOp::Builtin("sma")))
+        .expect("sma node");
+    bad_builtin_ty.nodes[sma_idx].ty = IrTy::Bool;
+    assert!(matches!(
+        Executor::new(&bad_builtin_ty),
+        Err(ExecError::InvalidNode(_))
+    ));
+}

@@ -90,13 +90,19 @@ impl Executor {
         let mut vals = Vec::with_capacity(ir.nodes.len());
         let mut strings = Vec::new();
 
-        for node in &ir.nodes {
+        for (i, node) in ir.nodes.iter().enumerate() {
+            if node.id.0 as usize != i {
+                return Err(ExecError::InvalidNode(format!(
+                    "node at index {i} has mismatched id {}",
+                    node.id
+                )));
+            }
             if matches!(node.clock, IrClock::Tf(_)) {
                 return Err(ExecError::UnsupportedOp(
                     "multi-timeframe clocks are not yet supported by incremental executor".into(),
                 ));
             }
-            let (op, state, init_val) = compile_node(node, ir.nodes.len(), &mut strings)?;
+            let (op, state, init_val) = compile_node(node, i, &ir.nodes, &mut strings)?;
             ops.push(op);
             states.push(state);
             vals.push(init_val);
@@ -711,19 +717,54 @@ fn eval_compiled(
     }
 }
 
-fn input_idx(node: &IrNode, pos: usize, node_count: usize) -> Result<usize, ExecError> {
+fn input_idx(node: &IrNode, pos: usize, cur_idx: usize) -> Result<usize, ExecError> {
     let id = node
         .inputs
         .get(pos)
         .ok_or_else(|| ExecError::InvalidNode(format!("missing input {pos} on {}", node.id)))?;
     let idx = id.0 as usize;
-    if idx >= node.id.0 as usize || idx >= node_count {
+    if idx >= cur_idx {
         return Err(ExecError::InvalidNode(format!(
             "non-topological input {id} on {}",
             node.id
         )));
     }
     Ok(idx)
+}
+
+fn is_numeric(ty: IrTy) -> bool {
+    matches!(ty, IrTy::Num | IrTy::Dec)
+}
+
+fn same_value_kind(a: IrTy, b: IrTy) -> bool {
+    (is_numeric(a) && is_numeric(b)) || a == b
+}
+
+fn typed_input(
+    node: &IrNode,
+    pos: usize,
+    nodes: &[IrNode],
+    cur_idx: usize,
+    expected: IrTy,
+) -> Result<usize, ExecError> {
+    let idx = input_idx(node, pos, cur_idx)?;
+    if !same_value_kind(nodes[idx].ty, expected) {
+        return Err(ExecError::InvalidNode(format!(
+            "input {pos} on {} expected {expected:?}, got {:?}",
+            node.id, nodes[idx].ty
+        )));
+    }
+    Ok(idx)
+}
+
+fn expect_ty(node: &IrNode, expected: IrTy) -> Result<(), ExecError> {
+    if !same_value_kind(node.ty, expected) {
+        return Err(ExecError::InvalidNode(format!(
+            "node {} expected output type {expected:?}, got {:?}",
+            node.id, node.ty
+        )));
+    }
+    Ok(())
 }
 
 fn const_usize(node: &IrNode, idx: usize, min: usize) -> Result<usize, ExecError> {
@@ -773,34 +814,43 @@ fn init_val_for_ty(ty: IrTy) -> NodeVal {
 
 fn compile_node(
     node: &IrNode,
-    node_count: usize,
+    cur_idx: usize,
+    nodes: &[IrNode],
     strings: &mut Vec<String>,
 ) -> Result<(CompiledOp, NodeState, NodeVal), ExecError> {
     let init = init_val_for_ty(node.ty);
     match &node.op {
-        IrOp::Series(field) => Ok((CompiledOp::Series(*field), NodeState::Stateless, init)),
+        IrOp::Series(field) => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((CompiledOp::Series(*field), NodeState::Stateless, init))
+        }
         IrOp::Const(c) => {
-            let v = match c {
+            let (expected_ty, v) = match c {
                 IrConst::Dec { value, pct } => {
                     let mut f = value.to_f64().unwrap_or(f64::NAN);
                     if *pct {
                         f /= 100.0;
                     }
-                    NodeVal::Num(clean(f))
+                    (IrTy::Num, NodeVal::Num(clean(f)))
                 }
-                IrConst::Int(i) => NodeVal::Num(*i as f64),
-                IrConst::Bool(b) => NodeVal::Bool(if *b { TriBool::True } else { TriBool::False }),
-                IrConst::Tf(tf) => NodeVal::Tf(*tf),
+                IrConst::Int(i) => (IrTy::Num, NodeVal::Num(*i as f64)),
+                IrConst::Bool(b) => (
+                    IrTy::Bool,
+                    NodeVal::Bool(if *b { TriBool::True } else { TriBool::False }),
+                ),
+                IrConst::Tf(tf) => (IrTy::Tf, NodeVal::Tf(*tf)),
                 IrConst::Str(s) => {
                     let sid = strings.len() as u32;
                     strings.push(s.clone());
-                    NodeVal::Str(sid)
+                    (IrTy::Str, NodeVal::Str(sid))
                 }
             };
+            expect_ty(node, expected_ty)?;
             Ok((CompiledOp::Const(v), NodeState::Stateless, v))
         }
         IrOp::Unary(op) => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = typed_input(node, 0, nodes, cur_idx, IrTy::Num)?;
             let cop = match op {
                 UnOp::Neg => CompiledOp::Neg(x),
                 UnOp::Pos => CompiledOp::Pos(x),
@@ -808,8 +858,9 @@ fn compile_node(
             Ok((cop, NodeState::Stateless, init))
         }
         IrOp::Binary(op) => {
-            let l = input_idx(node, 0, node_count)?;
-            let r = input_idx(node, 1, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let l = typed_input(node, 0, nodes, cur_idx, IrTy::Num)?;
+            let r = typed_input(node, 1, nodes, cur_idx, IrTy::Num)?;
             Ok((
                 CompiledOp::Bin { op: *op, l, r },
                 NodeState::Stateless,
@@ -817,8 +868,20 @@ fn compile_node(
             ))
         }
         IrOp::Compare(op) => {
-            let l = input_idx(node, 0, node_count)?;
-            let r = input_idx(node, 1, node_count)?;
+            expect_ty(node, IrTy::Bool)?;
+            let l = input_idx(node, 0, cur_idx)?;
+            let r = input_idx(node, 1, cur_idx)?;
+            if !same_value_kind(nodes[l].ty, nodes[r].ty) {
+                return Err(ExecError::InvalidNode(format!(
+                    "compare operand type mismatch on {}: {:?} vs {:?}",
+                    node.id, nodes[l].ty, nodes[r].ty
+                )));
+            }
+            if nodes[l].ty == IrTy::Str && !matches!(op, CmpOp::Eq | CmpOp::NotEq) {
+                return Err(ExecError::InvalidNode(
+                    "unsupported string comparison operator".into(),
+                ));
+            }
             Ok((
                 CompiledOp::Cmp { op: *op, l, r },
                 NodeState::Stateless,
@@ -826,27 +889,43 @@ fn compile_node(
             ))
         }
         IrOp::Not => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Bool)?;
+            let x = typed_input(node, 0, nodes, cur_idx, IrTy::Bool)?;
             Ok((CompiledOp::Not(x), NodeState::Stateless, init))
         }
         IrOp::And => {
-            let l = input_idx(node, 0, node_count)?;
-            let r = input_idx(node, 1, node_count)?;
+            expect_ty(node, IrTy::Bool)?;
+            let l = typed_input(node, 0, nodes, cur_idx, IrTy::Bool)?;
+            let r = typed_input(node, 1, nodes, cur_idx, IrTy::Bool)?;
             Ok((CompiledOp::And(l, r), NodeState::Stateless, init))
         }
         IrOp::Or => {
-            let l = input_idx(node, 0, node_count)?;
-            let r = input_idx(node, 1, node_count)?;
+            expect_ty(node, IrTy::Bool)?;
+            let l = typed_input(node, 0, nodes, cur_idx, IrTy::Bool)?;
+            let r = typed_input(node, 1, nodes, cur_idx, IrTy::Bool)?;
             Ok((CompiledOp::Or(l, r), NodeState::Stateless, init))
         }
         IrOp::IfElse => {
-            let c = input_idx(node, 0, node_count)?;
-            let t = input_idx(node, 1, node_count)?;
-            let e = input_idx(node, 2, node_count)?;
+            let c = typed_input(node, 0, nodes, cur_idx, IrTy::Bool)?;
+            let t = input_idx(node, 1, cur_idx)?;
+            let e = input_idx(node, 2, cur_idx)?;
+            if !same_value_kind(nodes[t].ty, nodes[e].ty) || !same_value_kind(node.ty, nodes[t].ty)
+            {
+                return Err(ExecError::InvalidNode(format!(
+                    "if_else branch/output type mismatch on {}",
+                    node.id
+                )));
+            }
             Ok((CompiledOp::IfElse { c, t, e }, NodeState::Stateless, init))
         }
         IrOp::Lag(k) => {
-            let src = input_idx(node, 0, node_count)?;
+            let src = input_idx(node, 0, cur_idx)?;
+            if !same_value_kind(node.ty, nodes[src].ty) {
+                return Err(ExecError::InvalidNode(format!(
+                    "lag output type {:?} mismatches input {:?}",
+                    node.ty, nodes[src].ty
+                )));
+            }
             match usize::try_from(*k) {
                 Ok(lag) if lag <= MAX_BUFFER_LEN => Ok((
                     CompiledOp::Lag {
@@ -866,81 +945,87 @@ fn compile_node(
                 )),
             }
         }
-        IrOp::Builtin(name) => compile_builtin(name, node, node_count, init),
+        IrOp::Builtin(name) => compile_builtin(name, node, cur_idx, nodes, init),
     }
 }
 
 fn compile_builtin(
     name: &str,
     node: &IrNode,
-    node_count: usize,
+    cur_idx: usize,
+    nodes: &[IrNode],
     init: NodeVal,
 ) -> Result<(CompiledOp, NodeState, NodeVal), ExecError> {
+    let num = |pos| typed_input(node, pos, nodes, cur_idx, IrTy::Num);
+    let bool_in = |pos| typed_input(node, pos, nodes, cur_idx, IrTy::Bool);
     match name {
-        "abs" => Ok((
-            CompiledOp::Abs(input_idx(node, 0, node_count)?),
-            NodeState::Stateless,
-            init,
-        )),
-        "sqrt" => Ok((
-            CompiledOp::Sqrt(input_idx(node, 0, node_count)?),
-            NodeState::Stateless,
-            init,
-        )),
-        "log" => Ok((
-            CompiledOp::Log(input_idx(node, 0, node_count)?),
-            NodeState::Stateless,
-            init,
-        )),
-        "exp" => Ok((
-            CompiledOp::Exp(input_idx(node, 0, node_count)?),
-            NodeState::Stateless,
-            init,
-        )),
-        "min" => Ok((
-            CompiledOp::Min(
-                input_idx(node, 0, node_count)?,
-                input_idx(node, 1, node_count)?,
-            ),
-            NodeState::Stateless,
-            init,
-        )),
-        "max" => Ok((
-            CompiledOp::Max(
-                input_idx(node, 0, node_count)?,
-                input_idx(node, 1, node_count)?,
-            ),
-            NodeState::Stateless,
-            init,
-        )),
-        "where" => Ok((
-            CompiledOp::Where {
-                c: input_idx(node, 0, node_count)?,
-                a: input_idx(node, 1, node_count)?,
-                b: input_idx(node, 2, node_count)?,
-            },
-            NodeState::Stateless,
-            init,
-        )),
-        "clamp" => Ok((
-            CompiledOp::Clamp {
-                x: input_idx(node, 0, node_count)?,
-                lo: input_idx(node, 1, node_count)?,
-                hi: input_idx(node, 2, node_count)?,
-            },
-            NodeState::Stateless,
-            init,
-        )),
-        "mod" => Ok((
-            CompiledOp::Mod(
-                input_idx(node, 0, node_count)?,
-                input_idx(node, 1, node_count)?,
-            ),
-            NodeState::Stateless,
-            init,
-        )),
+        "abs" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((CompiledOp::Abs(num(0)?), NodeState::Stateless, init))
+        }
+        "sqrt" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((CompiledOp::Sqrt(num(0)?), NodeState::Stateless, init))
+        }
+        "log" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((CompiledOp::Log(num(0)?), NodeState::Stateless, init))
+        }
+        "exp" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((CompiledOp::Exp(num(0)?), NodeState::Stateless, init))
+        }
+        "min" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((
+                CompiledOp::Min(num(0)?, num(1)?),
+                NodeState::Stateless,
+                init,
+            ))
+        }
+        "max" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((
+                CompiledOp::Max(num(0)?, num(1)?),
+                NodeState::Stateless,
+                init,
+            ))
+        }
+        "where" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((
+                CompiledOp::Where {
+                    c: bool_in(0)?,
+                    a: num(1)?,
+                    b: num(2)?,
+                },
+                NodeState::Stateless,
+                init,
+            ))
+        }
+        "clamp" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((
+                CompiledOp::Clamp {
+                    x: num(0)?,
+                    lo: num(1)?,
+                    hi: num(2)?,
+                },
+                NodeState::Stateless,
+                init,
+            ))
+        }
+        "mod" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((
+                CompiledOp::Mod(num(0)?, num(1)?),
+                NodeState::Stateless,
+                init,
+            ))
+        }
         "diff" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 0)?;
             Ok((
                 CompiledOp::Diff(x),
@@ -949,7 +1034,8 @@ fn compile_builtin(
             ))
         }
         "pct_change" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             Ok((
                 CompiledOp::PctChange(x),
@@ -957,13 +1043,17 @@ fn compile_builtin(
                 init,
             ))
         }
-        "cumsum" => Ok((
-            CompiledOp::Cumsum(input_idx(node, 0, node_count)?),
-            NodeState::Cumsum(CumsumState::new()),
-            init,
-        )),
+        "cumsum" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((
+                CompiledOp::Cumsum(num(0)?),
+                NodeState::Cumsum(CumsumState::new()),
+                init,
+            ))
+        }
         "sum" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             Ok((
                 CompiledOp::Sum(x),
@@ -972,7 +1062,8 @@ fn compile_builtin(
             ))
         }
         "mean" | "sma" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             Ok((
                 CompiledOp::Mean(x),
@@ -981,7 +1072,8 @@ fn compile_builtin(
             ))
         }
         "var" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 2)?;
             Ok((
                 CompiledOp::Var(x),
@@ -990,7 +1082,8 @@ fn compile_builtin(
             ))
         }
         "std" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 2)?;
             Ok((
                 CompiledOp::Std(x),
@@ -999,7 +1092,8 @@ fn compile_builtin(
             ))
         }
         "bollinger" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 2)?;
             let mult = const_f64(node, 1)?;
             Ok((
@@ -1009,7 +1103,8 @@ fn compile_builtin(
             ))
         }
         "ema" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             let alpha = 2.0 / ((n as f64) + 1.0);
             Ok((
@@ -1019,7 +1114,8 @@ fn compile_builtin(
             ))
         }
         "rma" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             let alpha = 1.0 / (n as f64);
             Ok((
@@ -1029,7 +1125,8 @@ fn compile_builtin(
             ))
         }
         "wma" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             let nf = n as f64;
             let denom = nf * (nf + 1.0) / 2.0;
@@ -1040,7 +1137,8 @@ fn compile_builtin(
             ))
         }
         "highest" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             Ok((
                 CompiledOp::Highest(x),
@@ -1049,7 +1147,8 @@ fn compile_builtin(
             ))
         }
         "lowest" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             Ok((
                 CompiledOp::Lowest(x),
@@ -1058,23 +1157,28 @@ fn compile_builtin(
             ))
         }
         "rsi" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             Ok((CompiledOp::Rsi(x), NodeState::Rsi(RsiState::new(n)), init))
         }
-        "tr" => Ok((
-            CompiledOp::Tr {
-                h: input_idx(node, 0, node_count)?,
-                l: input_idx(node, 1, node_count)?,
-                c: input_idx(node, 2, node_count)?,
-            },
-            NodeState::Tr(TrState::new()),
-            init,
-        )),
+        "tr" => {
+            expect_ty(node, IrTy::Num)?;
+            Ok((
+                CompiledOp::Tr {
+                    h: num(0)?,
+                    l: num(1)?,
+                    c: num(2)?,
+                },
+                NodeState::Tr(TrState::new()),
+                init,
+            ))
+        }
         "atr" => {
-            let h = input_idx(node, 0, node_count)?;
-            let l = input_idx(node, 1, node_count)?;
-            let c = input_idx(node, 2, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let h = num(0)?;
+            let l = num(1)?;
+            let c = num(2)?;
             let n = const_usize(node, 0, 1)?;
             Ok((
                 CompiledOp::Atr { h, l, c },
@@ -1083,7 +1187,8 @@ fn compile_builtin(
             ))
         }
         "macd" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let fast = const_usize(node, 0, 1)?;
             let slow = const_usize(node, 1, 1)?;
             let sig = const_usize(node, 2, 1)?;
@@ -1094,8 +1199,9 @@ fn compile_builtin(
             ))
         }
         "cov" => {
-            let x = input_idx(node, 0, node_count)?;
-            let y = input_idx(node, 1, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
+            let y = num(1)?;
             let n = const_usize(node, 0, 2)?;
             Ok((
                 CompiledOp::Cov(x, y),
@@ -1104,8 +1210,9 @@ fn compile_builtin(
             ))
         }
         "corr" => {
-            let x = input_idx(node, 0, node_count)?;
-            let y = input_idx(node, 1, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
+            let y = num(1)?;
             let n = const_usize(node, 0, 2)?;
             Ok((
                 CompiledOp::Corr(x, y),
@@ -1114,7 +1221,8 @@ fn compile_builtin(
             ))
         }
         "linreg_slope" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 2)?;
             Ok((
                 CompiledOp::LinregSlope(x),
@@ -1123,7 +1231,8 @@ fn compile_builtin(
             ))
         }
         "linreg_intercept" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 2)?;
             Ok((
                 CompiledOp::LinregIntercept(x),
@@ -1132,7 +1241,8 @@ fn compile_builtin(
             ))
         }
         "percentile_rank" => {
-            let x = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let x = num(0)?;
             let n = const_usize(node, 0, 1)?;
             Ok((
                 CompiledOp::PercentileRank(x),
@@ -1141,8 +1251,9 @@ fn compile_builtin(
             ))
         }
         "crossover" => {
-            let a = input_idx(node, 0, node_count)?;
-            let b = input_idx(node, 1, node_count)?;
+            expect_ty(node, IrTy::Bool)?;
+            let a = num(0)?;
+            let b = num(1)?;
             Ok((
                 CompiledOp::Crossover(a, b),
                 NodeState::Cross(CrossState::new(true)),
@@ -1150,8 +1261,9 @@ fn compile_builtin(
             ))
         }
         "crossunder" => {
-            let a = input_idx(node, 0, node_count)?;
-            let b = input_idx(node, 1, node_count)?;
+            expect_ty(node, IrTy::Bool)?;
+            let a = num(0)?;
+            let b = num(1)?;
             Ok((
                 CompiledOp::Crossunder(a, b),
                 NodeState::Cross(CrossState::new(false)),
@@ -1159,7 +1271,8 @@ fn compile_builtin(
             ))
         }
         "since" => {
-            let c = input_idx(node, 0, node_count)?;
+            expect_ty(node, IrTy::Num)?;
+            let c = bool_in(0)?;
             Ok((
                 CompiledOp::Since(c),
                 NodeState::Since(SinceState::new()),
