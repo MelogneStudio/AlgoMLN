@@ -760,6 +760,47 @@ fn const_tf_and_str_series_handled_explicitly() {
         Executor::new(&bad_lag),
         Err(ExecError::InvalidNode(_))
     ));
+
+    // Runtime IfElse on Tf/Str returns InvalidNode cleanly in both oracle and Executor.
+    let mut bad_ifelse = IrGraph::new(base);
+    let cond = bad_ifelse.intern(
+        IrOp::Const(IrConst::Bool(true)),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Bool,
+    );
+    let s1 = bad_ifelse.intern(
+        IrOp::Const(IrConst::Str("a".into())),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Str,
+    );
+    let s2 = bad_ifelse.intern(
+        IrOp::Const(IrConst::Str("b".into())),
+        vec![],
+        vec![],
+        IrClock::Constant,
+        IrTy::Str,
+    );
+    let ie = bad_ifelse.intern(
+        IrOp::IfElse,
+        vec![cond, s1, s2],
+        vec![],
+        IrClock::Constant,
+        IrTy::Str,
+    );
+    bad_ifelse.entry = ie;
+    bad_ifelse.exit = ie;
+    assert!(matches!(
+        eval_oracle(&bad_ifelse, &bars),
+        Err(ExecError::InvalidNode(_))
+    ));
+    assert!(matches!(
+        Executor::new(&bad_ifelse),
+        Err(ExecError::InvalidNode(_))
+    ));
 }
 
 #[test]

@@ -436,42 +436,10 @@ fn eval_node(
                         .collect();
                     Ok(ValueSeries::Bool(out))
                 }
-                (ValueSeries::Tf(t), ValueSeries::Tf(e)) => {
-                    if c.len() != len || t.len() != len || e.len() != len {
-                        return Err(ExecError::InvalidNode("if_else length mismatch".into()));
-                    }
-                    let out = c
-                        .iter()
-                        .zip(t.iter())
-                        .zip(e.iter())
-                        .map(|((&cond, &tv), &ev)| match cond {
-                            TriBool::True => Ok(tv),
-                            TriBool::False => Ok(ev),
-                            TriBool::Unknown => Err(ExecError::InvalidNode(
-                                "if_else on Tf cannot evaluate Unknown condition".into(),
-                            )),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok(ValueSeries::Tf(out))
-                }
-                (ValueSeries::Str(t), ValueSeries::Str(e)) => {
-                    if c.len() != len || t.len() != len || e.len() != len {
-                        return Err(ExecError::InvalidNode("if_else length mismatch".into()));
-                    }
-                    let out = c
-                        .iter()
-                        .zip(t.iter())
-                        .zip(e.iter())
-                        .map(|((&cond, tv), ev)| match cond {
-                            TriBool::True => Ok(tv.clone()),
-                            TriBool::False => Ok(ev.clone()),
-                            TriBool::Unknown => Err(ExecError::InvalidNode(
-                                "if_else on Str cannot evaluate Unknown condition".into(),
-                            )),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok(ValueSeries::Str(out))
-                }
+                (ValueSeries::Tf(_), ValueSeries::Tf(_))
+                | (ValueSeries::Str(_), ValueSeries::Str(_)) => Err(ExecError::InvalidNode(
+                    "if_else is not supported on Tf or Str series".into(),
+                )),
                 _ => Err(ExecError::InvalidNode("if_else branch mismatch".into())),
             }
         }

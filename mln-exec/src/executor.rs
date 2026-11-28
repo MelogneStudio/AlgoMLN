@@ -372,16 +372,6 @@ fn eval_compiled(
                     TriBool::False => b,
                     TriBool::Unknown => TriBool::Unknown,
                 }),
-                (NodeVal::Tf(a), NodeVal::Tf(b)) => match cond {
-                    TriBool::True => NodeVal::Tf(a),
-                    TriBool::False => NodeVal::Tf(b),
-                    TriBool::Unknown => NodeVal::Num(f64::NAN),
-                },
-                (NodeVal::Str(a), NodeVal::Str(b)) => match cond {
-                    TriBool::True => NodeVal::Str(a),
-                    TriBool::False => NodeVal::Str(b),
-                    TriBool::Unknown => NodeVal::Num(f64::NAN),
-                },
                 _ => NodeVal::Num(f64::NAN),
             }
         }
@@ -904,6 +894,11 @@ fn compile_node(
                     "if_else branch/output type mismatch on {}",
                     node.id
                 )));
+            }
+            if matches!(nodes[t].ty, IrTy::Tf | IrTy::Str) {
+                return Err(ExecError::InvalidNode(
+                    "if_else is not supported on Tf or Str series".into(),
+                ));
             }
             Ok((CompiledOp::IfElse { c, t, e }, NodeState::Stateless, init))
         }
