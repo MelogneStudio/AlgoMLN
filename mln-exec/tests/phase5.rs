@@ -3,7 +3,9 @@ use mln_exec::{
     align_symbol_bars, Bar, BarOutput, ExecError, Executor, NodeVal, PositionSide, PositionTracker,
     PositionView, SessionCalendar,
 };
-use mln_ir::{lower_default, IrClock, IrConst, IrGraph, IrOp, IrTy, SeriesField};
+use mln_ir::{
+    lower_default, IrClock, IrConst, IrGraph, IrOp, IrReset, IrStateVar, IrTy, SeriesField, StateId,
+};
 use mln_lang::{parse, CmpOp, TfUnit};
 use mln_std::TriBool;
 
@@ -727,4 +729,32 @@ fn zero_tf_is_guarded_in_bucket_and_rejected_by_executor() {
     ir.entry = cmp;
     ir.exit = cmp;
     assert!(matches!(Executor::new(&ir), Err(ExecError::InvalidNode(_))));
+}
+
+#[test]
+fn non_numeric_bool_state_var_rejected_by_executor() {
+    for (c, ty) in [
+        (IrConst::Str("x".into()), IrTy::Str),
+        (IrConst::Tf(Tf::new(1, TfUnit::Day)), IrTy::Tf),
+    ] {
+        let mut ir = IrGraph::new(Tf::new(1, TfUnit::Minute));
+        let init_node = ir.intern(IrOp::Const(c), vec![], vec![], IrClock::Constant, ty);
+        let b_false = ir.intern(
+            IrOp::Const(IrConst::Bool(false)),
+            vec![],
+            vec![],
+            IrClock::Constant,
+            IrTy::Bool,
+        );
+        ir.states.push(IrStateVar {
+            id: StateId(0),
+            name: "bad_state".into(),
+            ty,
+            init: init_node,
+            reset: IrReset::None,
+        });
+        ir.entry = b_false;
+        ir.exit = b_false;
+        assert!(matches!(Executor::new(&ir), Err(ExecError::InvalidNode(_))));
+    }
 }

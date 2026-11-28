@@ -204,6 +204,12 @@ impl Executor {
                     st.id
                 )));
             }
+            if !matches!(st.ty, IrTy::Num | IrTy::Dec | IrTy::Bool) {
+                return Err(ExecError::InvalidNode(format!(
+                    "state variable `{}` must be Num, Dec, or Bool, found {:?}",
+                    st.name, st.ty
+                )));
+            }
             let init_idx = st.init.0 as usize;
             let init_node = ir
                 .nodes
