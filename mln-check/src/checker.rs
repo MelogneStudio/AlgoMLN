@@ -1697,11 +1697,22 @@ impl<'a> Checker<'a> {
         let mut param_bindings = Vec::with_capacity(param_count);
         let mut arg_types = Vec::with_capacity(param_count);
         for (idx, param) in def.params.iter().enumerate() {
-            let ce = if let Some(arg_expr) = bound[idx] {
+            let mut ce = if let Some(arg_expr) = bound[idx] {
                 self.check_expr(arg_expr, ambient, self_assign_target)
             } else {
                 self.check_def_default(def, idx, ambient)
             };
+            if matches!(ce.ty, Ty::Position | Ty::Symbol) {
+                self.emit_error(
+                    "E0300",
+                    format!(
+                        "values of type `{}` cannot be passed as arguments to `{}`",
+                        ce.ty, def.name.name
+                    ),
+                    ce.span,
+                );
+                ce = self.err_expr(ce.span);
+            }
             arg_types.push(ce.ty);
             param_bindings.push((
                 param.name.name.clone(),

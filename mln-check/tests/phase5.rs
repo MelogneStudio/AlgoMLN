@@ -128,6 +128,14 @@ fn rejects_bad_position_and_symbol_uses() {
         &run_check("symbol = 1\nentry = true\nexit = false"),
         "E0203",
     );
+    assert_has_code(
+        &run_check("def f(p) = p.side\nentry = f(position) == \"flat\"\nexit = false"),
+        "E0300",
+    );
+    assert_has_code(
+        &run_check("def g(s) = s.close\nentry = g(symbol(\"INFY\")) > 0.0\nexit = false"),
+        "E0300",
+    );
 }
 
 #[test]
