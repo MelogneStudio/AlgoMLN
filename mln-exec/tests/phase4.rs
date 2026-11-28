@@ -407,8 +407,12 @@ co = corr(close, volume, 7)
 lr = linreg_slope(close, 7)
 pr = percentile_rank(close, 7)
 cs = cumsum(diff(close, 1))
+hi = highest(high, 6)
+lo = lowest(low, 6)
+w = wma(close, 6)
+cv = cov(high, low, 7)
 lag = close[3]
-entry = crossover(s, e) or (r > 55.0 and m == m and st > 0.0 and co == co and lr == lr and pr >= 0.5 and cs == cs and bb > lag and a > 0.0)
+entry = crossover(s, e) or (r > 55.0 and m == m and st > 0.0 and co == co and lr == lr and pr >= 0.5 and cs == cs and bb > lag and a > 0.0 and hi >= lo and w > 0.0 and cv == cv)
 exit = crossunder(s, e) or since(s > e) >= 4
 ";
     let ir = compile_src(src);
@@ -528,6 +532,18 @@ fn t4_05_warmup_honesty() {
             "crossover",
             "entry = crossover(sma(close, 5), ema(close, 9))\nexit = since(close > open) >= 0\n",
         ),
+        (
+            "wma_highest_lowest",
+            "entry = wma(close, 6) > 0.0 and highest(high, 7) > 0.0\nexit = lowest(low, 5) > 0.0\n",
+        ),
+        (
+            "cov_percentile",
+            "entry = cov(high, low, 6) == cov(high, low, 6)\nexit = percentile_rank(close, 8) >= 0.0\n",
+        ),
+        (
+            "diff_pct_linreg_intercept",
+            "entry = diff(close, 3) == diff(close, 3) and pct_change(close, 2) > -1.0\nexit = linreg_intercept(close, 6) > -1e9\n",
+        ),
     ];
 
     let bars = clean_bars(80);
@@ -574,6 +590,18 @@ fn t4_05_warmup_honesty() {
                 .expect("exit warmup")
                 .base_bars_estimate as usize,
             "{name}: exit warmup mismatch"
+        );
+        assert!(
+            out[actual_entry_warmup..]
+                .iter()
+                .all(|o| !matches!(o.entry, TriBool::Unknown)),
+            "{name}: entry reverted to Unknown after warmup"
+        );
+        assert!(
+            out[actual_exit_warmup..]
+                .iter()
+                .all(|o| !matches!(o.exit, TriBool::Unknown)),
+            "{name}: exit reverted to Unknown after warmup"
         );
     }
 }
