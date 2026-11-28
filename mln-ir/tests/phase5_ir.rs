@@ -1,4 +1,4 @@
-use mln_ir::{dump_ir, lower_default, IrClock, IrExecStep, IrOp, IrReset};
+use mln_ir::{dump_ir, lower_default, IrClock, IrExecStep, IrOp, IrReset, IrTrigger};
 use mln_lang::parse;
 
 #[test]
@@ -150,4 +150,61 @@ while long:
         .schedule
         .iter()
         .any(|s| matches!(s, IrExecStep::EvalNode(id) if *id == graph.exit)));
+}
+
+#[test]
+fn lowers_all_reset_trigger_guard_variants_and_def_state_epochs() {
+    let src = "\
+state s:
+    init = 0.0
+    reset = enter
+def read_s() = s
+r0 = read_s()
+on exit:
+    s = close
+while short:
+    s = min(s, low)
+while flat:
+    s = 0.0
+on close > open:
+    s = s + 1.0
+while close < open:
+    s = s - 1.0
+r1 = read_s()
+entry = r1 > r0
+exit = false
+";
+    let parsed = parse(src);
+    assert!(parsed.diags.is_empty(), "{:?}", parsed.diags);
+    let graph = lower_default(&parsed.program).expect("lower succeeds");
+
+    assert_eq!(graph.states[0].reset, IrReset::Enter);
+    assert_eq!(graph.state_blocks.len(), 5);
+    assert!(matches!(graph.state_blocks[0].trigger, IrTrigger::OnExit));
+    assert!(matches!(
+        graph.state_blocks[1].trigger,
+        IrTrigger::WhileShort
+    ));
+    assert!(matches!(
+        graph.state_blocks[2].trigger,
+        IrTrigger::WhileFlat
+    ));
+    assert!(matches!(
+        graph.state_blocks[3].trigger,
+        IrTrigger::OnExpr(_)
+    ));
+    assert!(matches!(
+        graph.state_blocks[4].trigger,
+        IrTrigger::WhileExpr(_)
+    ));
+
+    let r0_id = graph.bindings.iter().find(|(k, _)| k == "r0").unwrap().1;
+    let r1_id = graph.bindings.iter().find(|(k, _)| k == "r1").unwrap().1;
+    assert_ne!(r0_id, r1_id);
+
+    let dumped = dump_ir(&graph);
+    assert!(dumped.contains("reset=enter"));
+    assert!(dumped.contains("on exit:"));
+    assert!(dumped.contains("while short:"));
+    assert!(dumped.contains("while flat:"));
 }
