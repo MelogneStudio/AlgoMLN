@@ -2,7 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use mln_check::Tf;
-use mln_exec::{eval_oracle, eval_source_oracle, ExecError, SeriesInputs, ValueSeries};
+use mln_exec::{
+    eval_oracle, eval_source_oracle, Bar, ExecError, Executor, SeriesInputs, ValueSeries,
+};
 use mln_ir::{IrClock, IrConst, IrGraph, IrOp, IrTy, NodeId, SeriesField};
 use mln_lang::{CmpOp, TfUnit, UnOp};
 use mln_std::{tier1_registry, ReturnTy, TriBool, TIER1_OPS};
@@ -568,41 +570,89 @@ fn malformed_ir_and_huge_lag_return_error_or_nan_without_panicking() {
         Err(ExecError::InvalidNode(_))
     ));
 
-    // Huge lag (>= len, including u64::MAX) must produce all NaN / Unknown without panicking.
-    let mut huge_lag = IrGraph::new(base);
-    let close = huge_lag.intern(
+    // Lag >= len (within MAX_BUFFER_LEN) produces all NaN / Unknown cleanly in both engines.
+    let mut long_lag = IrGraph::new(base);
+    let close = long_lag.intern(
         IrOp::Series(SeriesField::Close),
         vec![],
         vec![],
         IrClock::Base,
         IrTy::Num,
     );
-    let lag_num = huge_lag.intern(
-        IrOp::Lag(u64::MAX),
-        vec![close],
-        vec![],
-        IrClock::Base,
-        IrTy::Num,
-    );
-    let bool_const = huge_lag.intern(
+    let lag_num = long_lag.intern(IrOp::Lag(10), vec![close], vec![], IrClock::Base, IrTy::Num);
+    let bool_const = long_lag.intern(
         IrOp::Const(IrConst::Bool(true)),
         vec![],
         vec![],
         IrClock::Constant,
         IrTy::Bool,
     );
-    let lag_bool = huge_lag.intern(
-        IrOp::Lag(u64::MAX),
+    let lag_bool = long_lag.intern(
+        IrOp::Lag(10),
         vec![bool_const],
         vec![],
         IrClock::Base,
         IrTy::Bool,
     );
-    huge_lag.entry = lag_bool;
-    huge_lag.exit = lag_bool;
-    let out = eval_oracle(&huge_lag, &bars).expect("huge lag should evaluate cleanly");
+    long_lag.entry = lag_bool;
+    long_lag.exit = lag_bool;
+    let out = eval_oracle(&long_lag, &bars).expect("long lag should evaluate cleanly");
     assert!(out.node_num(lag_num).unwrap().iter().all(|v| v.is_nan()));
     assert_eq!(out.entry, vec![TriBool::Unknown; 3]);
+
+    let mut exec = Executor::new(&long_lag).expect("long lag within limit compiles");
+    let bar_vec: Vec<Bar> = (0..3)
+        .map(|i| {
+            Bar::new(
+                1_700_000_000 + (i as i64) * 60,
+                bars.open[i],
+                bars.high[i],
+                bars.low[i],
+                bars.close[i],
+                bars.volume[i],
+            )
+        })
+        .collect();
+    let exec_out = exec.run_chunk(&bar_vec).expect("run_chunk");
+    assert!(exec_out.iter().all(|o| o.entry == TriBool::Unknown));
+
+    // Lag > MAX_BUFFER_LEN (1_000_001 and u64::MAX) returns InvalidNode in both oracle and Executor.
+    for huge_k in [1_000_001_u64, u64::MAX] {
+        let mut huge_lag = IrGraph::new(base);
+        let c = huge_lag.intern(
+            IrOp::Series(SeriesField::Close),
+            vec![],
+            vec![],
+            IrClock::Base,
+            IrTy::Num,
+        );
+        let ln = huge_lag.intern(IrOp::Lag(huge_k), vec![c], vec![], IrClock::Base, IrTy::Num);
+        let b = huge_lag.intern(
+            IrOp::Const(IrConst::Bool(true)),
+            vec![],
+            vec![],
+            IrClock::Constant,
+            IrTy::Bool,
+        );
+        let lb = huge_lag.intern(
+            IrOp::Lag(huge_k),
+            vec![b],
+            vec![],
+            IrClock::Base,
+            IrTy::Bool,
+        );
+        huge_lag.entry = lb;
+        huge_lag.exit = lb;
+        let _ = ln;
+        assert!(matches!(
+            eval_oracle(&huge_lag, &bars),
+            Err(ExecError::InvalidNode(_))
+        ));
+        assert!(matches!(
+            Executor::new(&huge_lag),
+            Err(ExecError::InvalidNode(_))
+        ));
+    }
 }
 
 #[test]
@@ -704,6 +754,10 @@ fn const_tf_and_str_series_handled_explicitly() {
     bad_lag.exit = l;
     assert!(matches!(
         eval_oracle(&bad_lag, &bars),
+        Err(ExecError::InvalidNode(_))
+    ));
+    assert!(matches!(
+        Executor::new(&bad_lag),
         Err(ExecError::InvalidNode(_))
     ));
 }

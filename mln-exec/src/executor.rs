@@ -6,7 +6,7 @@ use mln_std::eval::{clean, safe_div};
 use mln_std::TriBool;
 use rust_decimal::prelude::ToPrimitive;
 
-use crate::oracle::ExecError;
+use crate::oracle::{ExecError, MAX_BUFFER_LEN};
 use crate::rolling::{
     ExtremaSummary, LagRing, PairStatsSummary, PercentileWindow, StatsSummary, SumSummary,
     TwoStackWindow, WmaSummary,
@@ -16,8 +16,6 @@ use crate::state::{
     EwmState, ExecutorSnapshot, MacdState, NodeState, NodeVal, RsiState, SinceState, TrState,
 };
 use mln_ir::{IrClock, IrConst, IrGraph, IrNode, IrOp, IrTy, NodeId, SeriesField};
-
-const MAX_BUFFER_LEN: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy)]
 enum CompiledOp {
@@ -31,7 +29,7 @@ enum CompiledOp {
     And(usize, usize),
     Or(usize, usize),
     IfElse { c: usize, t: usize, e: usize },
-    Lag { src: usize, always_missing: bool },
+    Lag(usize),
     Abs(usize),
     Sqrt(usize),
     Log(usize),
@@ -387,17 +385,8 @@ fn eval_compiled(
                 _ => NodeVal::Num(f64::NAN),
             }
         }
-        CompiledOp::Lag {
-            src,
-            always_missing,
-        } => {
+        CompiledOp::Lag(src) => {
             let cur = vals[src];
-            if always_missing {
-                return match cur {
-                    NodeVal::Bool(_) => NodeVal::Bool(TriBool::Unknown),
-                    _ => NodeVal::Num(f64::NAN),
-                };
-            }
             let NodeState::Lag(ring) = state else {
                 return cur;
             };
@@ -920,30 +909,31 @@ fn compile_node(
         }
         IrOp::Lag(k) => {
             let src = input_idx(node, 0, cur_idx)?;
+            if matches!(nodes[src].ty, IrTy::Tf | IrTy::Str) {
+                return Err(ExecError::InvalidNode(
+                    "lag is not supported on Tf or Str series".into(),
+                ));
+            }
             if !same_value_kind(node.ty, nodes[src].ty) {
                 return Err(ExecError::InvalidNode(format!(
                     "lag output type {:?} mismatches input {:?}",
                     node.ty, nodes[src].ty
                 )));
             }
-            match usize::try_from(*k) {
-                Ok(lag) if lag <= MAX_BUFFER_LEN => Ok((
-                    CompiledOp::Lag {
-                        src,
-                        always_missing: false,
-                    },
-                    NodeState::Lag(LagRing::new(lag, init)),
-                    init,
-                )),
-                _ => Ok((
-                    CompiledOp::Lag {
-                        src,
-                        always_missing: true,
-                    },
-                    NodeState::Stateless,
-                    init,
-                )),
-            }
+            let lag = usize::try_from(*k)
+                .ok()
+                .filter(|&lag| lag <= MAX_BUFFER_LEN)
+                .ok_or_else(|| {
+                    ExecError::InvalidNode(format!(
+                        "lag {k} exceeds maximum buffer length {MAX_BUFFER_LEN} on {}",
+                        node.id
+                    ))
+                })?;
+            Ok((
+                CompiledOp::Lag(src),
+                NodeState::Lag(LagRing::new(lag, init)),
+                init,
+            ))
         }
         IrOp::Builtin(name) => compile_builtin(name, node, cur_idx, nodes, init),
     }

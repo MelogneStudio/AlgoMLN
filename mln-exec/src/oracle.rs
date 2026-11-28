@@ -12,6 +12,8 @@ use mln_std::eval::{
 use mln_std::TriBool;
 use rust_decimal::prelude::ToPrimitive;
 
+pub(crate) const MAX_BUFFER_LEN: usize = 1_000_000;
+
 /// Bar series inputs supplied to the oracle interpreter.
 #[derive(Debug, Clone)]
 pub struct SeriesInputs {
@@ -474,17 +476,26 @@ fn eval_node(
             }
         }
         IrOp::Lag(k) => {
-            let k_opt = usize::try_from(*k).ok().filter(|&k| k < len);
+            let k = usize::try_from(*k)
+                .ok()
+                .filter(|&k| k <= MAX_BUFFER_LEN)
+                .ok_or_else(|| {
+                    ExecError::InvalidNode(format!(
+                        "lag {k} exceeds maximum buffer length {MAX_BUFFER_LEN} on {}",
+                        node.id
+                    ))
+                })?;
             match get_val(values, input(node, 0)?)? {
                 ValueSeries::Num(x) => {
                     if x.len() != len {
                         return Err(ExecError::InvalidNode("lag input length mismatch".into()));
                     }
-                    let out = match k_opt {
-                        None => vec![f64::NAN; len],
-                        Some(k) => (0..len)
+                    let out = if k >= len {
+                        vec![f64::NAN; len]
+                    } else {
+                        (0..len)
                             .map(|t| if t < k { f64::NAN } else { clean(x[t - k]) })
-                            .collect(),
+                            .collect()
                     };
                     Ok(ValueSeries::Num(out))
                 }
@@ -492,11 +503,12 @@ fn eval_node(
                     if x.len() != len {
                         return Err(ExecError::InvalidNode("lag input length mismatch".into()));
                     }
-                    let out = match k_opt {
-                        None => vec![TriBool::Unknown; len],
-                        Some(k) => (0..len)
+                    let out = if k >= len {
+                        vec![TriBool::Unknown; len]
+                    } else {
+                        (0..len)
                             .map(|t| if t < k { TriBool::Unknown } else { x[t - k] })
-                            .collect(),
+                            .collect()
                     };
                     Ok(ValueSeries::Bool(out))
                 }
